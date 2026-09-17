@@ -1,0 +1,297 @@
+"""The measuring instrument, measured.
+
+`scripts/graph_transition_study.py` produces the numbers that answer whether the
+batch amendment is worth having. An instrument with no tests produces confident
+wrong numbers, and a performance claim is exactly the kind of claim nobody
+re-derives by hand. So the parts that decide what gets compared are tested here
+against a stub producer: no graph is built, because none of these properties is
+about the graph.
+
+The deadlock test is the one that matters most. The first version of `_run`
+polled `poll()` in a loop and called `communicate()` only after the process had
+exited. That hangs forever the moment a child writes more than a pipe buffer:
+the child blocks on a full stderr, so it never exits, so `poll()` never returns,
+so nothing drains the pipe. It survived `click`, whose output is small, and the
+repositories this study exists for are the large ones.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.graph_transition_study import (  # noqa: E402
+    _apply_transition,
+    _largest_source,
+    _median,
+    _run,
+    study_repository,
+)
+
+
+def test_a_chatty_child_does_not_deadlock_the_measurement():
+    """More output than a pipe buffer, read while the process is still alive."""
+    program = (
+        "import sys;"
+        "sys.stderr.write('x' * 400000);"
+        "sys.stderr.write('\\nFiles:      7\\nNodes:      9\\n');"
+        "sys.exit(0)"
+    )
+    measured = _run([sys.executable, "-c", program])
+    assert measured["returncode"] == 0
+    assert measured["counts"] == {"files": 7, "nodes": 9}
+
+
+def test_a_failing_run_is_reported_rather_than_scored(tmp_path):
+    measured = _run([sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"])
+    assert measured["returncode"] == 3
+    assert "boom" in measured["stderr_tail"]
+
+
+def test_the_edited_file_is_the_largest_tracked_parseable_one(tmp_path):
+    """Deterministic, and never a file the producer would not read.
+
+    An untracked file is not part of the repository under measurement, and a
+    file in a language the producer ignores would make the transition a no-op.
+    """
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "small.py").write_text("a = 1\n", encoding="utf-8")
+    (root / "pkg" / "big.py").write_text("b = 1\n" * 200, encoding="utf-8")
+    (root / "huge.md").write_text("m\n" * 5000, encoding="utf-8")
+    (root / "untracked.py").write_text("c = 1\n" * 4000, encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "pkg", "huge.md"], check=True)
+
+    chosen = _largest_source(root)
+    assert chosen is not None
+    assert chosen.name == "big.py"
+
+
+def test_a_repository_git_cannot_list_yields_no_target(tmp_path):
+    root = tmp_path / "loose"
+    root.mkdir()
+    (root / "a.py").write_text("a = 1\n", encoding="utf-8")
+    assert _largest_source(root) is None
+
+
+def test_the_transition_appends_and_moves_no_existing_line(tmp_path):
+    """Line numbers must not shift, or the measurement is of a reflow."""
+    path = tmp_path / "module.py"
+    original = "def existing():\n    return 1\n"
+    path.write_text(original, encoding="utf-8")
+    _apply_transition(path)
+    updated = path.read_text(encoding="utf-8")
+    assert updated.startswith(original)
+    assert "gt_transition_probe" in updated
+    assert updated.splitlines()[:2] == original.splitlines()[:2]
+
+
+@pytest.mark.parametrize(("values", "expected"), [
+    ([], 0.0), ([4.0], 4.0), ([3.0, 1.0], 2.0), ([5.0, 1.0, 3.0], 3.0),
+    ([4.0, 1.0, 3.0, 2.0], 2.5),
+])
+def test_the_median_is_the_median(values, expected):
+    assert _median(values) == expected
+
+
+def test_the_arms_alternate_and_only_the_candidate_names_a_parent(tmp_path, monkeypatch):
+    """The two properties the comparison rests on.
+
+    Alternating is what keeps machine drift off one arm. Naming the parent is
+    what makes the candidate an amend rather than a second full build, and if
+    that flag were dropped the study would compare a rebuild against a rebuild
+    and report a speedup of one.
+    """
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text("a = 1\n" * 50, encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+
+    seen: list[list[str]] = []
+
+    def fake_run(command, environment=None, timeout=None):
+        seen.append(list(command))
+        return {"seconds": 1.0, "returncode": 0, "peak_mb": 1.0, "counts": {},
+                "amend_result": {}, "stderr_tail": ""}
+
+    monkeypatch.setattr("scripts.graph_transition_study._run", fake_run)
+    monkeypatch.setattr("scripts.graph_transition_study._parity_digest",
+                        lambda _database: {"nodes": "1:aaaa"})
+
+    report = study_repository("repo", root, tmp_path / "work", "/bin/true",
+                              repetitions=3, max_files=10, workers=1)
+    assert report["status"] == "measured"
+    # One parent build, then three baseline/candidate pairs.
+    assert len(seen) == 7
+    assert not any("-amend-parent" in item for item in seen[0])
+    arms = [row["arm"] for row in report["runs"]]
+    assert arms == ["baseline", "candidate"] * 3
+    for command, arm in zip(seen[1:], arms, strict=True):
+        assert ("-amend-parent" in command) is (arm == "candidate"), (arm, command)
+
+
+def test_a_disagreeing_run_is_reported_as_a_parity_failure(tmp_path, monkeypatch):
+    """The claim is equality across every run, not equality within an arm."""
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text("a = 1\n" * 50, encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+
+    monkeypatch.setattr("scripts.graph_transition_study._run",
+                        lambda command, environment=None, timeout=None: {
+                            "seconds": 1.0, "returncode": 0, "peak_mb": 1.0,
+                            "counts": {}, "amend_result": {}, "stderr_tail": ""})
+    answers = iter([{"nodes": "1:aaaa"}, {"nodes": "1:bbbb"}])
+    monkeypatch.setattr("scripts.graph_transition_study._parity_digest",
+                        lambda _database: next(answers))
+
+    report = study_repository("repo", root, tmp_path / "work", "/bin/true",
+                              repetitions=1, max_files=10, workers=1)
+    assert report["semantic_parity"] is False
+    assert report["distinct_digests"] == 2
+    # Both readings are retained when they disagree; one is enough when they do not.
+    assert len(report["parity"]) == 2
+
+
+def test_a_failed_arm_does_not_enter_the_medians(tmp_path, monkeypatch):
+    """A crash is not a fast run."""
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text("a = 1\n" * 50, encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+
+    calls = {"n": 0}
+
+    def fake_run(command, environment=None, timeout=None):
+        calls["n"] += 1
+        failed = "-amend-parent" in command and calls["n"] == 3
+        return {"seconds": 0.0 if failed else 2.0, "returncode": 1 if failed else 0,
+                "peak_mb": 1.0, "counts": {}, "amend_result": {}, "stderr_tail": ""}
+
+    monkeypatch.setattr("scripts.graph_transition_study._run", fake_run)
+    monkeypatch.setattr("scripts.graph_transition_study._parity_digest",
+                        lambda _database: {"nodes": "1:aaaa"})
+
+    report = study_repository("repo", root, tmp_path / "work", "/bin/true",
+                              repetitions=2, max_files=10, workers=1)
+    assert 0.0 not in report["candidate_seconds"]
+    assert report["candidate_median"] == 2.0
+
+
+def test_both_arms_get_the_parse_cache_the_harness_would_give_them(tmp_path, monkeypatch):
+    """The first version of this study left the cache off, and measured nothing.
+
+    `indexer._index_launch_environment` sets GT_PARSE_CACHE_ROOT for every
+    producer launch the harness makes. The study called the binary directly and
+    set nothing, so the amend re-parsed the whole repository before doing its
+    extra reconciliation work and came out slower -- a configuration production
+    never runs.
+
+    Both arms get the SAME root, because production gives both the same one: a
+    full rebuild after a one-file edit re-parses one file too. What remains to
+    compare is then the real question, whether retaining the parent's structural
+    rows beats rebuilding them.
+    """
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text("a = 1\n" * 50, encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+
+    seen: list[dict] = []
+
+    def fake_run(command, environment=None, timeout=None):
+        seen.append(dict(environment or {}))
+        return {"seconds": 1.0, "returncode": 0, "peak_mb": 1.0, "counts": {},
+                "amend_result": {}, "stderr_tail": ""}
+
+    monkeypatch.setattr("scripts.graph_transition_study._run", fake_run)
+    monkeypatch.setattr("scripts.graph_transition_study._parity_digest",
+                        lambda _database: {"nodes": "1:aaaa"})
+
+    report = study_repository("repo", root, tmp_path / "work", "/bin/true",
+                              repetitions=2, max_files=10, workers=1)
+    roots = {item.get("GT_PARSE_CACHE_ROOT") for item in seen}
+    assert len(seen) == 5
+    assert len(roots) == 1, f"the arms disagreed about the cache root: {roots}"
+    assert roots != {None}, "no parse cache root was configured"
+    assert report["parse_cache_root"] == next(iter(roots))
+    assert Path(report["parse_cache_root"]).is_dir()
+
+
+def test_a_run_that_exceeds_its_budget_is_killed_and_named():
+    """An instrument that can block forever cannot produce a report.
+
+    Measured: a full build of a 5,184-file repository ran 38 minutes at 100%
+    CPU without touching its output, while a 105-file one took 7 seconds. The
+    budget turns that from a block into a row.
+    """
+    import time as _time
+
+    started = _time.monotonic()
+    measured = _run([sys.executable, "-c", "import time; time.sleep(30)"], None, 1.0)
+    assert measured["timed_out"] is True
+    assert _time.monotonic() - started < 15, "the budget did not stop the process"
+
+
+def test_output_written_before_the_budget_expired_is_still_read():
+    """The tail names the pass the producer was in when it ran out."""
+    program = ("import sys, time; sys.stderr.write('Pass 3: resolving');"
+               "sys.stderr.flush(); time.sleep(30)")
+    measured = _run([sys.executable, "-c", program], None, 1.0)
+    assert measured["timed_out"] is True
+    assert "Pass 3: resolving" in measured["stderr_tail"]
+
+
+def test_a_repository_whose_parent_never_builds_is_a_result_not_a_crash(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text("a = 1\n" * 50, encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+
+    monkeypatch.setattr("scripts.graph_transition_study._run",
+                        lambda command, environment=None, timeout=None: {
+                            "seconds": 1200.0, "returncode": -9, "peak_mb": 1.0,
+                            "counts": {}, "amend_result": {}, "stderr_tail": "Pass 3",
+                            "timed_out": True})
+    report = study_repository("repo", root, tmp_path / "work", "/bin/true",
+                              repetitions=2, max_files=10, workers=1, timeout=1200.0)
+    assert report["status"] == "parent_build_exceeded_budget"
+    assert report["budget_seconds"] == 1200.0
+    assert "runs" not in report
+
+
+def test_a_timed_out_arm_never_enters_a_median(tmp_path, monkeypatch):
+    """Its duration is the budget, not the work."""
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text("a = 1\n" * 50, encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+
+    calls = {"n": 0}
+
+    def fake_run(command, environment=None, timeout=None):
+        calls["n"] += 1
+        late = "-amend-parent" in command and calls["n"] == 3
+        return {"seconds": 900.0 if late else 2.0, "returncode": -9 if late else 0,
+                "peak_mb": 1.0, "counts": {}, "amend_result": {}, "stderr_tail": "",
+                "timed_out": late}
+
+    monkeypatch.setattr("scripts.graph_transition_study._run", fake_run)
+    monkeypatch.setattr("scripts.graph_transition_study._parity_digest",
+                        lambda _database: {"nodes": "1:aaaa"})
+    report = study_repository("repo", root, tmp_path / "work", "/bin/true",
+                              repetitions=2, max_files=10, workers=1, timeout=900.0)
+    assert 900.0 not in report["candidate_seconds"]
+    assert report["candidate_median"] == 2.0
+    assert report["runs_exceeding_budget"] == 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
@@ -94,6 +95,13 @@ _BUILD_OBLIGATION_RE = re.compile(
     r"(?i)\b(?:build|install|compile|package|extension|import|setup\.py|"
     r"Makefile|docker)\b"
 )
+_QUOTED_LITERAL_RE = re.compile(r"(?:`([^`]+)`|'([^']+)'|\"([^\"]+)\")")
+_STARTS_WITH_RE = re.compile(r"(?i)\b(?:starts?\s+with|begins?\s+with|prefix(?:ed)?\s+by)\b")
+_CONTAINS_RE = re.compile(r"(?i)\bcontains?\b")
+_SEMANTIC_ASSERTION_RE = re.compile(
+    r"(?m)^GT_SEMANTIC_ASSERT\s+relation=(?P<relation>[a-z_]+)\s+"
+    r"literal_sha256=(?P<literal>[0-9a-f]{64})\s+result=(?P<result>[^\r\n]*)$"
+)
 
 
 def is_executable_check(command: str) -> bool:
@@ -116,6 +124,10 @@ class ObligationPredicate:
     kind: str
     scope: tuple[str, ...] = ()
     anchors: tuple[str, ...] = ()
+    operator: str = ""
+    literal: str = ""
+    expected_relation: str = ""
+    evidence_rule: str = ""
 
 
 @dataclass(frozen=True)
@@ -132,6 +144,230 @@ class PredicateReceipt:
     required_value: str = ""
     unit: str = ""
     coverage_basis: str = ""
+
+
+@dataclass(frozen=True, order=True)
+class DependencyIdentity:
+    """One typed input identity on which a predicate proof depends."""
+
+    kind: str
+    value: str
+
+
+@dataclass(frozen=True)
+class DependencyFootprint:
+    """Conservative dependency envelope for a semantic predicate receipt.
+
+    ``complete`` means the identities are sufficient to decide whether a
+    workspace edit can stale the proof. Recorded graph edges are useful
+    evidence, but do not establish completeness in the presence of unresolved
+    imports, dynamic loading, configuration, or environment inputs.
+    """
+
+    identities: tuple[DependencyIdentity, ...]
+    complete: bool
+    basis: str
+
+
+def normalize_dependency_path(path: str) -> str:
+    value = str(path or "").replace("\\", "/").strip()
+    while value.startswith("./"):
+        value = value[2:]
+    return value.strip("/")
+
+
+def conservative_execution_footprint(*, basis: str = "executed_check") -> DependencyFootprint:
+    """Bind a proof to all workspace and environment inputs when scope is unknown."""
+
+    return DependencyFootprint(
+        identities=(
+            DependencyIdentity("workspace", "."),
+            DependencyIdentity("environment", "*"),
+        ),
+        complete=False,
+        basis=basis,
+    )
+
+
+def recorded_graph_dependency_footprint(
+    proof_roots: Iterable[str],
+    file_dependencies: Iterable[tuple[str, str, str]],
+    *,
+    basis: str = "recorded_graph_dependencies",
+) -> DependencyFootprint:
+    """Preserve recorded transitive dependency identities without overstating coverage.
+
+    File dependency rows use the product graph direction ``source -> target``.
+    Even a successful closure walk remains incomplete because the graph may not
+    contain dynamic or unresolved dependencies.
+    """
+
+    roots = {
+        path
+        for raw in proof_roots
+        if (path := normalize_dependency_path(raw))
+    }
+    edges: dict[str, set[str]] = {}
+    for source, target, _kind in file_dependencies:
+        normalized_source = normalize_dependency_path(source)
+        normalized_target = normalize_dependency_path(target)
+        if normalized_source and normalized_target:
+            edges.setdefault(normalized_source, set()).add(normalized_target)
+    closure = set(roots)
+    pending = list(sorted(roots))
+    while pending:
+        source = pending.pop()
+        for target in sorted(edges.get(source, ())):
+            if target not in closure:
+                closure.add(target)
+                pending.append(target)
+    identities = [DependencyIdentity("path", path) for path in sorted(closure)]
+    identities.extend(
+        (DependencyIdentity("workspace", "."), DependencyIdentity("environment", "*"))
+    )
+    return DependencyFootprint(tuple(identities), complete=False, basis=basis)
+
+
+def certified_path_footprint(
+    paths: Iterable[str], *, basis: str
+) -> DependencyFootprint:
+    """Create a complete path-local footprint from a trusted direct witness."""
+
+    if basis != "live_artifact_stat":
+        raise ValueError("complete path footprint requires live_artifact_stat basis")
+    normalized = tuple(
+        sorted(
+            {
+                normalize_dependency_path(path)
+                for path in paths
+                if normalize_dependency_path(path)
+            }
+        )
+    )
+    if not normalized:
+        raise ValueError("complete path footprint requires at least one path")
+    return DependencyFootprint(
+        identities=tuple(DependencyIdentity("path", path) for path in normalized),
+        complete=True,
+        basis=basis,
+    )
+
+
+def predicate_receipt_footprint(
+    predicate: ObligationPredicate,
+    receipt: PredicateReceipt,
+) -> DependencyFootprint:
+    """Derive the narrowest dependency footprint proved by the receipt itself."""
+
+    # `scoped_artifact_assertion` is still an arbitrary user-selected command:
+    # lexical mentions of a path and words such as "exists" do not prove that
+    # the command depends only on that path. Only the harness-owned live stat
+    # boundary may call `certified_path_footprint`.
+    _ = predicate
+    return conservative_execution_footprint(basis=receipt.coverage_basis or receipt.kind)
+
+
+def dependency_footprint_affected(
+    footprint: DependencyFootprint,
+    edited_paths: Iterable[str],
+) -> bool:
+    """Return whether an edit invalidates a receipt with this footprint."""
+
+    edited = tuple(
+        path
+        for raw in edited_paths
+        if (path := normalize_dependency_path(raw))
+    )
+    if not edited:
+        return False
+    if not footprint.complete:
+        return True
+    for identity in footprint.identities:
+        if identity.kind == "workspace":
+            return True
+        if identity.kind != "path":
+            # Environment and other non-path identities cannot be shown
+            # disjoint from a workspace mutation by this edit witness.
+            return True
+        base = normalize_dependency_path(identity.value)
+        if not base:
+            return True
+        if any(
+            path == base or path.startswith(base + "/") or base.startswith(path + "/")
+            for path in edited
+        ):
+            return True
+    return False
+
+
+# Extensions and basenames that cannot reach an executed check through the
+# import/graph channel. This is an allowlist on purpose: unknown, extensionless,
+# or ambiguous names stay non-inert so unrecognized shapes keep invalidating.
+_INERT_EDIT_SUFFIXES = frozenset({
+    ".md", ".markdown", ".rst", ".adoc",
+    ".enhancement", ".bugfix", ".feature", ".doc", ".removal", ".misc",
+    ".towncrier",
+})
+_INERT_EDIT_BASENAMES = frozenset({
+    "license", "licence", "authors", "notice", "changelog", "changes",
+    "history", "contributors", "contributing", "codeowners",
+    ".mailmap", ".gitignore", ".gitattributes", ".dockerignore",
+    ".editorconfig",
+})
+
+
+def _declared_scope_root(identity_value: str) -> str:
+    """The top-level workspace directory a declared path identity occupies.
+
+    A root-level declared file makes the whole workspace its scope root (""),
+    which disables the inert narrowing for that footprint: nothing can be
+    shown disjoint from a root-scoped proof.
+    """
+
+    path = normalize_dependency_path(identity_value)
+    if "/" not in path:
+        return ""
+    return path.split("/", 1)[0]
+
+
+def edited_paths_provably_inert(
+    footprint: DependencyFootprint,
+    edited_paths: Iterable[str],
+) -> bool:
+    """Whether every edit is provably disjoint from a declared path scope.
+
+    This is the single narrowing of conservative workspace-wide invalidation.
+    It applies only when the receipt carries explicit ``path`` identities and
+    every edited path is (a) a non-code, non-config name with no import
+    channel and (b) outside every declared scope root. A ``changes/``
+    towncrier fragment qualifies against a ``tests/``-scoped bound check; any
+    source, config, dependency-manifest, template, or in-scope path still
+    invalidates. Footprints without declared ``path`` identities keep the
+    conservative behavior: every edit affects them.
+    """
+
+    roots = {
+        _declared_scope_root(identity.value)
+        for identity in footprint.identities
+        if identity.kind == "path" and identity.value
+    }
+    if not roots or "" in roots:
+        return False
+    edited = tuple(
+        path
+        for raw in edited_paths
+        if (path := normalize_dependency_path(raw))
+    )
+    if not edited:
+        return False
+    for path in edited:
+        name = path.rsplit("/", 1)[-1].lower()
+        suffix = name[name.rfind("."):] if "." in name else ""
+        if suffix not in _INERT_EDIT_SUFFIXES and name not in _INERT_EDIT_BASENAMES:
+            return False
+        if any(path == root or path.startswith(root + "/") for root in roots):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -293,6 +529,18 @@ def compile_obligation_predicates(
     mode = str(getattr(getattr(contract, "task_mode", None), "value", "") or "")
     for item in contract.obligations:
         text = str(item.text or "")
+        relation = ""
+        operator = ""
+        literal = ""
+        evidence_rule = ""
+        quoted = _QUOTED_LITERAL_RE.search(text)
+        if _STARTS_WITH_RE.search(text):
+            relation, operator = "starts_with", "startsWith"
+        elif _CONTAINS_RE.search(text):
+            relation, operator = "contains", "contains"
+        if relation:
+            literal = next((part for part in quoted.groups() if part), "") if quoted else ""
+            evidence_rule = "exact_operator_literal_assertion"
         paths = tuple(sorted(set(_PATH_RE.findall(text))))
         if mode == "SERVICE" and _SERVICE_OBLIGATION_RE.search(text):
             kind = "service_probe"
@@ -321,6 +569,10 @@ def compile_obligation_predicates(
             kind=kind,
             scope=paths,
             anchors=significant_tokens(text),
+            operator=operator,
+            literal=literal,
+            expected_relation=relation,
+            evidence_rule=evidence_rule,
         )
     return compiled
 
@@ -373,7 +625,6 @@ def evaluate_passing_observation(
     output = output or ""
     observed = f"{command}\n{output}"
     lexical = matching_obligation_ids(contract, command, output)
-    full_suite = is_full_repository_suite(command)
     executable = bool(_EXECUTABLE_RE.search(command))
     receipts: list[PredicateReceipt] = []
     for item in contract.obligations:
@@ -387,14 +638,21 @@ def evaluate_passing_observation(
         unit = ""
         coverage_basis = ""
         if predicate.kind == "behavior":
-            verified = full_suite or (
-                executable and item.obligation_id in lexical
-            )
+            # A suite PASS says nothing about an arbitrary natural-language
+            # requirement. Lexical overlap is relevance, never a proof binding.
+            if executable and predicate.expected_relation:
+                expected_literal = hashlib.sha256(
+                    predicate.literal.encode("utf-8", "surrogatepass")
+                ).hexdigest()
+                outcomes = {
+                    match.group("result")
+                    for match in _SEMANTIC_ASSERTION_RE.finditer(output)
+                    if match.group("relation") == predicate.expected_relation
+                    and match.group("literal") == expected_literal
+                }
+                verified = outcomes == {"pass"}
             if verified:
-                coverage_basis = (
-                    "full_repository_suite"
-                    if full_suite else "targeted_executable_anchor_match"
-                )
+                coverage_basis = "exact_operator_literal_assertion"
         elif predicate.kind == "artifact":
             verified = bool(
                 executable

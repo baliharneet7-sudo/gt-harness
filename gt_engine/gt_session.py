@@ -13,13 +13,63 @@ recorded) instead of being silently approximated.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+import shlex
+import sqlite3
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
+from groundtruth.runtime.evidence_envelope import chain_hash
+
+from .delivery_budget import compact_localization, delivery_byte_limit
+from .output_evidence import EvidenceStore
+from .persistent_execution_state import (
+    CatalogItem,
+    Feature18Catalog,
+    Feature18Lifecycle,
+    SelectCatalogAbstention,
+    SelectCatalogStage,
+    build_feature18_catalog,
+    build_select_catalog_messages,
+    build_select_catalog_tool,
+    parse_select_catalog_arguments,
+)
+from .request_history import load_history_evidence, store_history_evidence
+from .run_diagnostics import CapabilityState, DiagnosticCode, DiagnosticEvent
+
 # Capabilities a host can declare (see the verdict's negotiation list).
+# The two stages __init__ can disable GT with. Neither is a fault: one is the
+# OFF mode, the other the global kill switch. Shared so the constructor and the
+# capability report cannot drift - and the drift directions are not symmetric,
+# since a new non-fault stage would merely be reported loudly while a fault
+# stage colliding with one of these would be reported as normal and silent.
+CONFIGURED_OFF_STAGES = ("off", "global_kill_switch")
+
+# Below this much wall clock, the submit gate skips the drain and baseline
+# recheck: neither can finish and still leave room for the submission they are
+# trying to make clean. The refusal itself has no floor.
+_SUBMIT_ROOM_SECONDS = 120.0
+
+# Every stage GTSession.degrade() is called with, across gt_engine, scripts and
+# eval. Used to constrain what a journal row may put into a capability evidence
+# string: the journal lives inside the task container and the benchmarked agent
+# can write to it, so a stage is admitted only if this build defines it. Drift
+# here fails loudly as unrecognized_stage rather than quietly as wrong data.
+_DEGRADE_STAGES = frozenset({
+    "action_identity", "after_action", "before_action", "execution_identity",
+    "execution_receipt", "execution_result_identity", "observation_splice",
+    "persistent_plan_delivery", "plan_cursor", "plan_check_boundary", "plan_gate_delivery_receipt",
+    "plan_seal_recheck", "post_terminal_gate_verdict",
+    "prepare_messages", "provider_failure_receipt", "provider_response_receipt",
+    "session_start", "submit_detection", "submit_gate",
+    "submitted_result_missing", "suppression_receipt",
+    "terminal_refusal_authority", *CONFIGURED_OFF_STAGES,
+})
+
 HOST_CAPABILITIES = (
     "exact_provider_payload",     # finalized logical request bytes are exact
     "provider_response_ids",      # real provider request/response ids bound
@@ -35,6 +85,11 @@ HOST_CAPABILITIES = (
 )
 
 
+def _compress_context(value: str, limit: int) -> str:
+    """Shorten only at certified independent localization item boundaries."""
+    return compact_localization(value, limit)
+
+
 class Assurance(StrEnum):
     FULL = "FULL"                 # all declared capabilities actually present
     DEGRADED = "DEGRADED"         # some capability declared but not honored
@@ -46,9 +101,6 @@ class GTMode(StrEnum):
     Only ``ENFORCED`` may prevent a baseline action. New mechanisms are
     expected to start in ``SHADOW`` and graduate through ``ADVISORY`` or
     ``ASSISTIVE`` after evidence supports doing so.
-
-    ``ENGINE`` is the Inline Engine posture: every selected action crosses the
-    engine boundary and the engine owns the action-to-observation interface.
     """
 
     OFF = "off"
@@ -56,7 +108,6 @@ class GTMode(StrEnum):
     ADVISORY = "advisory"
     ASSISTIVE = "assistive"
     ENFORCED = "enforced"
-    ENGINE = "engine"
 
 
 @dataclass
@@ -69,7 +120,7 @@ class GTSessionConfig:
     issue_text: str = ""
     mode: GTMode | str = GTMode.ADVISORY
     fail_open: bool = True
-    context_budget_bytes: int = 2400
+    context_budget_bytes: int = 2_000
     capability_modes: Mapping[str, GTMode | str] = field(default_factory=dict)
     disabled_capabilities: tuple[str, ...] = ()
     delivery_path: str = "compiled"
@@ -99,6 +150,155 @@ class GTDecisionBatch:
                         self.verification, self.provenance, self.degraded])
 
 
+@dataclass(frozen=True)
+class GTDecisionCandidate:
+    """One producer-owned fact proposed for the current provider decision.
+
+    ``recipe`` is a delivery query (``{"kind", "params", "budget"}``) instead
+    of pre-rendered bytes: the payload is computed at the admission choke
+    point against the state the model is about to see, so a recipe candidate
+    can never be stale -- it does not exist until it is delivered. Producers
+    whose bytes ARE the fact at a revision (executed command output, test
+    failures) keep ``rendered``; graph/state-derived kinds carry recipes.
+    """
+
+    rendered: str
+    kind: str
+    dedup_key: str
+    lane: str = "sealed"
+    target: str = ""
+    semantics: str = "advisory"
+    artifact_sha256: str = ""
+    previous_chain_head: str = ""
+    next_chain_head: str = ""
+    verification_candidate: str = ""
+    source_ordinal: int = 0
+    current_failure: bool = False
+    current_obligation: bool = False
+    action_index: int = 0
+    unit_id: str = ""
+    supersession_key: str = ""
+    supersedes: tuple[str, ...] = ()
+    source_revision: str = ""
+    artifact_reference: Mapping[str, Any] | None = None
+    recipe: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class SelectCatalogOffer:
+    """One exact, revision-bound task-start selection request."""
+
+    catalog: Feature18Catalog
+    messages: tuple[dict[str, str], ...]
+    tool: Mapping[str, Any]
+
+
+_FAILURE_KINDS = frozenset({
+    "covering_red",
+    "covering_verdict",
+    "recovery",
+    "test_failure",
+    "trace_frame",
+})
+_OBLIGATION_KINDS = frozenset({
+    "context_contract",
+    "context_delta",
+    "obligations",
+})
+_LOCALIZATION_KINDS = frozenset({"brief_localization", "localization"})
+_WEAK_HISTORY_KINDS = frozenset({"cochange_partner", "cochange_prior"})
+_MINISWE_CHAIN_GENESIS = hashlib.sha256(b"miniswe-genesis").hexdigest()
+
+# The per-request delivery ceiling bounds what one decision ships; it says
+# nothing about the history those deliveries accumulate into. This is the
+# HISTORY-axis bound: when the rendered bytes of every currently-live
+# (non-superseded) context unit exceed the budget, the oldest-admitted live
+# units demote to one-line pointers through the same collapse path a
+# supersession takes. The pointer carries the unit's CAS identity, so the
+# demotion destroys nothing - `gt-evidence read` still resolves the bytes.
+# GT_HISTORY_CONTEXT_UNIT_LIVE_BYTES=0 disables the bound.
+_HISTORY_LIVE_UNIT_BYTES_DEFAULT = 8_192
+
+# Lanes whose live unit must stay verbatim under any budget pressure: the
+# current contract and the plan cursor are the steering the next decision is
+# organized around. Finalization/contract lanes exist only to be read.
+_HISTORY_BUDGET_PROTECTED_KEYS = frozenset({
+    "obligations:task",
+    "plan_cursor:task",
+})
+_HISTORY_BUDGET_PROTECTED_PREFIXES = ("finalization:", "contract:")
+
+# The drained unit's superseded_by marker when the history budget - not a
+# successor claim - forced the demotion. Journaled as the collapse reason.
+_HISTORY_BUDGET_MARKER = "history_budget"
+
+
+def _decision_candidate_order(candidate: GTDecisionCandidate) -> tuple[int, int, str, str]:
+    """Current facts first; weak historical priors consume only spare room."""
+
+    kind = candidate.kind
+    if candidate.current_failure or kind in _FAILURE_KINDS:
+        priority = 0
+    elif candidate.current_obligation or kind in _OBLIGATION_KINDS:
+        priority = 1
+    elif kind in _LOCALIZATION_KINDS:
+        priority = 2
+    elif kind in _WEAK_HISTORY_KINDS or "cochange" in kind:
+        priority = 4
+    else:
+        # Edit consequences and verification evidence share the actionable
+        # middle lane. Their stable kind/hash order makes replay byte-identical.
+        priority = 3
+    identity_bytes = candidate.rendered.encode("utf-8")
+    if not identity_bytes and candidate.recipe is not None:
+        # Recipe candidates have no bytes until admission resolves them; the
+        # canonical query keeps ordering deterministic for replay.
+        identity_bytes = json.dumps(
+            candidate.recipe, sort_keys=True, separators=(",", ":"), default=str
+        ).encode("utf-8")
+    identity = hashlib.sha256(identity_bytes).hexdigest()
+    return priority, candidate.source_ordinal, kind, identity
+
+
+def _bounded_unit_view(header: str, body: str, limit: int) -> str | None:
+    """Head/tail render of an oversized context unit inside the byte limit.
+
+    Returns None when the header alone cannot fit; the caller records a typed
+    refusal in that case. The complete unit bytes remain in the evidence CAS
+    through the delivery's artifact_sha256 - the model-visible view is honest
+    about what was elided without printing a retrieval affordance.
+
+    Elision happens at line boundaries only: a body cut mid-line leaves a
+    partial row that reads as a complete fact. Dropping back to whole lines
+    shrinks the kept region slightly but never corrupts a fact.
+    """
+    encoded_header = (header + "\n").encode("utf-8")
+    room = limit - len(encoded_header) - 96
+    if room <= 0:
+        return None
+    body_bytes = body.encode("utf-8")
+    if len(body_bytes) <= room:
+        return f"{header}\n{body}"
+    head_budget = room * 2 // 3
+    tail_budget = room - head_budget
+    if body_bytes.count(b"\n") < 2:
+        # A lineless or single-line blob has no boundary to elide to - ship
+        # nothing rather than a partial opaque fragment.
+        return None
+    head_bytes = body_bytes[:head_budget]
+    newline = head_bytes.rfind(b"\n")
+    head_bytes = head_bytes[: newline + 1] if newline > 0 else b""
+    tail_bytes = body_bytes[len(body_bytes) - tail_budget :]
+    newline = tail_bytes.find(b"\n")
+    tail_bytes = tail_bytes[newline + 1 :] if newline >= 0 else b""
+    if not head_bytes and not tail_bytes:
+        return None
+    head = head_bytes.decode("utf-8", "ignore").rstrip("\n")
+    tail = tail_bytes.decode("utf-8", "ignore").lstrip("\n")
+    omitted = len(body_bytes) - len(head_bytes) - len(tail_bytes)
+    return f"{header}\n{head}\n[{omitted} utf8 bytes of this context unit elided]\n{tail}"
+
+
 class GTSession:
     """Single-owner GT session facade.
 
@@ -121,12 +321,278 @@ class GTSession:
         }
         self.disabled = self.mode is GTMode.OFF or global_killed
         self.disabled_stage = (
-            "global_kill_switch" if global_killed
-            else "off" if self.disabled else ""
+            CONFIGURED_OFF_STAGES[1] if global_killed
+            else CONFIGURED_OFF_STAGES[0] if self.disabled else ""
         )
         self._terminal: str | None = None
         self._task_start_shipped = False
+        self._pending_contract_delta = ""
+        self._pending_contract_rendered = ""
+        self._pending_contract_identity = ""
+        self._pending_localization = ""
+        self._pending_localization_identity = ""
+        self._queued_decision_candidates: list[GTDecisionCandidate] = []
+        # Abstain-once keys for dead/unresolvable delivery lanes: a recipe that
+        # cannot render at this graph revision is recorded once, then repeats of
+        # the same query drop silently instead of filling the journal with
+        # identical skips (run 34766499875 logged 149 such rows).
+        self._recipe_unresolved_seen: set[tuple[str, str, str, str, str]] = set()
+        self._active_context_units: dict[str, dict[str, Any]] = {}
+        # None until the first cursor: an empty tuple is a real state (every row
+        # proven) and must not be confused with "never looked".
+        self._last_plan_unmet: tuple[str, ...] | None = None
+        self._pending_context_units: dict[str, dict[str, Any]] = {}
+        # unit_id -> {rendered, artifact_reference, supersession_key,
+        # admitted_iteration, admission_order}: the exact bytes injected
+        # into history plus their archive pointer, so a later unit that names
+        # it in `supersedes` can have its block collapsed. Only units that
+        # declared supersession ever collapse. The admission stamp is what
+        # the history budget orders and the current-iteration guard reads.
+        self._context_unit_rendered: dict[str, dict[str, Any]] = {}
+        self._context_unit_sequence = 0
+        self._superseded_context_units: list[dict[str, Any]] = []
+        self._execution_sequence = 0
+        self._open_executions: set[str] = set()
+        self._select_catalog_attempted = False
+        self._select_catalog_abstained = False
+        self._plan_gate_refusals = 0
+        # Refusals since a plan row last turned green, and the unmet set as it
+        # stood at the last refusal. Progress resets the first; the second is
+        # what "progress" is measured against.
+        self._plan_gate_stalled_refusals = 0
+        self._plan_gate_last_unmet: tuple[str, ...] | None = None
+        self._plan_baseline_report = None
+        self._plan_agent = None
+        self._plan_progress_shipped: dict[str, str] = {}
+        self._select_catalog_lifecycle: Feature18Lifecycle | None = None
         self._capability_check()
+
+    def _record_select_catalog(self, reason: str) -> None:
+        lifecycle = self._select_catalog_lifecycle
+        if lifecycle is None:
+            return
+        self._engine.store.append(
+            "select_catalog_lifecycle",
+            lifecycle_schema=lifecycle.receipt()["schema"],
+            reason=reason,
+            receipt=lifecycle.receipt(),
+        )
+
+    @staticmethod
+    def _graph_contains_target(graph_path: str, target: str) -> bool:
+        normalized = target.replace("\\", "/").lstrip("./")
+        if not graph_path or not normalized:
+            return False
+        try:
+            uri = f"file:{os.path.abspath(graph_path)}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as connection:
+                row = connection.execute(
+                    "SELECT 1 FROM nodes WHERE file_path = ? OR file_path = ? LIMIT 1",
+                    (normalized, normalized.replace("/", "\\")),
+                ).fetchone()
+            return row is not None
+        except (OSError, sqlite3.Error):
+            return False
+
+    def prepare_select_catalog(self) -> SelectCatalogOffer | None:
+        """Prepare the one eligible task-start catalog through decision admission."""
+
+        if self._select_catalog_attempted:
+            return None
+        if (
+            self._engine is None
+            or self.disabled
+            or not self.capability_model_visible("select_catalog")
+        ):
+            return None
+        snapshot = self._engine.graph_query_snapshot()
+        source_revision = str(snapshot.source_revision or "")
+        if not snapshot.graph_current or not source_revision or not snapshot.graph_revision:
+            # Readiness abstention is not the attempt: an index still building
+            # when the first request lands must not consume the one catalog a
+            # run ever offers. Journal it once; retry on the next call.
+            if not self._select_catalog_abstained:
+                self._select_catalog_abstained = True
+                self._engine.store.append(
+                    "select_catalog_abstained", reason="stale_or_incomplete_graph"
+                )
+            return None
+        self._select_catalog_attempted = True
+        localization = self._engine.task_start_localization(commit=False)
+        metadata = self._engine.localization_delivery_metadata()
+        target = str(metadata.get("target") or "").replace("\\", "/").lstrip("./")
+        if not localization or not self._graph_contains_target(snapshot.graph_path, target):
+            self._engine.store.append(
+                "select_catalog_abstained", reason="no_graph_backed_catalog_item"
+            )
+            return None
+        content_sha256 = hashlib.sha256(localization.encode("utf-8")).hexdigest()
+        item_id = f"focus-{hashlib.sha256((target + content_sha256).encode()).hexdigest()[:20]}"
+        # The label is the only model-legible field the catalog carries: give
+        # it the localization payload line (symbol, kind, snippet) rather than
+        # repeating the bare path, which carried nothing to act on.
+        label = next(
+            (
+                line.strip()
+                for line in localization.splitlines()
+                if line.strip() and not line.startswith("[GT_EVIDENCE")
+            ),
+            target,
+        )
+        catalog = build_feature18_catalog(
+            source_revision=source_revision,
+            workspace_revision=str(getattr(self._engine, "repository_revision", "") or source_revision),
+            graph_revision=str(snapshot.graph_revision),
+            items=(CatalogItem(item_id, "focus", label, content_sha256, target),),
+        )
+        self._select_catalog_lifecycle = Feature18Lifecycle.from_catalog(
+            catalog, event_id=f"{self.config.task_id}:select_catalog"
+        )
+        rendered = "[GT_SELECT_CATALOG]\n" + json.dumps(
+            catalog.as_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+        batch = self.admit_decision_packet(
+            [GTDecisionCandidate(
+                rendered=rendered,
+                kind="select_catalog",
+                dedup_key=f"select_catalog:{catalog.content_sha256}",
+                lane="sealed",
+                target=target,
+                source_revision=source_revision,
+                unit_id=catalog.content_sha256,
+                supersession_key="select_catalog:task_start",
+            )],
+            # The offer can be deferred past the first request when the graph
+            # is not ready at bootstrap; the delivery must carry the CURRENT
+            # boundary iteration or the auditor sees it join a request it was
+            # not admitted for (treatment_delivery_late on every deferred run).
+            iteration=int(getattr(self._engine, "iteration", 0)),
+            action_index=0,
+        )
+        if not batch.context_additions:
+            self._select_catalog_lifecycle.abstain(SelectCatalogAbstention.INCOMPLETE)
+            self._record_select_catalog("decision_admission_refused")
+            return None
+        messages = build_select_catalog_messages(catalog, task=self.config.issue_text)
+        messages[-1]["content"] += "\n\n" + batch.context_additions[0]
+        self._record_select_catalog("catalog_prepared")
+        return SelectCatalogOffer(
+            catalog=catalog,
+            messages=tuple(messages),
+            tool=build_select_catalog_tool(catalog),
+        )
+
+    def certify_select_catalog_offer(
+        self, *, request_bytes: bytes, tool_schema_bytes: bytes,
+        provider_request_id: str, delivery_ids: tuple[str, ...]
+    ) -> None:
+        lifecycle = self._select_catalog_lifecycle
+        if lifecycle is None:
+            return
+        # The admission hook can run more than once for one offer -- a transport
+        # retry re-enters it with _gt_select_catalog still set. The ladder is
+        # per-OFFER, not per-attempt, so re-admitting the identical certified
+        # request is not a violation. In run 34064560259 it was treated as one:
+        # the second admission hit "CERTIFIED requires CANDIDATE; found
+        # DELIVERED", the bootstrap was abandoned after its provider call had
+        # already been made and counted, and the receipt failed closed with
+        # provider_call_count_mismatch on an otherwise graded run.
+        # Identity is the certified request bytes; provider_request_id embeds
+        # the iteration and so differs between attempts at the same offer.
+        if lifecycle.stage in {SelectCatalogStage.CERTIFIED, SelectCatalogStage.DELIVERED}:
+            if lifecycle.request_sha256 == hashlib.sha256(request_bytes).hexdigest():
+                self._record_select_catalog("provider_request_readmitted")
+                return
+        lifecycle.certify_offer(
+            request_bytes=request_bytes,
+            tool_schema_bytes=tool_schema_bytes,
+            provider_request_id=provider_request_id,
+        )
+        if lifecycle.stage is SelectCatalogStage.CERTIFIED:
+            lifecycle.deliver(delivery_id=provider_request_id)
+            self.provider_request_admitted(
+                delivery_ids, drain_action_queue=False
+            )
+        self._record_select_catalog("provider_request_admitted")
+
+    def accept_select_catalog(self, arguments: Any) -> tuple[str, ...]:
+        """Validate selected IDs and queue them for the ordinary Mini-SWE request."""
+
+        lifecycle = self._select_catalog_lifecycle
+        if lifecycle is None:
+            return ()
+        attempted, selected = parse_select_catalog_arguments(arguments, lifecycle.catalog)
+        raw = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str).encode()
+        lifecycle.record_selection(
+            attempted_ids=attempted, selected_ids=selected, argument_bytes=raw
+        )
+        if lifecycle.stage is SelectCatalogStage.ABSTAINED:
+            self._record_select_catalog("selection_refused")
+            return ()
+        by_id = {item.item_id: item for item in lifecycle.catalog.items}
+        rendered = "[GT_SELECT_CATALOG_RESULT]\n" + json.dumps(
+            {
+                "schema": "gt.select_catalog.result.v1",
+                "catalog_sha256": lifecycle.catalog.content_sha256,
+                "selected_items": [by_id[item_id].as_dict() for item_id in selected],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.queue_decision_candidates((GTDecisionCandidate(
+            rendered=rendered,
+            kind="select_catalog",
+            dedup_key=f"select_catalog_result:{lifecycle.catalog.content_sha256}",
+            lane="sealed",
+            target=by_id[selected[0]].target,
+            source_revision=lifecycle.catalog.source_revision,
+            unit_id=hashlib.sha256(rendered.encode()).hexdigest(),
+            supersession_key="select_catalog:selection",
+        ),))
+        self._record_select_catalog("selection_accepted")
+        return selected
+
+    def fail_select_catalog(self, reason: str) -> None:
+        """Close a dispatched selection request after provider/parse failure."""
+
+        lifecycle = self._select_catalog_lifecycle
+        if lifecycle is None or lifecycle.stage not in {
+            SelectCatalogStage.CANDIDATE,
+            SelectCatalogStage.CERTIFIED,
+            SelectCatalogStage.DELIVERED,
+        }:
+            return
+        lifecycle.abstain(SelectCatalogAbstention.INCOMPLETE)
+        self._record_select_catalog(reason)
+
+    def observe_select_catalog_action(self, command: str) -> None:
+        """Consume selection only when a real Mini-SWE Bash action matches it."""
+
+        lifecycle = self._select_catalog_lifecycle
+        if lifecycle is None or lifecycle.stage is not SelectCatalogStage.DELIVERED:
+            return
+        if lifecycle.catalog.source_revision != str(self._engine.repository_revision or ""):
+            lifecycle.abstain(SelectCatalogAbstention.STALE_REVISION)
+            self._record_select_catalog("selection_stale_before_action")
+            return
+        selected = {item.item_id: item for item in lifecycle.catalog.items
+                    if item.item_id in lifecycle.selected_ids}
+        try:
+            command_tokens = {
+                token.replace("\\", "/").lstrip("./")
+                for token in shlex.split(command, posix=os.name != "nt")
+            }
+        except ValueError:
+            return
+        matched = tuple(
+            item_id for item_id, item in selected.items()
+            if item.target and item.target in command_tokens
+        )
+        if not matched:
+            return
+        lifecycle.consume(selected_ids=matched, resulting_action=command)
+        self._record_select_catalog("matching_action_consumed")
 
     @property
     def engine(self) -> Any | None:
@@ -136,7 +602,7 @@ class GTSession:
     @property
     def model_visible(self) -> bool:
         return not self.disabled and self.mode in {
-            GTMode.ADVISORY, GTMode.ASSISTIVE, GTMode.ENFORCED, GTMode.ENGINE,
+            GTMode.ADVISORY, GTMode.ASSISTIVE, GTMode.ENFORCED,
         }
 
     @property
@@ -151,7 +617,7 @@ class GTSession:
 
     @property
     def can_enforce(self) -> bool:
-        return not self.disabled and self.mode in (GTMode.ENFORCED, GTMode.ENGINE)
+        return not self.disabled and self.mode is GTMode.ENFORCED
 
     @staticmethod
     def _capability_key(capability: str) -> str:
@@ -186,7 +652,7 @@ class GTSession:
 
     def capability_model_visible(self, capability: str) -> bool:
         return self.capability_active(capability) and self.capability_mode(capability) in {
-            GTMode.ADVISORY, GTMode.ASSISTIVE, GTMode.ENFORCED, GTMode.ENGINE,
+            GTMode.ADVISORY, GTMode.ASSISTIVE, GTMode.ENFORCED,
         }
 
     def degrade(self, stage: str, error: BaseException) -> None:
@@ -218,6 +684,8 @@ class GTSession:
     # -- capability negotiation -------------------------------------------
     def _capability_check(self) -> None:
         declared = set(self.config.capabilities)
+        if not declared:
+            self._assurance.append("no host capabilities declared")
         if "exact_provider_payload" in declared and not self.config.state_dir:
             self._assurance.append("exact_provider_payload declared without state_dir")
         if "trusted_verifier" in declared and os.environ.get("GT_VERIFY_EXECUTE") != "1":
@@ -235,48 +703,861 @@ class GTSession:
         self._engine.start_task()
         return GTDecisionBatch(provenance=[{"event": "session_started"}])
 
+    def _plan_cursor_candidate(self) -> GTDecisionCandidate | None:
+        """One requirement's worth of steering, when the state has moved.
+
+        Fired on change rather than on a clock. The strongest published design
+        for this, Cursor's, re-anchors on an edit specifically -- the moment the
+        world stopped matching what the model last read. Our equivalent signal
+        is a row gaining or losing evidence, which is what this compares.
+
+        Superseded by key, so the tail carries one cursor and not a growing pile
+        of them. Cline's accretes into conversation history and is paid for
+        forever; this one replaces its predecessor.
+
+        Correct-or-quiet throughout: steering that raises is worse than steering
+        that is absent, and the plan is not load-bearing for the run.
+        """
+        if not self.model_visible or self._engine is None:
+            return None
+        plan = getattr(self._engine, "persistent_plan", None)
+        if plan is None or not getattr(plan, "rows", ()):
+            return None
+        try:
+            from .persistent_plan.cursor import render_cursor
+
+            unmet = tuple(self._engine.unmet_plan_rows())
+            row_state = getattr(self._engine, "plan_row_state", None)
+            states = {r.row_id: row_state(r.row_id) for r in plan.rows} if callable(row_state) else {}
+            previous = self._last_plan_unmet
+            cursor_identity = (unmet, getattr(self._engine, "repository_revision", ""),
+                               tuple((r.row_id, r.text, r.approach, r.verification_command, states.get(r.row_id),
+                                      plan.pending_interactions(r.row_id))
+                                     for r in plan.rows))
+            if getattr(self, "_last_plan_cursor_identity", None) == cursor_identity:
+                return None
+            proven = tuple(sorted(set(previous or ()) - set(unmet)))
+            rendered = render_cursor(plan, unmet, proven_delta=proven, states=states)
+            self._last_plan_unmet = unmet
+            self._last_plan_cursor_identity = cursor_identity
+            if not rendered:
+                return None
+            payload_hash = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+            supersession_key = "plan_cursor:task"
+            active = self._active_context_units.get(supersession_key)
+            reference = self._store_context_unit(rendered)
+            return GTDecisionCandidate(
+                rendered=rendered,
+                kind="context_delta",
+                dedup_key=f"prompt:{payload_hash}",
+                lane="prompt",
+                target="provider_prompt",
+                unit_id=payload_hash,
+                supersession_key=supersession_key,
+                supersedes=((active["unit_id"],) if active else ()),
+                source_revision=str(
+                    getattr(self._engine, "repository_revision", "") or ""
+                ),
+                artifact_sha256=reference.get("sha256", ""),
+                artifact_reference=reference or None,
+            )
+        except Exception as exc:  # noqa: BLE001 - steering is fail-open
+            self.degrade("plan_cursor", exc)
+            return None
+
+    def _finalization_candidate(self) -> GTDecisionCandidate | None:
+        """At most two advisory observations, through the existing delivery owner."""
+        baseline = getattr(self, "_patch_baseline", "")
+        if not baseline or not self.model_visible or self._engine is None:
+            return None
+        seconds, _ = self.plan_gate_budget()
+        stage = ("reserve" if seconds <= 600 else
+                 "verification" if getattr(self._engine, "phase", "") == "VERIFY" else "")
+        seen = getattr(self, "_finalization_stages", set())
+        if not stage or stage in seen:
+            return None
+        from pathlib import Path
+
+        from scripts.miniswe_supervisor import submission_patch_state
+
+        state = submission_patch_state(Path(self.config.repo_root), baseline)
+        seen.add(stage)
+        self._finalization_stages = seen
+        self._engine.store.append("submission_patch_observed", stage=stage, **state)
+        rendered = ("[GT_FINALIZATION]\nThe benchmark collects committed changes (BASE to HEAD); "
+                    "the supervisor worktree recovery patch is a separate artifact. "
+                    "Review and finalize the intended changes yourself before submission. "
+                    "GT will not commit them for you. This is not a correctness assessment.\n")
+        if state["status"] == "observed":
+            rendered += (f"Current committed diff empty: {state['committed_patch_empty']}; "
+                         f"uncommitted tracked changes: {state['uncommitted_tracked']}; "
+                         f"untracked paths: {len(state['untracked_paths'])}.")
+        else:
+            rendered += "Current Git state unavailable; inspect it directly."
+        digest = hashlib.sha256(rendered.encode()).hexdigest()
+        return GTDecisionCandidate(rendered=rendered, kind="context_delta", lane="prompt",
+                                   target="provider_prompt", dedup_key=f"finalization:{stage}:{digest}")
+
     def before_model(self, messages: list[dict], iteration: int) -> GTDecisionBatch:
         """Deliver context additions (contract/localization) before a model call."""
         if self._engine is None or self.disabled:
             return GTDecisionBatch()
-        additions: list[str] = []
+        apply_requests = getattr(self._engine, "apply_plan_requests", None)
+        if callable(apply_requests):
+            from gt_harness.canonical_io import canonical_json_bytes
+
+            environment = getattr(self._plan_agent, "env", None)
+            if callable(getattr(environment, "execution_env", None)):
+                self._engine._current_check_environment_sha256 = hashlib.sha256(
+                    canonical_json_bytes(environment.execution_env())).hexdigest()
+            outcomes = apply_requests() or []
+            rejected = [outcome for outcome in outcomes if outcome.get("outcome") == "rejected"]
+            if rejected:
+                # The CLI answered "requested"; the journal row is for
+                # auditors. This line is the only way the refusal reaches the
+                # agent that filed it.
+                lines = [
+                    "[GT_PLAN_REQUEST_REJECTED] a `gt-plan` request was refused "
+                    "by the engine; the plan is unchanged:",
+                ]
+                lines.extend(
+                    f"  {outcome['request_id']} ({outcome.get('operation', '')} "
+                    f"{outcome.get('row_id', '')}): {outcome.get('detail', '')}"
+                    for outcome in rejected[:6]
+                )
+                if len(rejected) > 6:
+                    lines.append(f"  ... {len(rejected) - 6} more rejected requests")
+                rendered = "\n".join(lines)
+                self.queue_decision_candidates((GTDecisionCandidate(
+                    rendered=rendered,
+                    kind="plan_request_rejected",
+                    lane="prompt",
+                    dedup_key="plan_request_rejected:" + hashlib.sha256(
+                        rendered.encode()).hexdigest(),
+                ),))
+        if getattr(self._engine, "phase", "") == "VERIFY":
+            self._drain_verification_boundary()
+        candidates = list(self._queued_decision_candidates)
+        finalization = self._finalization_candidate()
+        if finalization is not None:
+            candidates.append(finalization)
+        contract_candidate: tuple[str, str] | None = None
+        contract_unit_id = ""
+        contract_was_shipped = bool(self._engine.contract_shipped)
+        contract_kind = "context_delta" if contract_was_shipped else "context_contract"
         delta = self._engine.next_contract_delta(
-            max_chars=self.config.context_budget_bytes
+            commit=False,
+            max_chars=min(
+                self.config.context_budget_bytes,
+                delivery_byte_limit(lane="prompt", kind=contract_kind),
+            )
         )
         if delta:
-            # NEUTRAL tag: a `[GT_TASK_CONTRACT]` label is harness framing a
-            # model can audit (round-8/9: it read the marker and went probing
-            # gt_engine/). The contract TEXT is decision-relevant; the GT_
-            # prefix is not.
-            tag = "Task contract" if iteration == 0 else "Obligation updates"
+            tag = "GT_TASK_CONTRACT" if not contract_was_shipped else "GT_OBLIGATION_DELTA"
             rendered = f"[{tag}]\n{delta}"
             if self.model_visible:
-                additions.append(rendered)
+                payload_hash = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                supersession_key = "obligations:task"
+                active = self._active_context_units.get(supersession_key)
+                reference = self._store_context_unit(rendered)
+                candidates.append(GTDecisionCandidate(
+                    rendered=rendered,
+                    kind=contract_kind,
+                    dedup_key=f"prompt:{payload_hash}",
+                    lane="prompt",
+                    target="provider_prompt",
+                    current_obligation=True,
+                    unit_id=payload_hash,
+                    supersession_key=supersession_key,
+                    supersedes=((active["unit_id"],) if active else ()),
+                    source_revision=str(
+                        getattr(self._engine, "repository_revision", "") or ""
+                    ),
+                    artifact_sha256=reference.get("sha256", ""),
+                    artifact_reference=reference or None,
+                ))
+                contract_candidate = (delta, rendered)
+                contract_unit_id = payload_hash
             else:
                 self._engine.store.append(
                     "shadow_context_computed",
                     iteration=iteration,
                     rendered_bytes=len(rendered.encode("utf-8")),
                 )
-        if (
-            iteration == 0
-            and not self._task_start_shipped
-            and self.config.delivery_path == "compiled"
-            and self.mode is not GTMode.ENGINE
+        cursor = self._plan_cursor_candidate()
+        if cursor is not None:
+            candidates.append(cursor)
+        localization_recipe_queued = False
+        if self.config.delivery_path == "compiled":
+            drift_trigger = (
+                self._task_start_shipped
+                and callable(getattr(self._engine, "localization_drift_pending", None))
+                and self._engine.localization_drift_pending()
+            )
+            # A resolved-empty localization is an answer for the current
+            # (revision, drift) key - re-queue only when the engine reports
+            # the state moved. Engines without the predicate keep the
+            # always-resolve legacy behavior.
+            pending_fn = getattr(
+                self._engine, "localization_resolution_pending", None
+            )
+            resolution_pending = pending_fn() if callable(pending_fn) else True
+            if (not self._task_start_shipped and resolution_pending) or drift_trigger:
+                if not self.model_visible:
+                    localization = self._engine.task_start_localization(commit=False)
+                    if localization:
+                        self._engine.store.append(
+                            "shadow_task_start_localization",
+                            rendered_bytes=len(localization.encode("utf-8")),
+                        )
+                else:
+                    # The localization query rides the queue, not its bytes:
+                    # the rank runs at admission against the current graph,
+                    # with the agent's search-drift terms folded in.
+                    supersession_key = "localization:task"
+                    active = self._active_context_units.get(supersession_key)
+                    candidates.append(GTDecisionCandidate(
+                        rendered="",
+                        kind="localization",
+                        lane="sealed",
+                        dedup_key="",
+                        recipe={
+                            "kind": "localization",
+                            "params": {
+                                "origin": (
+                                    "drift" if drift_trigger else "task_start"
+                                ),
+                            },
+                        },
+                        supersession_key=supersession_key,
+                        supersedes=((active["unit_id"],) if active else ()),
+                    ))
+                    localization_recipe_queued = True
+        batch = self.admit_decision_packet(
+            candidates, iteration=iteration, action_index=0
+        )
+        if contract_candidate and contract_candidate[1] in batch.context_additions:
+            self._pending_contract_delta, self._pending_contract_rendered = contract_candidate
+        elif contract_candidate:
+            delivered = next(
+                (
+                    item for item in batch.context_additions
+                    if f'"unit_id":"{contract_unit_id}"' in item
+                ),
+                "",
+            )
+            if delivered:
+                self._pending_contract_delta, self._pending_contract_rendered = contract_candidate
+                self._pending_contract_identity = hashlib.sha256(delivered.encode()).hexdigest()
+        if localization_recipe_queued:
+            # The resolver stashes the admission-rendered localization bytes;
+            # the latch binds them only when the unit actually shipped.
+            local_rendered = str(
+                getattr(self._engine, "_localization_candidate", "") or ""
+            )
+            if local_rendered:
+                delivered = next(
+                    (
+                        item for item in batch.context_additions
+                        if '"supersession_key":"localization:task"' in item
+                        or item == local_rendered
+                    ),
+                    "",
+                )
+                if delivered:
+                    self._pending_localization = local_rendered
+                    self._pending_localization_identity = hashlib.sha256(
+                        delivered.encode()
+                    ).hexdigest()
+        return batch
+
+    def _store_context_unit(self, rendered: str) -> dict[str, Any]:
+        try:
+            root = self._engine.engine_state.layout.evidence_root
+            return store_history_evidence(
+                EvidenceStore(root), rendered.encode("utf-8"), kind="decision_evidence"
+            )
+        except (AttributeError, OSError, ValueError):
+            return {}
+
+    def _valid_context_reference(self, reference: Mapping[str, Any]) -> bool:
+        """Accept only an existing immutable object in this task's evidence CAS."""
+
+        try:
+            root = self._engine.engine_state.layout.evidence_root
+            payload = load_history_evidence(root, reference)
+            encoding = str(reference.get("encoding") or "")
+            if encoding not in {"utf-8", "base64"}:
+                return False
+            actual_encoding = "utf-8"
+            try:
+                payload.decode("utf-8", "strict")
+            except UnicodeDecodeError:
+                actual_encoding = "base64"
+            return (
+                encoding == actual_encoding
+                and bool(str(reference.get("kind") or "").strip())
+                and str(reference.get("retrieval_command") or "")
+                == f"gt-evidence read {reference['sha256']} 0 8192"
+            )
+        except (AttributeError, KeyError, OSError, TypeError, ValueError):
+            return False
+
+    def take_superseded_context_units(self) -> list[dict[str, Any]]:
+        """Drain units whose supersedes fired since the last drain.
+
+        Each entry carries the exact bytes injected into history plus the
+        identity needed for a one-line pointer. The prepare seam rewrites
+        those bytes in place -- only GT-emitted text, never an agent turn.
+        """
+        drained = self._superseded_context_units
+        self._superseded_context_units = []
+        return drained
+
+    def demote_overbudget_context_units(self, *, current_iteration: int) -> int:
+        """Demote oldest live units until live history bytes fit the budget.
+
+        Supersession bounds each lane to its latest claim but leaves every
+        lane's claim live forever; this is the bound across ALL lanes on the
+        history axis. A demoted unit queues onto the same drain a superseded
+        unit takes, so the existing collapse path rewrites it to a one-line
+        pointer carrying its CAS identity - demotion is not deletion.
+
+        A unit admitted in the iteration now being prepared has not provably
+        ridden the wire and is never eligible; the protected lanes stay
+        verbatim regardless of pressure. Returns the count queued.
+        """
+        if self._engine is None or self.disabled:
+            return 0
+        try:
+            budget = int(
+                os.environ.get("GT_HISTORY_CONTEXT_UNIT_LIVE_BYTES", "")
+                or _HISTORY_LIVE_UNIT_BYTES_DEFAULT
+            )
+        except ValueError:
+            budget = _HISTORY_LIVE_UNIT_BYTES_DEFAULT
+        if budget <= 0:
+            return 0
+        live = self._context_unit_rendered
+        live_bytes = sum(
+            len(str(record.get("rendered") or "").encode("utf-8"))
+            for record in live.values()
+        )
+        if live_bytes <= budget:
+            return 0
+        demoted = 0
+        for unit_id, record in sorted(
+            live.items(), key=lambda item: item[1].get("admission_order", 0)
         ):
-            # ENGINE removes predictive task-start localization; only the
-            # immutable session binding (contract) may precede an action.
+            if live_bytes <= budget:
+                break
+            if int(record.get("admitted_iteration") or 0) >= current_iteration:
+                # Admitted for the request being prepared: it must ride once.
+                continue
+            key = str(record.get("supersession_key") or "")
+            if key in _HISTORY_BUDGET_PROTECTED_KEYS or key.startswith(
+                _HISTORY_BUDGET_PROTECTED_PREFIXES
+            ):
+                continue
+            rendered = str(record.get("rendered") or "")
+            if not rendered:
+                continue
+            live.pop(unit_id, None)
+            self._superseded_context_units.append(
+                {
+                    "unit_id": unit_id,
+                    "rendered": rendered,
+                    "supersession_key": key,
+                    "superseded_by": _HISTORY_BUDGET_MARKER,
+                    "artifact_reference": dict(
+                        record.get("artifact_reference") or {}
+                    ),
+                    "reason": "history_budget",
+                }
+            )
+            live_bytes -= len(rendered.encode("utf-8"))
+            demoted += 1
+        return demoted
+
+    def provider_request_admitted(
+        self, delivery_ids: tuple[str, ...], *, drain_action_queue: bool = True
+    ) -> None:
+        """Commit shipped latches only for bytes in an admitted final request."""
+        identities = set(delivery_ids)
+        contract_identity = self._pending_contract_identity or (
+            hashlib.sha256(self._pending_contract_rendered.encode()).hexdigest()
+            if self._pending_contract_rendered else ""
+        )
+        if contract_identity and contract_identity in identities:
+            self._engine.acknowledge_contract_delta(self._pending_contract_delta)
+            self._pending_contract_delta = ""
+            self._pending_contract_rendered = ""
+            self._pending_contract_identity = ""
+        localization_identity = self._pending_localization_identity or (
+            hashlib.sha256(self._pending_localization.encode()).hexdigest()
+            if self._pending_localization else ""
+        )
+        if localization_identity and localization_identity in identities:
+            self._engine.acknowledge_localization(self._pending_localization)
+            self._pending_localization = ""
+            self._pending_localization_identity = ""
             self._task_start_shipped = True
-            localization = self._engine.task_start_localization()
-            if localization:
-                if self.model_visible:
-                    additions.append(localization)
+        for identity, unit in tuple(self._pending_context_units.items()):
+            if identity not in identities:
+                continue
+            key = unit["supersession_key"]
+            if not unit["historical"]:
+                self._active_context_units[key] = {
+                    "unit_id": unit["unit_id"],
+                    "source_revision": unit["source_revision"],
+                    "action_index": unit["action_index"],
+                }
+            if unit.get("rendered"):
+                self._context_unit_sequence += 1
+                self._context_unit_rendered[unit["unit_id"]] = {
+                    "rendered": unit["rendered"],
+                    "artifact_reference": dict(
+                        unit.get("artifact_reference") or {}
+                    ),
+                    "supersession_key": key,
+                    "admitted_iteration": int(unit.get("admitted_iteration") or 0),
+                    "admission_order": self._context_unit_sequence,
+                }
+            for superseded_id in unit["supersedes"]:
+                superseded_unit = self._context_unit_rendered.pop(
+                    superseded_id, None
+                )
+                if superseded_unit is not None:
+                    self._superseded_context_units.append(
+                        {
+                            "unit_id": superseded_id,
+                            "rendered": superseded_unit["rendered"],
+                            "supersession_key": key,
+                            "superseded_by": unit["unit_id"],
+                            "artifact_reference": dict(
+                                superseded_unit.get("artifact_reference") or {}
+                            ),
+                        }
+                    )
+            self._engine.store.append(
+                "decision_context_unit_admitted",
+                delivery_identity=identity,
+                unit_id=unit["unit_id"],
+                supersession_key=key,
+                supersedes=list(unit["supersedes"]),
+                source_revision=unit["source_revision"],
+                artifact_sha256=unit["artifact_sha256"],
+                artifact_reference=unit["artifact_reference"],
+                historical=unit["historical"],
+                action_index=unit["action_index"],
+            )
+        self._pending_context_units.clear()
+        # Queued action evidence belongs to this exact decision. A provider
+        # refusal never calls this method, so the same candidates remain
+        # available for the request retry without being promoted to history.
+        # A bootstrap call (select_catalog offer) is NOT an agent decision:
+        # its request cannot carry queued action evidence, so draining here
+        # would silently drop evidence queued for the NEXT decision (the
+        # deferred-catalog rehearsal failure, run 34743962908).
+        if drain_action_queue:
+            self._queued_decision_candidates.clear()
+
+    def queue_decision_candidates(
+        self, candidates: list[GTDecisionCandidate] | tuple[GTDecisionCandidate, ...]
+    ) -> None:
+        """Retain action evidence until the next exact provider request is built."""
+
+        if self._engine is None or self.disabled or not self.model_visible:
+            return
+        self._queued_decision_candidates.extend(
+            candidate
+            for candidate in candidates
+            if candidate.rendered or candidate.recipe is not None
+        )
+
+    def _resolve_delivery_recipe(
+        self, candidate: GTDecisionCandidate
+    ) -> GTDecisionCandidate | None:
+        """Evaluate a delivery query against the state the model will see.
+
+        The engine owns derivation: it renders the recipe's bytes now, at the
+        admission choke point, and returns the revision it rendered against.
+        Stamping that revision on the candidate means a recipe can never be
+        historical -- its bytes did not exist before this decision. An
+        unresolvable recipe is a typed skip with a journal row, never a silent
+        drop and never a stale fallback.
+        """
+        recipe = candidate.recipe or {}
+        kind = str(recipe.get("kind") or candidate.kind or "")
+        resolver = getattr(self._engine, "resolve_delivery_recipe", None)
+        resolved: Any = None
+        if callable(resolver):
+            try:
+                resolved = resolver(recipe)
+            except Exception as exc:  # noqa: BLE001 - recipes are correct-or-quiet
+                self._engine.store.append(
+                    "delivery_recipe_unresolved",
+                    kind=kind,
+                    reason=f"{type(exc).__name__}:{str(exc)[:120]}",
+                    supersession_key=candidate.supersession_key,
+                )
+                return None
+        else:
+            self._engine.store.append(
+                "delivery_recipe_unresolved",
+                kind=kind,
+                reason="resolver_unavailable",
+                supersession_key=candidate.supersession_key,
+            )
+            return None
+        if not resolved or not resolved[0]:
+            reason = str(
+                getattr(self._engine, "_recipe_empty_reason", "") or "empty_render"
+            )
+            # A lane-dead reason (``*_unavailable``) is a run-level fact and
+            # dedups on its own; a content-empty answer dedups per query shape
+            # (paths/files minus per-transaction volatility) so a retried edit
+            # does not re-log an identical skip while a genuinely different
+            # query still gets its own row.
+            params = recipe.get("params") or {}
+            if reason.endswith("_unavailable") or reason == "graph_unavailable":
+                params_key = ""
+            else:
+                stable = {
+                    key: value
+                    for key, value in params.items()
+                    if key not in {"transaction_sha256", "post_revision"}
+                }
+                params_key = hashlib.sha256(
+                    json.dumps(stable, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()[:16]
+            graph_revision = ""
+            snapshot_fn = getattr(self._engine, "graph_query_snapshot", None)
+            if callable(snapshot_fn):
+                try:
+                    graph_revision = str(
+                        getattr(snapshot_fn(), "graph_revision", "") or ""
+                    )
+                except Exception:  # noqa: BLE001 - telemetry never blocks a skip
+                    graph_revision = ""
+            dedup = (
+                kind,
+                reason,
+                str(candidate.supersession_key or ""),
+                graph_revision,
+                params_key,
+            )
+            if dedup in self._recipe_unresolved_seen:
+                return None
+            self._recipe_unresolved_seen.add(dedup)
+            self._engine.store.append(
+                "delivery_recipe_unresolved",
+                kind=kind,
+                reason=reason,
+                supersession_key=candidate.supersession_key,
+            )
+            return None
+        rendered = str(resolved[0])
+        render_revision = str(resolved[1]) if len(resolved) > 1 else ""
+        metadata = dict(resolved[2]) if len(resolved) > 2 and resolved[2] else {}
+        artifact_reference = (
+            dict(resolved[3])
+            if len(resolved) > 3 and isinstance(resolved[3], Mapping)
+            else None
+        )
+        self._engine.store.append(
+            "delivery_recipe_resolved",
+            kind=kind,
+            rendered_bytes=len(rendered.encode("utf-8")),
+            render_revision=render_revision,
+            supersession_key=candidate.supersession_key,
+        )
+        return replace(
+            candidate,
+            rendered=rendered,
+            kind=str(metadata.get("kind") or candidate.kind),
+            source_revision=render_revision or candidate.source_revision,
+            artifact_reference=artifact_reference or candidate.artifact_reference,
+            dedup_key=str(metadata.get("dedup_key") or candidate.dedup_key),
+            target=str(metadata.get("target") or candidate.target),
+            semantics=str(metadata.get("semantics") or candidate.semantics),
+            artifact_sha256=str(
+                metadata.get("artifact_sha256") or candidate.artifact_sha256
+            ),
+            next_chain_head=str(
+                metadata.get("next_chain_head") or candidate.next_chain_head
+            ),
+            verification_candidate=(
+                rendered
+                if candidate.kind == "verification_plan"
+                else candidate.verification_candidate
+            ),
+        )
+
+    def admit_decision_packet(
+        self,
+        candidates: list[GTDecisionCandidate] | tuple[GTDecisionCandidate, ...],
+        *,
+        iteration: int,
+        action_index: int,
+    ) -> GTDecisionBatch:
+        """Admit every fitting current-decision fact through the existing owner.
+
+        Producers keep ownership of fact bytes and derivation. GTSession only
+        orders the decision-local proposals and asks the adapter's transactional
+        admission boundary to prepare each one. Exposure chain state is staged
+        only after that candidate is admitted; a refused candidate therefore
+        cannot consume a dedup key, chain head, or verification proposal.
+        """
+
+        if self._engine is None or self.disabled or not self.model_visible:
+            return GTDecisionBatch()
+        additions: list[str] = []
+        evidence: list[str] = []
+        verification: list[str] = []
+        provenance: list[dict] = []
+        _, admission_chain_head = self._engine.pending_evidence_chain()
+        proposed_units = dict(self._active_context_units)
+        current_revision = str(
+            getattr(self._engine, "repository_revision", "")
+            or getattr(getattr(self._engine, "engine_state", None), "source_revision", "")
+            or ""
+        )
+
+        def is_historical(candidate: GTDecisionCandidate) -> bool:
+            if candidate.recipe is not None:
+                # Recipes render at admission against current state and get
+                # stamped then; a producer-side revision can never make one stale.
+                return False
+            return bool(
+                current_revision
+                and candidate.source_revision
+                and candidate.source_revision != current_revision
+            )
+
+        ordered = sorted(
+            candidates,
+            key=lambda candidate: (
+                1 if is_historical(candidate) else 0,
+                *_decision_candidate_order(candidate),
+            ),
+        )
+        for candidate in ordered:
+            if candidate.recipe is not None:
+                resolved = self._resolve_delivery_recipe(candidate)
+                if resolved is None:
+                    continue
+                candidate = resolved
+            if not candidate.rendered:
+                continue
+            original_sha256 = hashlib.sha256(
+                candidate.rendered.encode("utf-8")
+            ).hexdigest()
+            artifact_reference = dict(
+                candidate.artifact_reference
+                or self._store_context_unit(candidate.rendered)
+            )
+            reference_sha256 = str(artifact_reference.get("sha256") or "")
+            if artifact_reference and not self._valid_context_reference(
+                artifact_reference
+            ):
+                self._engine.store.append(
+                    "decision_context_unit_refused",
+                    reason="artifact_reference_identity_mismatch",
+                    payload_sha256=original_sha256,
+                    artifact_sha256=candidate.artifact_sha256,
+                )
+                continue
+            unit_id = candidate.unit_id or reference_sha256 or original_sha256
+            supersedes = tuple(candidate.supersedes)
+            historical = is_historical(candidate)
+            previous_unit = (
+                None if historical else proposed_units.get(candidate.supersession_key)
+            )
+            if (
+                candidate.supersession_key
+                and previous_unit is not None
+                and previous_unit["unit_id"] != unit_id
+                and previous_unit["unit_id"] not in supersedes
+            ):
+                if (
+                    candidate.source_revision
+                    and previous_unit["source_revision"]
+                    and candidate.source_revision != previous_unit["source_revision"]
+                ):
+                    supersedes = (*supersedes, previous_unit["unit_id"])
+                elif (
+                    candidate.action_index > 0
+                    and candidate.action_index > previous_unit.get("action_index", 0)
+                ):
+                    # Re-running the same command against an unchanged tree can
+                    # reverse its outcome. The later executed observation owns
+                    # the current claim even when the repository revision did
+                    # not move.
+                    supersedes = (*supersedes, previous_unit["unit_id"])
                 else:
                     self._engine.store.append(
-                        "shadow_task_start_localization",
-                        rendered_bytes=len(localization.encode("utf-8")),
+                        "decision_context_unit_refused",
+                        reason="implicit_supersession_forbidden",
+                        unit_id=unit_id,
+                        supersession_key=candidate.supersession_key,
+                        active_unit_id=previous_unit["unit_id"],
+                        source_revision=candidate.source_revision,
                     )
-        return GTDecisionBatch(context_additions=additions)
+                    continue
+            if historical:
+                supersedes = ()
+            rendered = candidate.rendered
+            if candidate.supersession_key:
+                metadata = {
+                    "unit_id": unit_id,
+                    "supersession_key": candidate.supersession_key,
+                    "source_revision": candidate.source_revision,
+                    "supersedes": list(dict.fromkeys(supersedes)),
+                    "historical": historical,
+                    "action_index": candidate.action_index,
+                }
+                header = "[GT_CONTEXT_UNIT] " + json.dumps(
+                    metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+                )
+                full = f"{header}\n{candidate.rendered}"
+                try:
+                    limit = delivery_byte_limit(
+                        lane=candidate.lane, kind=candidate.kind
+                    )
+                except ValueError as exc:
+                    # An unmapped lane/kind is a producer defect on ONE fact;
+                    # skip it rather than taking down the packet.
+                    self._engine.store.append(
+                        "decision_candidate_fault",
+                        kind=candidate.kind,
+                        lane=candidate.lane,
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:200],
+                    )
+                    continue
+                # Stale-revision units still carry context, but only a tight
+                # inline view: the complete bytes stay in the evidence CAS and
+                # the model never gets a fetch chore (run 34656860834).
+                if historical:
+                    limit = min(limit, 4_096)
+                if len(full.encode("utf-8")) <= limit:
+                    rendered = full
+                else:
+                    bounded = _bounded_unit_view(header, candidate.rendered, limit)
+                    if bounded is not None:
+                        rendered = bounded
+                    else:
+                        self._engine.store.append(
+                            "decision_context_unit_refused",
+                            reason="context_unit_metadata_byte_ceiling",
+                            unit_id=unit_id,
+                            supersession_key=candidate.supersession_key,
+                            source_revision=candidate.source_revision,
+                        )
+                        continue
+            payload_sha256 = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+            try:
+                admitted = self._engine.admit_model_visible_delivery(
+                    lane=candidate.lane,
+                    kind=candidate.kind,
+                    rendered=rendered,
+                    action_index=candidate.action_index or action_index,
+                    iteration=iteration,
+                    dedup_key=candidate.dedup_key,
+                    target=candidate.target,
+                    semantics=candidate.semantics,
+                    artifact_sha256=candidate.artifact_sha256,
+                )
+            except Exception as exc:  # noqa: BLE001 - engine fault on one fact
+                self._engine.store.append(
+                    "decision_candidate_fault",
+                    kind=candidate.kind,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                )
+                continue
+            if not admitted:
+                continue
+            if candidate.supersession_key:
+                unit = {
+                    "unit_id": unit_id,
+                    "supersession_key": candidate.supersession_key,
+                    "supersedes": tuple(dict.fromkeys(supersedes)),
+                    "source_revision": candidate.source_revision,
+                    "artifact_sha256": candidate.artifact_sha256,
+                    "artifact_reference": artifact_reference,
+                    "historical": historical,
+                    "action_index": candidate.action_index,
+                    "admitted_iteration": iteration,
+                    "rendered": rendered,
+                }
+                self._pending_context_units[payload_sha256] = unit
+                if not historical:
+                    proposed_units[candidate.supersession_key] = {
+                        "unit_id": unit_id,
+                        "source_revision": candidate.source_revision,
+                        "action_index": candidate.action_index,
+                    }
+                self._engine.store.append(
+                    "decision_context_unit_prepared",
+                    delivery_identity=payload_sha256,
+                    unit_id=unit_id,
+                    supersession_key=candidate.supersession_key,
+                    supersedes=list(unit["supersedes"]),
+                    source_revision=candidate.source_revision,
+                    artifact_sha256=candidate.artifact_sha256,
+                    artifact_reference=artifact_reference,
+                    historical=historical,
+                    action_index=candidate.action_index,
+                )
+            if candidate.dedup_key and (
+                candidate.previous_chain_head
+                or candidate.next_chain_head
+                or candidate.verification_candidate
+            ):
+                previous_chain_head = candidate.previous_chain_head
+                next_chain_head = candidate.next_chain_head
+                if candidate.next_chain_head:
+                    previous_chain_head = admission_chain_head
+                    next_chain_head = chain_hash(
+                        admission_chain_head or _MINISWE_CHAIN_GENESIS,
+                        rendered.encode("utf-8"),
+                    )
+                try:
+                    self._engine.stage_exposure(
+                        rendered=rendered,
+                        dedup_key=candidate.dedup_key,
+                        previous_chain_head=previous_chain_head,
+                        next_chain_head=next_chain_head,
+                        verification_candidate=candidate.verification_candidate,
+                    )
+                except Exception as exc:  # noqa: BLE001 - skip, don't amputate
+                    self._engine.store.append(
+                        "decision_candidate_fault",
+                        kind=candidate.kind,
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:200],
+                    )
+                    continue
+                if candidate.next_chain_head:
+                    admission_chain_head = next_chain_head
+            additions.append(rendered)
+            evidence.append(candidate.kind)
+            if candidate.kind == "verification_plan":
+                verification.append(rendered)
+            provenance.append({
+                "event": "decision_candidate_admitted",
+                "kind": candidate.kind,
+                "dedup_key": candidate.dedup_key,
+                "payload_sha256": payload_sha256,
+            })
+        return GTDecisionBatch(
+            context_additions=additions,
+            evidence=evidence,
+            verification=verification,
+            provenance=provenance,
+        )
 
     def after_action(
         self,
@@ -298,6 +1579,206 @@ class GTSession:
             )
         return batch
 
+    def plan_gate_budget(self) -> tuple[float, int | None]:
+        """Remaining budget; None steps means Mini-SWE's explicit unlimited mode."""
+        agent = self._plan_agent
+        if agent is None:
+            return 0.0, 0
+        import time
+
+        # ``config`` reads through getattr, not attribute access: the gate now
+        # runs on every marker submit including no-plan consults, and a
+        # budget read must never raise -- a raised read lands in degrade()
+        # and disables the session, which is how a missing attribute used to
+        # silently skip post-execution observation entirely.
+        config = getattr(agent, "config", None)
+        limit = float(getattr(config, "wall_time_limit_seconds", 0) or 0)
+        started = float(getattr(agent, "_start_time", 0) or 0)
+        remaining_seconds = (
+            max(0.0, limit - (time.time() - started)) if limit and started else 0.0
+        )
+        configured_steps = getattr(config, "step_limit", None)
+        step_limit = int(configured_steps or 0)
+        remaining_steps = (
+            None if configured_steps is not None and step_limit == 0
+            else max(0, step_limit - int(getattr(agent, "n_calls", 0) or 0))
+        )
+        return remaining_seconds, remaining_steps
+
+    def _drain_verification_boundary(self) -> None:
+        """Coalesce pending checks before a verification decision, preserving reserve."""
+        if not getattr(self._engine, "_pending_check_ids", None):
+            return
+        from .persistent_plan.gate import MIN_REMAINING_SECONDS, budget_allows_refusal
+
+        remaining_seconds, remaining_steps = self.plan_gate_budget()
+        if not budget_allows_refusal(remaining_seconds, remaining_steps)[0]:
+            return
+        allowance = min(30, max(0, remaining_seconds - MIN_REMAINING_SECONDS))
+        environment = getattr(self._plan_agent, "env", None)
+        drain = getattr(self._engine, "drain_plan_checks", None)
+        if allowance < 1 or environment is None or not callable(drain):
+            return
+        try:
+            drain(environment, budget_seconds=allowance)
+        except Exception as exc:  # verification plumbing must not prevent the native decision
+            self.degrade("plan_check_boundary", exc)
+
+    def plan_submit_gate(self) -> bool:
+        """Decide, BEFORE the submit command runs, whether to let it through.
+
+        This must be a pre-execution decision. Once the command has executed and
+        raised ``Submitted`` the terminal is native and cannot be suppressed --
+        ``miniswe_runtime`` says so at that seam and is right to. A gate
+        consulted after the fact would journal a refusal and change nothing,
+        which is worse than no gate because it would read as working.
+
+        Refusals are unconditional while blocking evidence exists: budget and
+        stall facts reach the journal as evidence, never as an accept.
+        Acceptance is permission to submit, not a correctness certificate.
+        """
+        if self._engine is None or self.disabled:
+            return True
+        plan = getattr(self._engine, "persistent_plan", None)
+        # Run 35168421439: the plan bootstrap died on a provider timeout and
+        # this early return shipped the submit over 3 live RED predicates
+        # without a consult -- ``no_plan`` must mean "no row census", never
+        # "no gate". The decide() call below is what journals the consult.
+        has_plan_rows = plan is not None and bool(getattr(plan, "rows", ()))
+        from .persistent_plan.gate import decide
+
+        remaining_seconds, remaining_steps = self.plan_gate_budget()
+        try:
+            unmet = self._engine.unmet_plan_rows() if has_plan_rows else ()
+        except Exception:  # noqa: BLE001 - a gate fault must never block
+            return True
+        # The drain and baseline recheck can still close outstanding rows and
+        # turn this refusal path into a clean accepted submission -- the only
+        # way a refused run recovers. They run whenever enough wall clock
+        # remains to submit afterward; the refusal itself never checks the
+        # reserve. Re-read the clock after any verification work.
+        if remaining_seconds > _SUBMIT_ROOM_SECONDS:
+            if has_plan_rows:
+                drain = getattr(self._engine, "drain_plan_checks", None)
+                environment = getattr(self._plan_agent, "env", None)
+                if callable(drain) and environment is not None:
+                    drain(environment, budget_seconds=min(30, max(0, remaining_seconds - _SUBMIT_ROOM_SECONDS)))
+            # The baseline recheck reads plan_inputs, not plan rows: a
+            # regression is blocking evidence even when the plan never built.
+            regressions, baseline_status = self._plan_baseline_check()
+            remaining_seconds, remaining_steps = self.plan_gate_budget()
+            unmet = self._engine.unmet_plan_rows() if has_plan_rows else ()
+        else:
+            regressions, baseline_status = (), "budget_not_checked"
+        previous = self._plan_gate_last_unmet
+        if previous is not None and set(previous) - set(unmet):
+            self._plan_gate_stalled_refusals = 0
+        # A RED predicate bound to no plan row is blocking evidence the row
+        # census cannot see: evaluate_failing_observation reddens any matched
+        # contract obligation, and _link_obligations never guaranteed every
+        # obligation a row. They refuse under their own reason so the journal
+        # distinguishes an unmapped-predicate refusal from an unmet-row one.
+        unmapped_red = getattr(self._engine, "unmapped_red_predicates", None)
+        unresolved = tuple(unmapped_red()) if callable(unmapped_red) else ()
+        predicate_labels = (
+            {
+                key: getattr(
+                    getattr(self._engine, "predicates", {}).get(key),
+                    "description",
+                    "",
+                ) or key
+                for key in unresolved
+            }
+            if unresolved
+            else None
+        )
+        decision = decide(
+            plan=plan,
+            unmet_rows=unmet,
+            regressions=regressions,
+            remaining_seconds=remaining_seconds,
+            remaining_steps=remaining_steps,
+            refusals=self._plan_gate_refusals,
+            refusals_without_progress=self._plan_gate_stalled_refusals,
+            baseline_status=baseline_status,
+            row_states={
+                row.row_id: self._engine.plan_row_state(row.row_id)
+                for row in getattr(plan, "rows", ())
+            },
+            predicate_mapped_rows=tuple(key for key, value in getattr(
+                self._engine, "plan_row_predicates", {}).items() if value),
+            unresolved_predicates=unresolved,
+            predicate_labels=predicate_labels,
+        )
+        self._engine.store.append("plan_gate_decision", **decision.as_row())
+        if decision.accepted:
+            return True
+        self._plan_gate_refusals += 1
+        # Did the previous refusal actually buy anything? A row that has left
+        # the unmet set since then is evidence the agent is acting on the gate.
+        # A refusal that changed nothing adds to the journaled stall count --
+        # evidence of a non-compliant submitter, never a concession.
+        self._plan_gate_stalled_refusals += 1
+        self._plan_gate_last_unmet = tuple(unmet)
+        self._engine.pending_directives.append(decision.directive)
+        return False
+
+    def _plan_baseline_check(self) -> tuple[tuple[str, ...], str]:
+        """Re-run the captured suite once, to name what stopped passing."""
+        inputs = getattr(self._engine, "plan_inputs", None)
+        if inputs is None or not inputs.baseline.captured:
+            return (), getattr(getattr(inputs, "baseline", None), "status", "")
+        from .runtime_observation import capture_workspace, diff_workspace
+        environment = getattr(self._plan_agent, "env", None)
+        child_env = environment.execution_env() if callable(getattr(environment, "execution_env", None)) else None
+        before = capture_workspace(self.config.repo_root, excluded_roots=(self._engine.store.root,))
+        env_digest = hashlib.sha256(json.dumps(child_env, sort_keys=True).encode()).hexdigest() if child_env is not None else ""
+        cache_key = (before.revision, env_digest, inputs.baseline.command, inputs.baseline.output_sha256)
+        if (self._plan_baseline_report is not None
+                and before.complete and env_digest
+                and getattr(self, "_plan_baseline_key", None) == cache_key):
+            report = self._plan_baseline_report
+            return report.newly_failing, report.status
+        from .persistent_plan.baseline import compare_to_baseline
+
+        # Automatic checks and snapshot capture may already have consumed most
+        # of the available allowance. The protected finalization reserve is not
+        # a baseline budget, even when the initial suite was slow.
+        remaining_seconds, _ = self.plan_gate_budget()
+        from .persistent_plan.gate import MIN_REMAINING_SECONDS
+        allowance = min(max(30.0, inputs.baseline.duration_seconds * 2),
+                        max(0.0, remaining_seconds - MIN_REMAINING_SECONDS))
+        if allowance < 1:
+            return (), "budget_not_checked"
+
+        try:
+            report = compare_to_baseline(
+                inputs.baseline,
+                self.config.repo_root,
+                budget_seconds=allowance,
+                execution_env=child_env,
+            )
+        except Exception:  # noqa: BLE001 - a probe fault is never a blocker
+            return (), "probe_failed"
+        finally:
+            after = capture_workspace(self.config.repo_root, excluded_roots=(self._engine.store.root,))
+            transaction = diff_workspace(before, after, action_id=self._engine.global_action,
+                                         command="gt_baseline_recheck")
+            self._engine.record_repository_snapshot(after, boundary="after_baseline_recheck")
+            self._engine.record_edit_transaction(transaction)
+            if transaction.changes:
+                if self._engine.phase != "IMPLEMENT":
+                    self._engine.begin_implement()
+                self._engine.note_edit(transaction.changed_paths)
+            self._engine._automatic_check_generation = getattr(self._engine, "_automatic_check_generation", 0) + 1
+        if before.revision != after.revision or not after.complete:
+            report.status = "unknown"
+            report.detail = "Baseline check changed source or snapshot capture was incomplete"
+        self._plan_baseline_report = report
+        self._plan_baseline_key = cache_key
+        self._engine.store.append("plan_baseline_recheck", **report.as_dict())
+        return (report.newly_failing if report.regressed else ()), report.status
+
     def request_submit(self) -> tuple[bool, GTDecisionBatch]:
         """The submit decision. Returns (accepted, decision batch)."""
         if self._engine is None or self.disabled:
@@ -310,26 +1791,1073 @@ class GTSession:
                     mode=self.mode.value,
                     predicate_ids=list(blocking),
                 )
+            self._journal_gate_verdict()
             accepted = self._engine.advisory_submit_decision()
             return accepted, GTDecisionBatch()
         accepted = self._engine.submit_decision()
         batch = GTDecisionBatch(policy=["accept" if accepted else "deny"])
         return accepted, batch
 
+    def _journal_gate_verdict(self) -> None:
+        """Journal the verdict the gate would have reached, post-terminal.
+
+        A marker the model assembled at runtime (string concat, expansion)
+        never matches ``is_submit_command``'s text check, so the submit
+        reaches this path without a pre-execution consult -- run
+        35168421439's bypass class. Nothing can suppress an executed
+        command, but the audit must still distinguish "the gate saw clean
+        evidence" from "the gate never ran". Read-only: no suite recheck,
+        no directive, no refusal counter -- this is evidence, not policy.
+        """
+        try:
+            plan = getattr(self._engine, "persistent_plan", None)
+            has_plan_rows = plan is not None and bool(getattr(plan, "rows", ()))
+            from .persistent_plan.gate import decide
+
+            remaining_seconds, remaining_steps = self.plan_gate_budget()
+            unmet = self._engine.unmet_plan_rows() if has_plan_rows else ()
+            unmapped_red = getattr(self._engine, "unmapped_red_predicates", None)
+            unresolved = tuple(unmapped_red()) if callable(unmapped_red) else ()
+            predicate_labels = (
+                {
+                    key: getattr(
+                        getattr(self._engine, "predicates", {}).get(key),
+                        "description",
+                        "",
+                    ) or key
+                    for key in unresolved
+                }
+                if unresolved
+                else None
+            )
+            decision = decide(
+                plan=plan,
+                unmet_rows=unmet,
+                regressions=(),
+                remaining_seconds=remaining_seconds,
+                remaining_steps=remaining_steps,
+                refusals=self._plan_gate_refusals,
+                refusals_without_progress=self._plan_gate_stalled_refusals,
+                baseline_status="post_terminal_not_checked",
+                row_states={
+                    row.row_id: self._engine.plan_row_state(row.row_id)
+                    for row in getattr(plan, "rows", ())
+                },
+                predicate_mapped_rows=tuple(key for key, value in getattr(
+                    self._engine, "plan_row_predicates", {}).items() if value),
+                unresolved_predicates=unresolved,
+                predicate_labels=predicate_labels,
+            )
+            self._engine.store.append(
+                "plan_gate_decision",
+                enforcement="post_terminal",
+                **decision.as_row(),
+            )
+        except Exception as exc:  # noqa: BLE001 - verdict plumbing must not lose the submit
+            self.degrade("post_terminal_gate_verdict", exc)
+
+    def _seal_plan_recheck(self) -> None:
+        """Refresh stale bound-check evidence on the submitted tree.
+
+        The submit gate is deliberately lenient - it blocks only on current
+        negative evidence - so a task can reach FINISHED with rows whose only
+        defect is evidence captured before the last edits. completion_state
+        is the last point where the workspace is quiescent and the journal is
+        still open. Never raises: verification plumbing must not lose the
+        run's receipts.
+        """
+        engine = self._engine
+        if engine is None or self.disabled:
+            return
+        if getattr(engine, "phase", "") != "FINISHED":
+            return
+        plan = getattr(engine, "persistent_plan", None)
+        if plan is None or not getattr(plan, "rows", ()):
+            return
+        environment = getattr(self._plan_agent, "env", None)
+        recheck = getattr(engine, "seal_plan_recheck", None)
+        if environment is None or not callable(recheck):
+            return
+        try:
+            recheck(environment)
+        except Exception as exc:  # noqa: BLE001 - verification plumbing fault
+            self.degrade("plan_seal_recheck", exc)
+
     def completion_state(self) -> dict[str, Any]:
         """Final session state, including honest verified/unverified."""
         if self._engine is None:
             return {"verified": False, "terminal": "internal_error"}
+        self._seal_plan_recheck()
         state = dict(self._engine.final_state())
         state.update({
             "gt_mode": self.mode.value,
             "gt_disabled": self.disabled,
             "gt_disabled_stage": self.disabled_stage,
             "assurance": self.assurance_state.value,
+            "engine_integrity": self.integrity_receipt(),
         })
+        if not state["engine_integrity"]["valid"]:
+            state["verified"] = False
         return state
+
+    def integrity_receipt(self) -> dict[str, Any]:
+        """Engine participation is independent of whether obligations are green."""
+        issues = []
+        if self._engine is None:
+            issues.append("engine_missing")
+        if self.disabled:
+            issues.append("engine_disabled")
+        if self.assurance_state is not Assurance.FULL:
+            issues.append("engine_assurance_degraded")
+        if self._open_executions:
+            issues.append("execution_terminal_missing")
+        return {"schema": "gt.engine_integrity.v1", "valid": not issues,
+                "mode": self.mode.value, "disabled_stage": self.disabled_stage,
+                "issues": issues}
+
+    def suppress(self, action: Mapping[str, Any], result: Any, *, reason: str) -> Any:
+        """Account for a policy refusal without claiming that an executor ran."""
+        if self.mode is GTMode.OFF:
+            return result
+        try:
+            def digest(value: Any) -> str:
+                return hashlib.sha256(json.dumps(
+                    value, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+                ).encode()).hexdigest()
+            head = self._engine.store.receipt()["event_head"]
+            self._engine.store.append(
+                "action_suppressed", action_index=self._engine.global_action,
+                action_id=f"{self.config.task_id}:suppressed:{head}",
+                action_sha256=digest(dict(action)), result_sha256=digest(result),
+                reason=reason, executed=False,
+            )
+        except Exception as exc:
+            self.degrade("suppression_receipt", exc)
+        return result
+
+    def execute(self, action: Mapping[str, Any], executor: Callable[[], Any]) -> Any:
+        """Own execution accounting without replacing the model's chosen action."""
+        if self.mode is GTMode.OFF:
+            return executor()
+        self._execution_sequence += 1
+        try:
+            journal_head = str(self._engine.store.receipt()["event_head"])
+        except Exception as exc:
+            self.degrade("execution_identity", exc)
+            journal_head = "unavailable"
+        execution_id = f"{self.config.task_id}:execution:{self._execution_sequence}:{journal_head}"
+        self._open_executions.add(execution_id)
+
+        def record(event: str, **details: Any) -> None:
+            try:
+                if self._engine is None:
+                    raise RuntimeError("engine_missing")
+                self._engine.store.append(event, execution_id=execution_id,
+                                          action_index=self._engine.global_action, **details)
+            except Exception as exc:
+                self.degrade("execution_receipt", exc)
+
+        try:
+            action_digest = hashlib.sha256(json.dumps(
+                dict(action), sort_keys=True, ensure_ascii=False, separators=(",", ":")
+            ).encode()).hexdigest()
+        except (TypeError, ValueError) as exc:
+            self.degrade("action_identity", exc)
+            action_digest = ""
+        record("execution_started", action_sha256=action_digest,
+               engine_disabled=self.disabled)
+        try:
+            result = executor()
+        except BaseException as exc:
+            record("execution_finished", disposition="raised", error_type=type(exc).__name__)
+            raise
+        else:
+            observation = result[1] if isinstance(result, tuple) and len(result) == 2 else result
+            try:
+                result_digest = hashlib.sha256(json.dumps(
+                    observation, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+                ).encode()).hexdigest()
+            except (TypeError, ValueError) as exc:
+                self.degrade("execution_result_identity", exc)
+                result_digest = ""
+            record("execution_finished", disposition="returned", result_sha256=result_digest)
+            return result
+        finally:
+            self._open_executions.discard(execution_id)
+
+    def _mandatory_capability_rows(
+        self,
+    ) -> list[tuple[str, CapabilityState, str, bool]]:
+        """State of the capabilities that must never degrade silently.
+
+        Derived from what the run actually recorded, never from configuration.
+        An unreadable or absent record is FAILED, not unknown - "we could not
+        tell" and "it worked" must not look alike in the one summary a human
+        reads at the end of a task.
+
+        Both readings come from the journal because that is where the code
+        paths that actually do the work report. This first read the promotion
+        seal beside the graph instead, which is written by indexer's
+        start_lsp_promotion - a reporting-only vestige the benchmark path never
+        schedules through. It always says promotion_not_scheduled, so a run
+        whose coordinator promoted successfully would still have been named as
+        a capability that did not work, and the gate built on it enforced
+        language-server presence while claiming to enforce promotion. The
+        benchmark tap is _maybe_schedule_lsp_promotion (at adoption) ->
+        _schedule_lsp_candidate, which journals lsp_promotion_scheduled and
+        then lsp_promotion_terminal, so those are what get read.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        rows: list[tuple[str, CapabilityState, str, bool]] = []
+        store = getattr(self._engine, "store", None)
+        journal = getattr(store, "path", None)
+
+        receipt_cache: dict[str, dict[str, object] | None] = {}
+
+        def _terminal_receipt(
+            row: dict[str, object],
+        ) -> dict[str, object] | None:
+            """The receipt blob a terminal row points at, or None.
+
+            The journal row carries only status and disposition; everything
+            that says what the promotion actually did - the yield counts, and
+            which graph revision it produced - lives in the receipt blob
+            _record_lsp_terminal writes beside the journal. None means
+            unreadable, which must not be reported as success: "we could not
+            tell" and "it worked" do not look alike anywhere in this function.
+
+            The blob directory comes from the journal's own parent rather than
+            store.root, because root is not in the EvidenceStore protocol
+            (request_history.py declares put_blob/blob_exists and no root) and
+            a conforming store without it would make every published run
+            report yield_unknown, failing closed but invisibly.
+
+            Reads are cached on the blob path: terminal selection reads the
+            same receipt the yield check does, and an unreadable blob should
+            cost one disk miss, not two.
+            """
+            relative = str(row.get("artifact_blob") or "")
+            if not relative or journal is None:
+                return None
+            if relative not in receipt_cache:
+                try:
+                    payload = _json.loads(
+                        (_Path(journal).parent / relative).read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - unreadable is unknown
+                    payload = None
+                receipt_cache[relative] = (
+                    payload if isinstance(payload, dict) else None
+                )
+            return receipt_cache[relative]
+
+        def _promotion_yield(
+            row: dict[str, object],
+        ) -> tuple[int, int, bool | None, str] | None:
+            """(promoted, tombstoned, selection_complete, limitation), or None.
+
+            `verified`, `corrected`, and `selected` are the tier. The first two
+            stamp resolution_method='lsp' at confidence 1.0 on a legacy CALLS
+            edge (resolve.py:944-959). `selected` is the same certification
+            recorded on the canonical callsite projection (SELECTED_TARGET +
+            candidate_state='selected' + derivation facts) for callsites with
+            no uniquely-bindable legacy edge — same-line same-lexeme clusters a
+            column-blind edge tuple cannot honestly name, or callsites that
+            emitted no CALLS row at all. `deleted` is NOT a removal and NOT a
+            promotion: it stamps resolution_method='lsp_window_miss' at
+            confidence 0.0 and trust tier SPECULATIVE (resolve.py:994-1008), a
+            non-destructive tombstone the closure excludes from traversal.
+            Summing it made a receipt of verified=0, corrected=0, deleted=40
+            report WORKING on a graph whose lsp tier was empty and forty of
+            whose edges had just been demoted out of traversal - the same
+            defect this yield check was added to prevent. It is real work and
+            it is reported, but never in the number that decides WORKING.
+            """
+            receipt = _terminal_receipt(row)
+            if receipt is None:
+                return None
+            promoted = sum(
+                int(receipt.get(key) or 0)
+                for key in ("verified", "corrected", "selected")
+            )
+            # selection_complete says whether the ambiguous-edge SELECTION saw
+            # the whole tier. Both callers of _get_ambiguous_edges leave `limit`
+            # at its default 500 against 6,621 ambiguous callsites on the gate
+            # task, so a positive promoted count can describe a 92.5%-
+            # unattempted tier.
+            #
+            # It is PER LANGUAGE, not top level: background_promotion.py writes
+            # it into the per-language receipt and stores that under
+            # terminal["language_receipts"][language] (:379-384), while verified,
+            # corrected and deleted are summed onto the terminal itself (:385).
+            # Reading it at the top level returns None on EVERY receipt, which
+            # would have reported selection_unknown on every run forever - a
+            # universally firing signal, which is worse than the silence it
+            # replaced. The whole tier is covered only if every attempted
+            # language covered its own; one language that failed or was
+            # cancelled writes {status, error_type} with no selection fields,
+            # and that is genuinely unknown rather than complete.
+            languages = receipt.get("language_receipts")
+            if not isinstance(languages, dict) or not languages:
+                # No language was attempted, so nothing was left unselected.
+                # Zero yield is already DEGRADED on the count; do not also call
+                # a certain no-op unknown.
+                complete: bool | None = True
+            else:
+                flags = [
+                    row.get("selection_complete") if isinstance(row, dict) else None
+                    for row in languages.values()
+                ]
+                if any(flag is None for flag in flags):
+                    complete = None
+                else:
+                    complete = all(bool(flag) for flag in flags)
+            return (
+                promoted,
+                int(receipt.get("deleted") or 0),
+                complete,
+                next(
+                    (
+                        str(row.get("selection_limitation"))
+                        for row in (languages or {}).values()
+                        if isinstance(row, dict) and row.get("selection_limitation")
+                    ),
+                    "",
+                )
+                if isinstance(languages, dict)
+                else "",
+            )
+
+        def _leg_env_bound_reason(leg: object) -> str:
+            """The named environment reason this leg could not produce edges.
+
+            Empty string means serviceable: the leg could have produced
+            edges, so producing none is a real capability failure. A
+            non-empty return is a short stable label, not free text - it is
+            appended to the capability row's evidence, where a reader needs
+            to tell WHICH environment gap excused the tier apart from a
+            laundered failure.
+
+            Unserviceable means the environment, not the capability, stopped
+            the leg: an install/substrate gap journaled as
+            install_missing_reason (resolve.py's GT_SS_ELIGIBILITY label -
+            e.g. no workspace TypeScript install and no tsserver.path), a
+            server that never launched, zero promotable candidates on the leg
+            (candidate_unit_count == 0), a launch that never served a single
+            request (probe_requests_issued == 0 - the init-time shape
+            gopls-without-module-cache and jdtls-without-JDK take as well),
+            or a project that never became ready inside the server's whole
+            readiness budget. An unreadable leg cannot prove unserviceable,
+            so it counts as serviceable - fail closed, the same direction as
+            a missing receipt.
+            """
+            if not isinstance(leg, dict):
+                return ""
+            if str(leg.get("install_missing_reason") or ""):
+                return "install_missing"
+            # Every check below fires only on positive evidence: an absent
+            # field cannot prove the leg was unserviceable, and an unproven
+            # leg stays serviceable - the same fail-closed direction as a
+            # missing receipt.
+            if (
+                "server_launched" in leg
+                and not leg.get("server_launched")
+            ):
+                return "server_never_launched"
+            if (
+                "candidate_unit_count" in leg
+                and int(leg.get("candidate_unit_count") or 0) == 0
+            ):
+                return "no_candidates"
+            if (
+                "probe_requests_issued" in leg
+                and int(leg.get("candidate_unit_count") or 0) > 0
+                and int(leg.get("probe_requests_issued") or 0) == 0
+            ):
+                return "no_requests_issued"
+            # A leg that SERVED requests was treated as serviceable outright,
+            # and that is the hole run 34801009507 fell through: all 29 rust
+            # legs launched, issued requests and got empty answers back
+            # because rust-analyzer never finished loading a cargo workspace
+            # no task image installs cargo for. project_ready is the
+            # receipt's OWN verdict on that (resolve.py stamps it from the
+            # _await_project_ready barrier), and nothing here read it, so a
+            # toolchain the image never shipped kept lsp_promotion required
+            # and failed the strict gate on edges no leg could have made.
+            #
+            # The predicate is deliberately the same one resolve.py:1870 uses
+            # to stamp its own "still indexing the workspace" failure_detail,
+            # so the reporter and the producer cannot disagree about which
+            # legs this describes: readiness false, queries went out and came
+            # back empty, and nothing at all was converted. A leg that missed
+            # the barrier and still converted edges proves the capability
+            # worked and stays required; readiness reached with empty answers
+            # (run 34996816912's pyright shape) is a real gap and stays
+            # required too.
+            #
+            # Only the budget is named. No recorded receipt carries a
+            # toolchain or cargo_available field, so naming cargo as the
+            # cause would assert something no artifact proves - the wait
+            # expiring is the whole of what the receipt witnesses.
+            if (
+                leg.get("project_ready") is False
+                and float(leg.get("project_ready_wait_ms") or 0.0) > 0.0
+                and int(leg.get("failed_empty") or 0) > 0
+                and (
+                    int(leg.get("verified") or 0)
+                    + int(leg.get("corrected") or 0)
+                    + int(leg.get("deleted") or 0)
+                ) == 0
+            ):
+                return "project_not_ready:readiness_budget_exhausted"
+            return ""
+
+        dense_state = CapabilityState.FAILED
+        dense_evidence = "dense_index_receipt_absent"
+        # dense_index_ready rows are of two kinds and only one of them is a
+        # measurement of the index. A measurement row carries the receipt's
+        # own readiness verdict: query_ready true, or false with a named
+        # reason from a path that actually checked something -
+        # dense_query_not_ready and dense_index_not_ready from rank_documents,
+        # dense_refresh_incomplete from the wait-window refresh probe, and the
+        # {ExcType}:{msg} reasons the exception path stamps for real failures
+        # (KeyError:'GT_DENSE_MODEL_DIR', a model that will not load - all of
+        # which ARE capability failures). The exception path at
+        # miniswe_integration.py:4890 also journals the deliberate
+        # RuntimeError("graph_snapshot_not_current") refusal: the hybrid query
+        # path declining to answer while the graph is mid-rebuild. That row
+        # says the query was refused, nothing about the index, so it is not a
+        # measurement and must never overwrite one. It still happened, though:
+        # a journal of nothing but refusals is DEGRADED never-queryable, not
+        # WORKING-on-silence and not absent-receipt.
+        dense_measured = False
+        dense_refused = False
+        lsp_state = CapabilityState.FAILED
+        lsp_evidence = "promotion_never_scheduled"
+        # `required` is a different axis from state: it asks whether the run
+        # was obliged to populate the tier at all, not whether the tier is
+        # populated. A graph with zero promotable candidates, or one whose
+        # every language leg was unserviceable on environment grounds, could
+        # not have produced edges - the row still reports DEGRADED, but the
+        # run is not failed for lacking a toolchain the image never shipped.
+        # A leg that could serve requests and still produced nothing is a
+        # real gap and stays required.
+        lsp_required = True
+        no_serviceable = False
+        # The distinct environment reasons, in leg order, that excused
+        # the tier. Kept beside the flag because evidence is what a
+        # human reads; the flag alone never said which gap it was.
+        no_serviceable_reasons = ""
+        fail_open: dict[str, object] | None = None
+        scheduled = False
+        terminals: list[dict[str, object]] = []
+        schedule_order: list[str] = []
+        # Every adopted graph, in journal order. The newest is the graph the
+        # tier question is about; a terminal is matched to it below either by
+        # what it produced (a published receipt's output_graph_sha256) or by
+        # what it ran on (input_graph_revision).
+        publications: list[dict[str, object]] = []
+        # The scoped-merge salvage channel: a doomed promotion's candidate is
+        # merged into the live graph and the merge output adopted as its own
+        # publication - a second way the lsp tier lands on the newest graph,
+        # invisible to the terminal channel. Run 34849119441 attested
+        # DEGRADED on a graph whose tier merge-b0bptwou had populated,
+        # because the reporter only ever looked at terminals.
+        salvage_rows: list[dict[str, object]] = []
+        try:
+            for position, line in enumerate(
+                _Path(journal).read_text(encoding="utf-8").splitlines()
+            ):
+                if not line.strip():
+                    continue
+                row = _json.loads(line)
+                # Journal order IS chronological order: append-only, single
+                # writer, under a lock, fsynced per row. So the parse position
+                # is the ordering, and it is always present. Deriving it from
+                # the row's own `sequence` field needed a default for rows that
+                # lack one, and every default collides with a real position -
+                # zero sorts a sequence-less row oldest, exactly as -1 and
+                # len(schedule_order) each mis-sorted an unscheduled revision
+                # earlier in this function's history. Mixed journals are not
+                # hypothetical: ExternalStateStore.__init__ contemplates them
+                # and hands them to a verifier rather than blessing them.
+                row["_position"] = position
+                event = row.get("event")
+                if event == "gt_degraded_fail_open":
+                    # degrade() is idempotent, so the first row is the causal
+                    # fault and any later one is a consequence of it.
+                    fail_open = fail_open or row
+                elif event == "dense_index_ready":
+                    if row.get("query_ready") is True:
+                        dense_measured = True
+                        dense_state = CapabilityState.WORKING
+                        dense_evidence = "dense_index_ready_query_ready"
+                    elif str(row.get("reason") or "").endswith(
+                        "graph_snapshot_not_current"
+                    ):
+                        # A query-time refusal: the hybrid path declined to
+                        # answer while the graph was mid-rebuild
+                        # (miniswe_integration.py:4870 raises it deliberately,
+                        # fail-closed). endswith rather than equality because
+                        # the stamped reason is {ExcType}:{msg} - the type is
+                        # incidental, the refusal is the message. It is not a
+                        # measurement of the index, so it never overwrites a
+                        # measured verdict - which is exactly what the
+                        # last-row-wins read did, reporting DEGRADED for a
+                        # 515-document index that had answered real queries.
+                        dense_refused = True
+                    else:
+                        dense_measured = True
+                        dense_state = CapabilityState.DEGRADED
+                        dense_evidence = "dense_index_ready_not_query_ready"
+                elif event == "graph_publication":
+                    publications.append(row)
+                elif event == "lsp_promotion_scheduled":
+                    scheduled = True
+                    revision = str(row.get("graph_revision") or "")
+                    if revision and revision not in schedule_order:
+                        schedule_order.append(revision)
+                elif event == "lsp_promotion_terminal":
+                    # A run enriches every graph revision it publishes, so
+                    # several terminals are normal, and poll() journals the
+                    # draining ones AFTER the active one
+                    # (graph_coordinator.py:430-433) - a stale receipt for r0
+                    # lands after r1's success, so the literal last row is the
+                    # wrong answer. Rows are therefore ranked by which graph
+                    # they describe, never by disposition: filtering on the
+                    # obsolete prefix looked equivalent and is not, because
+                    # "obsolete" is emitted by BOTH the draining path (:395)
+                    # and the ACTIVE path (:312) on the same literal. Dropping
+                    # it discarded the most common real outcome - promotion
+                    # succeeded and lost the publication race - and reported it
+                    # as though promotion had never run at all.
+                    # Rank stamped HERE, not after the loop. An unscheduled
+                    # revision is newer than everything scheduled SO FAR, which
+                    # is what this position knows and all that is true.
+                    # Computing it afterwards ranked such a row above every
+                    # scheduled revision, so a run whose FIRST enrichment threw
+                    # and whose every later one published cleanly reported
+                    # FAILED. Ranking it oldest had the mirror fault. Both were
+                    # attempts to synthesise recency from a list that failures
+                    # never join; the parse order already has it.
+                    revision = str(row.get("input_graph_revision") or "")
+                    row["_rank"] = (
+                        schedule_order.index(revision)
+                        if revision in schedule_order else len(schedule_order)
+                    )
+                    terminals.append(row)
+                elif event == "lsp_salvage":
+                    salvage_rows.append(row)
+        except Exception:  # noqa: BLE001 - an unreadable journal is a failure
+            # Both must fail closed. The journal is parsed line by line, so a
+            # truncated final line - the likeliest corruption when a process is
+            # killed at its wall-clock budget - can leave dense_state WORKING
+            # from an earlier row while the evidence says unreadable. A state
+            # and an evidence string that contradict each other are worse than
+            # either, and this is the summary a human reads.
+            dense_state = CapabilityState.FAILED
+            dense_evidence = "dense_index_receipt_unreadable"
+            lsp_evidence = "promotion_journal_unreadable"
+            terminals = []
+        else:
+            if not dense_measured and dense_refused:
+                # Every observation was the query path refusing while the
+                # graph was mid-rebuild: the index was asked and never once
+                # measured. That is neither absent-receipt FAILED nor
+                # WORKING-on-silence - it is the honest middle, and it gets
+                # its own string so a run that only ever refused cannot be
+                # mistaken for one that measured not-ready.
+                dense_state = CapabilityState.DEGRADED
+                dense_evidence = "dense_index_never_queryable"
+            if terminals:
+                terminal = None
+                adopted = (
+                    str(publications[-1].get("graph_sha256") or "")
+                    if publications else ""
+                )
+                # The scoped-merge salvage that minted the adopted graph, if
+                # any: lsp_salvage outcome=published carries the merge's own
+                # output revision, which publish_graph journaled as the
+                # adopted graph_sha256. A match means the lsp tier is on the
+                # newest graph through the salvage channel even though no
+                # terminal produced it - the doomed leg's candidate is the
+                # merge's input.
+                salvaged: dict[str, object] | None = None
+                # The terminal whose candidate the merge consumed, matched by
+                # task_id: its receipt is the yield the salvaged tier
+                # carries. None means the merge published but its source leg
+                # cannot be read back - coverage is then unknown, not free.
+                salvage_terminal: dict[str, object] | None = None
+                # Set when the evaluated terminal produced a graph on the
+                # adopted publication's own ancestry - the only case where
+                # its published disposition proves the tier on THIS graph.
+                produced_on_chain = False
+                if adopted:
+                    # The question this row answers is whether the lsp tier is
+                    # populated on the graph the run LAST adopted. Ranking
+                    # terminals by scheduled-revision order answers a
+                    # different question - which enrichment was scheduled
+                    # most recently - and a paid run showed the two diverge:
+                    # promotion 1 published the enriched graph (cb98d86cc07b
+                    # in, 3190f8458641 out), promotion 2 then ran against
+                    # 3190f8458641, found zero new mutations, and correctly
+                    # refused a pointless republication. Newest-scheduled
+                    # named that refusal the verdict and reported DEGRADED on
+                    # a graph whose lsp tier was populated. So the terminal
+                    # evaluated is the one that PRODUCED the newest adopted
+                    # graph when a published receipt says so
+                    # (output_graph_sha256, written by the producer beside
+                    # input_graph_sha256 and bound by the certifier at
+                    # indexer.py:2345) - its own yield decides. If no
+                    # published output matches, the newest graph is a
+                    # non-lsp build and the honest witness is the terminal
+                    # that ran ON it: its disposition says why the tier is
+                    # empty on that base (no_edge_mutations, obsolete,
+                    # not_publishable, failed) exactly as it does today.
+                    by_sha = {
+                        str(row.get("graph_sha256") or ""): row
+                        for row in publications
+                    }
+                    # Walk publication ancestry from the adopted graph: an
+                    # amend's manifest names the graph it derived from, so
+                    # a tier minted by an older promotion or a salvage
+                    # merge rides the parent link onto every descendant.
+                    # The NEAREST ancestor either channel minted decides;
+                    # a publication with no recorded parent is a fresh
+                    # build - the tier restarts empty there and the walk
+                    # must not reach through it onto the discarded graph's
+                    # evidence.
+                    cursor = adopted
+                    seen: set[str] = set()
+                    while cursor and cursor not in seen:
+                        seen.add(cursor)
+                        produced = [
+                            row for row in terminals
+                            if str(row.get("disposition") or "") == "published"
+                            and str(
+                                (_terminal_receipt(row) or {}).get(
+                                    "output_graph_sha256"
+                                ) or ""
+                            ) == cursor
+                        ]
+                        if produced:
+                            terminal = max(
+                                produced, key=lambda row: row["_position"]
+                            )
+                            produced_on_chain = True
+                            break
+                        salvaged = next(
+                            (
+                                row for row in reversed(salvage_rows)
+                                if str(row.get("outcome") or "") == "published"
+                                and str(row.get("graph_revision") or "")
+                                == cursor
+                            ),
+                            None,
+                        )
+                        if salvaged is not None:
+                            break
+                        parent_row = by_sha.get(cursor)
+                        if parent_row is None:
+                            break
+                        cursor = str(
+                            parent_row.get("parent_graph_sha256") or ""
+                        )
+                    if salvaged is not None:
+                        salvage_task = str(salvaged.get("task_id") or "")
+                        salvage_terminal = next(
+                            (
+                                row for row in reversed(terminals)
+                                if salvage_task
+                                and str(
+                                    (_terminal_receipt(row) or {}).get(
+                                        "task_id"
+                                    ) or ""
+                                ) == salvage_task
+                            ),
+                            None,
+                        )
+                    if terminal is None:
+                        targeted = [
+                            row for row in terminals
+                            if str(row.get("input_graph_revision") or "")
+                            == adopted
+                        ]
+                        if targeted:
+                            terminal = max(
+                                targeted, key=lambda row: row["_position"]
+                            )
+                if terminal is None:
+                    # Fallbacks, each fail-closed. No graph_publication rows
+                    # at all, or no terminal targets the newest adopted one:
+                    # the tier's fate on that base was never attempted, so
+                    # keep the scheduled-order reading - the newest graph the
+                    # run scheduled an enrichment for is the one whose fate
+                    # the report is about; a terminal for an older revision
+                    # describes a graph that has already been replaced.
+                    newest = max(row["_rank"] for row in terminals)
+                    current = [
+                        row for row in terminals if row["_rank"] == newest
+                    ]
+                    # Direct indexing, not .get(... or 0): every appended row
+                    # is stamped one line earlier, so a missing stamp is a
+                    # defect and should raise here rather than silently tie
+                    # with the first revision. This is a function whose entire
+                    # history is silent wrong answers.
+                    terminal = max(current, key=lambda row: row["_position"])
+                status = str(terminal.get("status") or "")
+                disposition = str(terminal.get("disposition") or "")
+                if status == "no_op":
+                    # languages_promotable == []: nothing on this graph was
+                    # promotable, so nothing was owed. The tier is still
+                    # reported empty (DEGRADED below), but an empty tier with
+                    # no candidates is not a capability the run must answer
+                    # for - it is the correct outcome for that graph.
+                    lsp_required = False
+                else:
+                    legs = (
+                        _terminal_receipt(salvage_terminal or terminal) or {}
+                    ).get(
+                        "language_receipts"
+                    )
+                    reasons = (
+                        [_leg_env_bound_reason(leg) for leg in legs.values()]
+                        if isinstance(legs, dict) and legs
+                        else []
+                    )
+                    if reasons and all(reasons):
+                        # Every leg was environment-bound: the toolchain, the
+                        # server, the request path or the readiness barrier
+                        # stopped it before any work could run. Honest
+                        # DEGRADED stays, but the strict gate cannot require
+                        # edges no leg could make. One serviceable leg - an
+                        # empty reason - keeps the whole tier required, so an
+                        # unserviceable neighbour never launders it.
+                        lsp_required = False
+                        no_serviceable = True
+                        # dict.fromkeys, not a set: a human reads these in
+                        # the order the legs ran, and a set would reorder
+                        # them unpredictably between interpreter runs.
+                        no_serviceable_reasons = ",".join(
+                            dict.fromkeys(reasons)
+                        )
+                if status == "no_op":
+                    # no_op IS languages_promotable == [] - that is the branch
+                    # condition. Its coordinator disposition is the generic
+                    # not_publishable bucket, which implies something existed
+                    # that could not be published, so the true reason is named
+                    # here instead of borrowing a string that misleads.
+                    lsp_evidence = "terminal_no_op:nothing_promotable"
+                else:
+                    lsp_evidence = (
+                        f"terminal_{status or 'unknown'}:{disposition or 'none'}"
+                    )
+                if (
+                    produced_on_chain
+                    or salvaged is not None
+                    # No publications at all means the chain cannot refute
+                    # the terminal's own claim either - evaluate its
+                    # receipt on its face, where an unreadable blob still
+                    # earns :yield_unknown rather than a pass.
+                    or (disposition == "published" and not publications)
+                ):
+                    # Publication is necessary and NOT sufficient. A receipt can
+                    # come back succeeded with verified/corrected/deleted all
+                    # zero: edge_mutations is then 0, the closure is never
+                    # rebuilt, and the candidate is a semantically identical
+                    # copy of the base that certifies and publishes cleanly.
+                    # Reporting WORKING there would reproduce the original
+                    # complaint - an empty highest-precision tier described as
+                    # healthy - inside the reporter built to catch it. The
+                    # salvage channel is held to the same standard: the merge
+                    # adopting the doomed candidate's edges is the
+                    # publication fact, and that candidate's own receipt
+                    # still decides the yield.
+                    if salvaged is None:
+                        yield_row = terminal
+                        skipped = 0
+                        applied = 0
+                    else:
+                        yield_row = salvage_terminal
+                        skipped = (
+                            int(salvaged.get("skipped_stale") or 0)
+                            + int(salvaged.get("skipped_diverged") or 0)
+                        )
+                        applied = int(salvaged.get("applied") or 0)
+                    yielded = (
+                        _promotion_yield(yield_row)
+                        if yield_row is not None else None
+                    )
+                    if yielded is None:
+                        lsp_state = CapabilityState.DEGRADED
+                        lsp_evidence += (
+                            f":salvage_published:{applied}_applied:yield_unknown"
+                            if salvaged is not None else ":yield_unknown"
+                        )
+                    elif skipped:
+                        # The merge refused rows the live graph had moved
+                        # under the candidate: provably partial coverage -
+                        # the salvage analogue of selection_bounded, not of
+                        # a clean publish.
+                        lsp_state = CapabilityState.DEGRADED
+                        lsp_evidence += (
+                            f":salvage_partial:{applied}_applied"
+                            f":{skipped}_skipped"
+                        )
+                    else:
+                        promoted, tombstoned, complete, limitation = yielded
+                        lsp_state = (
+                            CapabilityState.WORKING if promoted > 0
+                            else CapabilityState.DEGRADED
+                        )
+                        lsp_evidence += (
+                            f":salvage_published:{promoted}_edges"
+                            if salvaged is not None else f":{promoted}_edges"
+                        )
+                        if tombstoned:
+                            lsp_evidence += f":{tombstoned}_tombstoned"
+                        # A positive edge count says the tier is NON-EMPTY. It
+                        # does not say the tier was ATTEMPTED. Reporting WORKING
+                        # off the count alone is the proxy this whole reporter
+                        # exists to stop, one level further in.
+                        if complete is False:
+                            lsp_state = CapabilityState.DEGRADED
+                            lsp_evidence += (
+                                f":selection_bounded:{limitation or 'unnamed'}"
+                            )
+                        elif complete is None:
+                            # A receipt written before the field existed did not
+                            # measure coverage. That is "we could not tell",
+                            # which this reporter exists to keep distinct from
+                            # "it worked" - the optimistic-on-unknown reading is
+                            # the mistake this ticket made five times. Kept as a
+                            # SEPARATE evidence string so an old receipt still
+                            # does not read like a measured-incomplete one.
+                            lsp_state = CapabilityState.DEGRADED
+                            lsp_evidence += ":selection_unknown"
+                elif status == "succeeded":
+                    # Promotion worked and the enriched graph never became the
+                    # published one - obsolete, obsolete_after_certification or
+                    # not_publishable, i.e. it lost the race with the next
+                    # rebuild. The tier is empty, but for a completely
+                    # different reason than promotion failing, and the two must
+                    # not read alike: this one says tune the race, not fix LSP.
+                    lsp_state = CapabilityState.DEGRADED
+                elif status in {"no_op", "cancelled"}:
+                    # Both add zero edges. no_op was WORKING here on the
+                    # reasoning that the machinery functioned - but that axis
+                    # makes cancelled WORKING too, and the axis asked for is
+                    # whether the tier is populated.
+                    lsp_state = CapabilityState.DEGRADED
+                else:
+                    # unavailable (no server for a promotable language) and
+                    # failed both mean the highest-precision edge tier is empty
+                    # for a reason the run could have prevented.
+                    lsp_state = CapabilityState.FAILED
+                # An enrichment publishes only if no edit landed while it ran
+                # (graph_coordinator marks it "obsolete" otherwise). A pass over
+                # 6,621 callsites takes ~21 minutes at the measured 0.19s/edge,
+                # against an observed edit cadence of one every ~47s - so the
+                # tier can be empty for a purely structural reason with nothing
+                # wrong. Say how many times that happened, in the run's own
+                # words, instead of leaving it to be diagnosed afterwards from
+                # a single DEGRADED row.
+                obsolete = sum(
+                    1 for row in terminals
+                    if str(row.get("disposition") or "") == "obsolete"
+                )
+                # Only when there is more than one terminal. With a single
+                # terminal the disposition already in this string says it, and
+                # "obsolete:1_of_1_obsolete" is noise that trains a reader to
+                # skip the field.
+                if obsolete and len(terminals) > 1:
+                    lsp_evidence += f":{obsolete}_of_{len(terminals)}_obsolete"
+                if len({str(row.get("status") or "") for row in terminals}) > 1:
+                    # Only when the terminals DISAGREE. Every published graph
+                    # gets an enrichment, so a healthy five-edit task produces
+                    # five terminals; a bare count would fire on every clean
+                    # run and train the reader to ignore the field.
+                    lsp_evidence += f":last_of_{len(terminals)}"
+                if no_serviceable and lsp_state is not CapabilityState.WORKING:
+                    # The environment reason is why the tier is empty; naming
+                    # it in evidence keeps the not-required row distinguishable
+                    # from a serviceable failure instead of relying on the flag.
+                    # The bare flag was not enough either: it blamed "the
+                    # environment" without saying which part, so a readiness
+                    # budget that expired and a toolchain that was never
+                    # installed read identically to whoever has to decide
+                    # whether to fix the image or the code.
+                    lsp_evidence += ":no_serviceable_candidates"
+                    if no_serviceable_reasons:
+                        lsp_evidence += f":{no_serviceable_reasons}"
+            elif scheduled:
+                lsp_state = CapabilityState.DEGRADED
+                lsp_evidence = "scheduled_no_terminal"
+        rows.append(("dense_retrieval", dense_state, dense_evidence, True))
+        rows.append(("lsp_promotion", lsp_state, lsp_evidence, lsp_required))
+
+        # A run in which GT switched itself off partway through is the single
+        # case a reader most needs told, and it was the one they were least
+        # likely to learn: degrade() records gt_degraded_fail_open and nothing
+        # anywhere read it - not a gate, not a receipt, not a report, not even
+        # a test. Every claim GT makes after that point comes from an observer
+        # that has already stopped observing.
+        #
+        # Both the journal and the session are consulted because degrade()
+        # wraps its own append in try/except - the state sink may be the very
+        # component that failed - so GT can be disabled with no row to show
+        # for it. That case is named rather than passed over.
+        if fail_open is not None:
+            # The row also carries the exception message, which is unbounded
+            # run content and never goes in evidence; capability() asserts the
+            # evidence is secret-free. A stage and an exception type name are
+            # enough to say what stopped observing and where.
+            # Read back from the journal, which lives inside the task
+            # container at <state_dir>/<task_id>/events.jsonl - a path the
+            # benchmarked agent can write. So neither field is trusted as
+            # text: each is admitted only if it matches a value this codebase
+            # authored, and is otherwise reported as unrecognised. That makes
+            # the question of whether the evidence could carry a secret moot
+            # rather than argued, and it is the honest reading anyway, since a
+            # stage this build does not define is not a stage.
+            stage = str(fail_open.get("stage") or "")
+            if stage not in _DEGRADE_STAGES:
+                stage = "unrecognized_stage"
+            # An exception class name is always an identifier, but an
+            # identifier is unbounded in length and this field is
+            # agent-writable, so the shape check is paired with a length bound.
+            # stage is clamped against a closed SET and this against a SHAPE;
+            # the bound is what stops the two from being different kinds of
+            # promise about what can reach a diagnostics artifact.
+            error_type = str(fail_open.get("error_type") or "")
+            if not error_type.isidentifier() or len(error_type) > 64:
+                error_type = "unrecognized_error"
+            rows.append((
+                "gt_engine_enabled", CapabilityState.FAILED,
+                f"disabled_at_{stage}:{error_type}", True,
+            ))
+        elif self.disabled and self.mode is GTMode.OFF:
+            # Asked to be off, and every other artifact agrees: gt_active is
+            # False, the treatment reports INACTIVE. Not a fault, and not
+            # required - GT running is not a requirement of a run configured
+            # not to run it. capability() defaults required=True, and that
+            # default is what made a control arm raise a CI error and, in
+            # smoke_stage's prior-gate check, a hard ValueError blaming
+            # verification rather than naming configuration. Putting it on the
+            # row means no consumer has to re-derive it from the state.
+            rows.append((
+                "gt_engine_enabled", CapabilityState.UNEXERCISED,
+                f"gt_disabled_by_configuration:{self.disabled_stage}", False,
+            ))
+        elif self.disabled and self.disabled_stage in CONFIGURED_OFF_STAGES:
+            # The kill switch fired on a run whose mode is NOT off. Nothing
+            # else in the pipeline notices: miniswe_gt_run computes
+            # gt_active = not gt_off and gt_mode != "off", deliberately
+            # excluding the kill switch ("a kill switch may preserve native
+            # execution but cannot relabel ON as OFF"), so the run reports
+            # gt_mode enforced, treatment groundtruth, treatment_status ACTIVE,
+            # and treatment_not_active never fires. This row is the ONLY
+            # artifact that knows GT did nothing all run.
+            #
+            # So it is required, and it is a failure rather than merely
+            # unexercised: the run asserted GT was on and delivered none of it.
+            # Grouping it with the OFF arm - which CONFIGURED_OFF_STAGES does,
+            # because that constant exists to name the strings __init__ can
+            # produce and not to classify whether GT was required - let a run
+            # with zero GT behaviour past every gate.
+            rows.append((
+                "gt_engine_enabled", CapabilityState.FAILED,
+                f"gt_disabled_by_kill_switch:{self.mode.value}", True,
+            ))
+        elif self.disabled:
+            rows.append((
+                "gt_engine_enabled", CapabilityState.FAILED,
+                f"disabled_at_{self.disabled_stage or 'unknown'}:unrecorded", True,
+            ))
+        else:
+            rows.append((
+                "gt_engine_enabled", CapabilityState.WORKING,
+                "no_fail_open_recorded", True,
+            ))
+        return rows
 
     def close(self, terminal: str) -> None:
         self._terminal = terminal
         if self._engine is not None:
+            closer = getattr(self._engine, "close_graph_lifecycle", None)
+            if callable(closer):
+                closer()
+        if self._engine is not None:
+            # Terminal patch observation at the submission boundary. The
+            # finalization-stage rows in _finalization_candidate fired only on
+            # prompt-path stages and only when a --patch-output baseline was
+            # captured, so gate-one's journal recorded nothing about what the
+            # submitted tree contained. Emit the terminal row unconditionally:
+            # status:unavailable names the non-Git case instead of going quiet.
+            baseline = getattr(self, "_patch_baseline", "")
+            try:
+                from pathlib import Path
+
+                from scripts.miniswe_supervisor import submission_patch_state
+
+                patch_state = submission_patch_state(
+                    Path(self.config.repo_root), baseline)
+            except Exception as exc:  # noqa: BLE001 - observation must not mask close
+                patch_state = {
+                    "layout": "gt.submission_patch_state.v1",
+                    "baseline": baseline, "status": "unavailable",
+                    "reason": type(exc).__name__,
+                }
+            self._engine.store.append(
+                "submission_patch_observed", stage="submit", **patch_state)
             self._engine.store.append("session_closed", terminal=terminal)
+            diagnostics = getattr(self._engine, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.capability(
+                    "receipt_writer",
+                    CapabilityState.WORKING,
+                    "append_only_event_journal_present",
+                )
+                diagnostics.capability(
+                    "capability_negotiation",
+                    CapabilityState.WORKING
+                    if self.assurance_state is Assurance.FULL
+                    else CapabilityState.DEGRADED,
+                    "declared_capabilities_checked",
+                )
+                # Mandatory capability must say at the end of the task whether
+                # it worked. Both of these were reportable only as an absence
+                # in someone else's receipt: a run with no language servers or
+                # no embedder finished looking normal, and the person reading
+                # the result had nothing telling them GT ran with less than GT
+                # has. Reported here so the end-of-task summary names them.
+                for name, state, evidence, required in (
+                    self._mandatory_capability_rows()
+                ):
+                    diagnostics.capability(
+                        name, state, evidence, required=required
+                    )
+                if self.assurance_state is Assurance.DEGRADED:
+                    diagnostics.record(
+                        DiagnosticEvent.create(
+                            code=DiagnosticCode.GT_CAPABILITY_DEGRADED,
+                            severity="ERROR",
+                            phase="startup",
+                            subsystem="session",
+                            capability="capability_negotiation",
+                            task_id=self._engine.task_id,
+                            classification="primary",
+                            cause="capability_assurance_degraded",
+                            impact="full_assurance_prohibited",
+                            recovery="declare_and_verify_required_host_capabilities",
+                            retryable=False,
+                            event_sequence=int(
+                                self._engine.store.receipt()["event_count"]
+                            ),
+                        )
+                    )
+                diagnostics.seal()

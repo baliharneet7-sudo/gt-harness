@@ -17,6 +17,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from .patch_transport import normalize_patch_transport
+except ImportError:  # direct script execution
+    from patch_transport import normalize_patch_transport
+
 _PH_PATH = Path(__file__).resolve().parent / "patch_hygiene.py"
 _ph_spec = importlib.util.spec_from_file_location("patch_hygiene_conv", _PH_PATH)
 _ph = importlib.util.module_from_spec(_ph_spec)
@@ -60,7 +65,7 @@ def convert(input_path: str, output_dir: str) -> None:
             total += 1
 
             raw_patch = obj.get("test_result", {}).get("git_patch", "") or ""
-            patch = raw_patch.strip()
+            patch = normalize_patch_transport(raw_patch)
 
             # Patch integrity logging (P0-6)
             import hashlib

@@ -4,8 +4,15 @@ from __future__ import annotations
 import hashlib
 import shlex
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
+
+from .verification_contract import (
+    DependencyFootprint,
+    conservative_execution_footprint,
+    dependency_footprint_affected,
+    edited_paths_provably_inert,
+)
 
 
 def _normalize_command(command: str) -> str:
@@ -47,6 +54,19 @@ class Receipt:
     epoch: int
     status: PredicateStatus
     semantic: bool = False
+    dependency_footprint: DependencyFootprint | None = None
+    evidence_kind: str = "legacy_unspecified"
+    coverage_basis: str = "legacy_unspecified"
+    source_revision_at_observation: str = ""
+    action_index: int | None = None
+    execution_protocol: str = ""
+
+    def evidence_summary(self) -> dict:
+        """Conserve asserted scope without publishing raw command/output text."""
+        value = asdict(self)
+        value["command_sha256"] = hashlib.sha256(value.pop("command").encode()).hexdigest()
+        value["evidence_layout"] = "gt.predicate_evidence.v1"
+        return value
 
 
 @dataclass(frozen=True)
@@ -92,6 +112,7 @@ class GroundtruthController:
         self.verification_plan = verification_plan
         self._verification_plan_evaluated = False
         self._verification_plan_epoch: int | None = None
+        self._submit_refusals = 0
 
     @property
     def phase(self) -> str:
@@ -99,19 +120,21 @@ class GroundtruthController:
 
     @property
     def unmet_predicates(self) -> tuple[str, ...]:
-        return tuple(sorted(k for k, v in self._status.items() if v is not PredicateStatus.GREEN))
+        return tuple(
+            sorted(
+                key
+                for key, status in self._status.items()
+                if status is not PredicateStatus.GREEN
+                or (receipt := self._receipts.get(key)) is None
+                or receipt.epoch != self.workspace_epoch
+            )
+        )
 
     @property
     def blocking_predicates(self) -> tuple[str, ...]:
-        """Only predicates with a RED receipt (real failing evidence) block.
+        """Return every obligation lacking current positive semantic evidence."""
 
-        D3-G: an UNKNOWN predicate is an open question, not a failure. Refusing
-        a submission because evidence was merely never gathered is what forced
-        the model into verification spirals (measured: modernize 8->31 calls,
-        portfolio 26->70). GT blocks only when it has a receipt that says the
-        obligation is actually failing.
-        """
-        return tuple(sorted(k for k, v in self._status.items() if v is PredicateStatus.RED))
+        return self.unmet_predicates
 
     @property
     def unmet_reasons(self) -> tuple[str, ...]:
@@ -122,9 +145,9 @@ class GroundtruthController:
 
     @property
     def blocking_reasons(self) -> tuple[str, ...]:
-        reasons = [f"failing obligation evidence for {key}" for key in self.blocking_predicates]
-        # An unevaluated verification plan is UNKNOWN, not positive failure
-        # evidence. Keep it visible in unmet_reasons but never block on it.
+        reasons = [f"unverified obligation evidence for {key}" for key in self.blocking_predicates]
+        if self.verification_plan and not self._verification_plan_evaluated:
+            reasons.append("verification_plan not evaluated")
         return tuple(reasons)
 
     def _transition(self, target: str) -> None:
@@ -147,26 +170,56 @@ class GroundtruthController:
     def begin_submit(self) -> None:
         self._transition("SUBMIT")
 
-    def note_edit(self, paths: Iterable[str], *, invalidate: Iterable[str] | None = None) -> None:
+    def note_edit(self, paths: Iterable[str], *,
+                  invalidate: Iterable[str] | None = None) -> frozenset[str]:
+        """Discard the proofs this edit invalidated; return which ones those were.
+
+        The return value is the set this method ACTUALLY reset, which is not the
+        set the caller asked for: ``invalidate`` is a request, and the receipt
+        footprints below add to it. A caller that assumed its own request was
+        applied would describe the edit wrongly -- and one did, for every run
+        ever recorded. See MiniSweAdapter.note_edit.
+        """
+
         if self._phase != "IMPLEMENT":
             raise LifecycleError(f"edit is illegal in {self._phase}")
-        if list(paths):
+        edited_paths = tuple(paths)
+        affected: set[str] = set()
+        if edited_paths:
             self.workspace_epoch += 1
             affected = set(invalidate) if invalidate is not None else set(self._status)
+            for key, receipt in self._receipts.items():
+                footprint = (
+                    receipt.dependency_footprint
+                    or conservative_execution_footprint(basis="unrecorded")
+                )
+                if dependency_footprint_affected(footprint, edited_paths) and not (
+                    edited_paths_provably_inert(footprint, edited_paths)
+                ):
+                    affected.add(key)
             for key in affected:
                 if key in self._status:
                     self._status[key] = PredicateStatus.UNKNOWN
                     self._receipts.pop(key, None)
+            for key, receipt in tuple(self._receipts.items()):
+                self._receipts[key] = replace(receipt, epoch=self.workspace_epoch)
             self._verification_plan_evaluated = False
             self._verification_plan_epoch = None
             # C3: a legitimate re-run of the same command AFTER an edit is new
             # work, not repetition. The repeat budget is per-epoch.
             self._repeats.clear()
+        return frozenset(affected)
 
     def record_receipt(self, predicate_id: str, command: str, exit_code: int,
                        output: str, *, epoch: int,
                        status: str | PredicateStatus | None = None,
-                       semantic: bool = False) -> Receipt:
+                       semantic: bool = False,
+                       dependency_footprint: DependencyFootprint | None = None,
+                       evidence_kind: str = "legacy_unspecified",
+                       coverage_basis: str = "legacy_unspecified",
+                       source_revision_at_observation: str = "",
+                       action_index: int | None = None,
+                       execution_protocol: str = "") -> Receipt:
         if predicate_id not in self.predicates:
             raise LifecycleError(f"unknown predicate {predicate_id}")
         if epoch != self.workspace_epoch:
@@ -182,7 +235,8 @@ class GroundtruthController:
         receipt = Receipt(
             predicate_id, command, exit_code,
             hashlib.sha256(output.encode("utf-8")).hexdigest(), epoch, parsed,
-            semantic,
+            semantic, dependency_footprint, evidence_kind, coverage_basis,
+            source_revision_at_observation, action_index, execution_protocol,
         )
         self._receipts[predicate_id] = receipt
         self._status[predicate_id] = parsed
@@ -211,7 +265,15 @@ class GroundtruthController:
             raise LifecycleError(
                 f"submit decision requires VERIFY then SUBMIT, got {self._phase}"
             )
-        accepted = not self.blocking_reasons
+        blockers = self.blocking_reasons
+        if blockers and self._submit_refusals == 0:
+            self._submit_refusals = 1
+            self._transition("IMPLEMENT")
+            return False
+        # The first mismatch gets exactly one corrective opportunity. A second
+        # submit may terminate, but final_state remains explicitly unverified
+        # while any obligation lacks current GREEN semantic evidence.
+        accepted = not blockers or self._submit_refusals == 1
         self._transition("FINISHED" if accepted else "IMPLEMENT")
         return accepted
 
@@ -260,9 +322,5 @@ class GroundtruthController:
         _ = (output, diff_hash)
 
     def provider_suffix(self) -> str:
-        # NEVER leak pred-<sha> IDs: the journal is a readable file in the task
-        # container and round-9 showed the model cat's it (a harness audit +
-        # internal-ID leak into its own observation bytes). Report the COUNT of
-        # unmet predicates, not their internal identities.
-        n_unmet = len(self.unmet_predicates)
-        return f"phase={self._phase}; unmet_count={n_unmet}; epoch={self.workspace_epoch}"
+        unmet = ", ".join(self.unmet_predicates[:2]) or "none"
+        return f"phase={self._phase}; unmet={unmet}; epoch={self.workspace_epoch}"

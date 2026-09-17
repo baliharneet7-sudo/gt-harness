@@ -1,0 +1,865 @@
+from __future__ import annotations
+
+import errno
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
+from gt_engine import indexer
+
+_REAL_KILL_INDEX_PROCESS_TREE = indexer._kill_index_process_tree
+
+
+@pytest.fixture(autouse=True)
+def _enable_guarded_test_process_on_windows(monkeypatch):
+    if os.name == "nt":
+        def verified_test_kill(process):
+            if process.poll() is None:
+                process.kill()
+            return True
+
+        monkeypatch.setattr(indexer, "_has_verified_index_process_tree_guard", lambda: True)
+        monkeypatch.setattr(indexer, "_kill_index_process_tree", verified_test_kill)
+
+
+def _write_fake_indexer(path: Path) -> None:
+    path.write_text(
+        """from __future__ import annotations
+import os
+import sqlite3
+import sys
+
+output = sys.argv[sys.argv.index('-output') + 1]
+assert 'OPENAI_API_KEY' not in os.environ
+assert 'OPENROUTER_API_KEY' not in os.environ
+assert os.environ['GOMAXPROCS'] == '2'
+assert os.environ['GOMEMLIMIT'].endswith('B')
+with sqlite3.connect(output) as connection:
+    connection.execute('create table project_meta (key text)')
+sys.stdout.write('x' * 200_000)
+sys.stderr.write('y' * 200_000)
+""",
+        encoding="utf-8",
+    )
+
+
+def test_bounded_indexer_sanitizes_environment_and_seals_resource_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    (repo / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    fake = tmp_path / "fake-index.py"
+    _write_fake_indexer(fake)
+    monkeypatch.setenv("OPENAI_API_KEY", "SECRET-CANARY")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "SECOND-CANARY")
+    monkeypatch.setattr(indexer, "_resolved_binary_path", lambda: sys.executable)
+    monkeypatch.setattr(
+        indexer,
+        "_index_command",
+        lambda binary, root, output: [binary, str(fake), "-root", root, "-output", output],
+    )
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {"path_sha256": "a" * 64, "binary_sha256": "b" * 64},
+    )
+
+    graph = indexer.ensure_index(str(repo), state_dir=str(state))
+
+    assert graph is not None
+    evidence_path = Path(graph).with_name("index-resource.json")
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    supplied = evidence.pop("evidence_sha256")
+    encoded = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+    assert supplied == hashlib.sha256(encoded).hexdigest()
+    assert evidence["schema"] == "gt.index_resource.v1"
+    assert evidence["status"] == "completed"
+    assert evidence["stdout_bytes"] == 200_000
+    assert evidence["stderr_bytes"] == 200_000
+    assert "SECRET-CANARY" not in evidence_path.read_text(encoding="utf-8")
+    assert not list(evidence_path.parent.glob("*.stdout"))
+    assert not list(evidence_path.parent.glob("*.stderr"))
+    manifest_path = Path(graph).with_suffix(".manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["index_resource_sha256"] == hashlib.sha256(
+        evidence_path.read_bytes()
+    ).hexdigest()
+    evidence_path.write_text("{}", encoding="utf-8")
+    valid, reason = indexer._certify_published_graph(
+        Path(graph),
+        manifest_path,
+        expected_root=repo,
+        expected_binary_sha256="b" * 64,
+    )
+    assert valid is False
+    assert reason == "index_resource_mismatch"
+
+
+def test_memory_guard_failure_is_sealed_and_preserves_existing_graph(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    (repo / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    root_key = hashlib.sha256(
+        os.path.realpath(repo).encode("utf-8", "surrogatepass")
+    ).hexdigest()[:16]
+    graph = state / root_key / "graph.db"
+    graph.parent.mkdir(parents=True)
+    graph.write_bytes(b"known-good")
+    monkeypatch.setattr(
+        indexer,
+        "_run_index_bounded",
+        lambda *_args, **_kwargs: indexer.IndexProcessResult(
+            success=False,
+            status="memory_guard_triggered",
+            error_code="GT_INDEX_MEMORY_GUARD_TRIGGERED",
+            exit_code=137,
+            peak_rss_bytes=900_000_000,
+            memory_limit_bytes=800_000_000,
+        ),
+    )
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {"path_sha256": "a" * 64, "binary_sha256": "b" * 64},
+    )
+
+    assert indexer.ensure_index(str(repo), state_dir=str(state)) is None
+    assert graph.read_bytes() == b"known-good"
+    failure_path = graph.with_name("graph.failure.json")
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    supplied = failure.pop("manifest_sha256")
+    encoded = json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()
+    assert supplied == hashlib.sha256(encoded).hexdigest()
+    assert failure["error_code"] == "GT_INDEX_MEMORY_GUARD_TRIGGERED"
+    assert failure["resource_evidence_sha256"]
+
+    receipt = indexer.ensure_index_with_receipt(repo, state_dir=state)
+    assert receipt.error_type == "GT_INDEX_MEMORY_GUARD_TRIGGERED"
+    assert receipt.memory_evidence is True
+    assert receipt.exit_code == 137
+    assert receipt.resource_evidence_sha256 == failure["resource_evidence_sha256"]
+    failure_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(indexer, "ensure_index", lambda *_args, **_kwargs: None)
+    invalid = indexer.ensure_index_with_receipt(repo, state_dir=state)
+    assert invalid.error_type == "index_failure_evidence_invalid"
+    assert invalid.memory_evidence is False
+
+
+def test_bounded_indexer_kills_only_child_when_rss_guard_is_crossed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sleeper = tmp_path / "sleeper.py"
+    sleeper.write_text("import time; time.sleep(30)\n", encoding="utf-8")
+    monkeypatch.setattr(indexer, "_resolved_binary_path", lambda: sys.executable)
+    monkeypatch.setattr(
+        indexer,
+        "_index_command",
+        lambda binary, root, output: [binary, str(sleeper)],
+    )
+    limit = 64 * 1024 * 1024
+    monkeypatch.setattr(indexer, "_effective_index_memory_limit", lambda _snapshot: limit)
+    monkeypatch.setattr(indexer, "_process_rss_bytes", lambda _pid: limit + 1)
+
+    started = time.monotonic()
+    result = indexer._run_index_bounded(
+        str(tmp_path), tmp_path / "graph.db", tmp_path
+    )
+
+    assert time.monotonic() - started < 10
+    assert result.success is False
+    assert result.status == "memory_guard_triggered"
+    assert result.error_code == "GT_INDEX_MEMORY_GUARD_TRIGGERED"
+    assert result.memory_evidence is True
+
+
+def _pid_alive(pid: int) -> bool:
+    """External liveness check - the runner's own wait() is not the proof."""
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        # PROCESS_QUERY_LIMITED_INFORMATION
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            # WAIT_TIMEOUT: the handle is not signalled, so still running.
+            return kernel32.WaitForSingleObject(handle, 0) == 258
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return True
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+def test_bounded_indexer_timeout_kills_the_child_process(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Drive the real Popen -> drain -> poll -> kill path into its timeout leg.
+
+    ``command_factory`` is the late-bound seam kept for test doubles; pointing
+    it at a 30s sleeper with the module timeout at 1s exercises the actual
+    loop body that fires ``GT_INDEX_TIMEOUT``, including the teardown and the
+    pipe drainers, rather than a stand-in for any of them.
+    """
+    pid_path = tmp_path / "sleeper.pid"
+    monkeypatch.setattr(indexer, "_resolved_binary_path", lambda: sys.executable)
+    monkeypatch.setattr(indexer, "_INDEX_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(
+        indexer, "_effective_index_memory_limit", lambda _snapshot: 64 * 1024 * 1024
+    )
+
+    def sleeper_command(binary: str, _root: str, _output: str) -> list[str]:
+        return [
+            binary,
+            "-c",
+            "import os,sys,time;from pathlib import Path;"
+            "Path(sys.argv[1]).write_text(str(os.getpid()));time.sleep(30)",
+            str(pid_path),
+        ]
+
+    started = time.monotonic()
+    result = indexer._run_index_bounded(
+        str(tmp_path), tmp_path / "graph.db", tmp_path,
+        command_factory=sleeper_command,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.success is False
+    assert result.status == "timeout"
+    assert result.error_code == "GT_INDEX_TIMEOUT"
+    # The 1s bound was reached; teardown then finished well inside the waits.
+    assert 1_000 <= result.elapsed_ms < 30_000
+    assert elapsed < 30
+    # wait() inside the runner reaped the child - verify death externally too.
+    assert result.exit_code is not None
+    deadline = time.monotonic() + 5
+    while not pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pid_path.exists(), "the sleeper never reported its pid"
+    assert not _pid_alive(int(pid_path.read_text(encoding="utf-8")))
+
+
+def test_pipe_cleanup_closes_raw_descriptors_not_buffered_streams(monkeypatch) -> None:
+    closed: list[int] = []
+
+    class Stream:
+        def __init__(self, fd: int):
+            self.fd = fd
+
+        def fileno(self):
+            return self.fd
+
+        def close(self):
+            raise AssertionError("buffered close may block")
+
+    process = type("Process", (), {"stdout": Stream(7), "stderr": Stream(8)})()
+    monkeypatch.setattr(indexer.os, "close", closed.append)
+
+    indexer._close_pipe_descriptors(process)
+    assert closed == [7, 8]
+
+
+def test_windows_tree_kill_uses_taskkill_tree_flag(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Process:
+        pid = 42
+
+        @staticmethod
+        def poll():
+            return 1
+
+        @staticmethod
+        def kill():
+            raise AssertionError("parent-only kill must not be the primary path")
+
+    monkeypatch.setattr(indexer.os, "name", "nt")
+    monkeypatch.setattr(
+        indexer.subprocess, "run", lambda command, **_kwargs: calls.append(command)
+    )
+    _REAL_KILL_INDEX_PROCESS_TREE(Process())
+    assert calls == [["taskkill", "/PID", "42", "/T", "/F"]]
+
+
+def test_windows_tree_kill_falls_back_when_taskkill_times_out(monkeypatch) -> None:
+    killed: list[bool] = []
+
+    class Process:
+        pid = 42
+
+        @staticmethod
+        def poll():
+            return None
+
+        @staticmethod
+        def kill():
+            killed.append(True)
+
+    def time_out(*_args, **_kwargs):
+        raise indexer.subprocess.TimeoutExpired("taskkill", 5)
+
+    monkeypatch.setattr(indexer.os, "name", "nt")
+    monkeypatch.setattr(indexer.subprocess, "run", time_out)
+
+    _REAL_KILL_INDEX_PROCESS_TREE(Process())
+
+    assert killed == [True]
+
+
+def test_windows_runtime_refuses_parser_without_verified_tree_guard(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(indexer, "_has_verified_index_process_tree_guard", lambda: False)
+    monkeypatch.setattr(
+        indexer.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("parser must not launch"),
+    )
+
+    result = indexer._run_index_bounded(
+        str(tmp_path), tmp_path / "graph.db", tmp_path
+    )
+
+    assert result.success is False
+    assert result.status == "resource_guard_unavailable"
+    assert result.error_code == "GT_INDEX_RESOURCE_GUARD_UNAVAILABLE"
+    assert result.exit_code is None
+
+
+def test_bounded_runner_refuses_success_when_tree_teardown_is_unverified(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(indexer, "_resolved_binary_path", lambda: sys.executable)
+    monkeypatch.setattr(
+        indexer,
+        "_index_command",
+        lambda *_args: [sys.executable, "-c", "pass"],
+    )
+    monkeypatch.setattr(
+        indexer, "_effective_index_memory_limit", lambda _snapshot: 64 * 1024 * 1024
+    )
+    monkeypatch.setattr(indexer, "_kill_index_process_tree", lambda _process: False)
+
+    result = indexer._run_index_bounded(
+        str(tmp_path), tmp_path / "graph.db", tmp_path
+    )
+
+    assert result.success is False
+    assert result.status == "process_tree_unverified"
+    assert result.error_code == "GT_INDEX_PROCESS_TREE_UNVERIFIED"
+    assert result.exit_code == 0
+
+
+def test_process_group_state_is_unknown_when_proc_stat_is_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    proc = tmp_path / "proc"
+    stat = proc / "123" / "stat"
+    stat.parent.mkdir(parents=True)
+    stat.write_text("123 (child) S 1 42", encoding="utf-8")
+    original = Path.read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == stat:
+            raise PermissionError("denied")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    assert (
+        indexer._posix_process_group_state(42, proc)
+        is indexer._ProcessGroupState.UNKNOWN
+    )
+
+
+def test_process_group_state_is_unknown_when_proc_enumeration_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    original = Path.iterdir
+
+    def denied(path):
+        if path == proc:
+            raise PermissionError("denied")
+        return original(path)
+
+    monkeypatch.setattr(Path, "iterdir", denied)
+    assert (
+        indexer._posix_process_group_state(42, proc)
+        is indexer._ProcessGroupState.UNKNOWN
+    )
+
+
+def test_process_group_state_treats_permission_denied_fallback_as_live(
+    tmp_path: Path, monkeypatch
+) -> None:
+    missing_proc = tmp_path / "missing-proc"
+
+    def denied(*_args):
+        raise PermissionError(errno.EPERM, "denied")
+
+    monkeypatch.setattr(indexer.os, "killpg", denied, raising=False)
+    assert (
+        indexer._posix_process_group_state(42, missing_proc)
+        is indexer._ProcessGroupState.LIVE
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
+def test_bounded_runner_kills_redirected_descendant_after_leader_exits(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pid_path = tmp_path / "child.pid"
+    leader_script = tmp_path / "leader.py"
+    leader_script.write_text(
+        "import pathlib,subprocess,sys\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], "
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(indexer, "_resolved_binary_path", lambda: sys.executable)
+    monkeypatch.setattr(
+        indexer,
+        "_index_command",
+        lambda *_args: [sys.executable, str(leader_script), str(pid_path)],
+    )
+    monkeypatch.setattr(
+        indexer, "_effective_index_memory_limit", lambda _snapshot: 64 * 1024 * 1024
+    )
+
+    result = indexer._run_index_bounded(
+        str(tmp_path), tmp_path / "graph.db", tmp_path
+    )
+
+    assert result.success is True
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        stat = Path(f"/proc/{child_pid}/stat")
+        if not stat.exists() or stat.read_text(encoding="utf-8").split()[2] == "Z":
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("descendant survived process-group teardown")
+
+
+def test_index_memory_budget_accounts_for_current_cgroup_usage() -> None:
+    mib = 1024 * 1024
+    limit = indexer._effective_index_memory_limit(
+        {"max": 1024 * mib, "current": 800 * mib}
+    )
+
+    assert 0 < limit <= 96 * mib
+    assert indexer._effective_index_memory_limit({"max": 1024 * mib, "current": None}) == 0
+
+
+def test_partial_benchmark_identity_refuses_before_process_launch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    (repo / "main.py").write_text("pass\n", encoding="utf-8")
+    monkeypatch.setenv("GT_TASK_ID", "task-a")
+    monkeypatch.delenv("GT_PRODUCT_SOURCE_SHA", raising=False)
+    calls = 0
+
+    def run(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("gt-index must not launch")
+
+    monkeypatch.setattr(indexer, "_run_index_bounded", run)
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {"path_sha256": "a" * 64, "binary_sha256": "b" * 64},
+    )
+
+    assert indexer.ensure_index(str(repo), state_dir=str(state)) is None
+    assert calls == 0
+    failures = list(state.rglob("graph.failure.json"))
+    evidence = list(state.rglob("index-failure-resource.json"))
+    assert len(failures) == len(evidence) == 1
+    failure = json.loads(failures[0].read_text(encoding="utf-8"))
+    assert failure["error_code"] == "GT_INDEX_IDENTITY_INVALID"
+    assert failure["identity_scope"] == "benchmark_invalid"
+    receipt = indexer.ensure_index_with_receipt(repo, state_dir=state)
+    assert receipt.error_type == "GT_INDEX_IDENTITY_INVALID"
+
+
+def test_failure_pair_publication_rolls_back_on_manifest_write_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    gt_dir = tmp_path / "state"
+    gt_dir.mkdir()
+    old_evidence = gt_dir / "index-failure-resource.json"
+    old_failure = gt_dir / "graph.failure.json"
+    old_evidence.write_bytes(b"old-evidence")
+    old_failure.write_bytes(b"old-failure")
+    staged = gt_dir / ".new-resource.json"
+    staged.write_bytes(b"new-evidence")
+    reuse_key = indexer.IndexReuseKey("a" * 64, "b" * 64, "v")
+    original = indexer._sealed_json
+
+    def fail_manifest(path, payload, digest_field):
+        if path.name == "graph.failure.json":
+            raise OSError("injected publication failure")
+        return original(path, payload, digest_field)
+
+    monkeypatch.setattr(indexer, "_sealed_json", fail_manifest)
+    with pytest.raises(OSError, match="injected"):
+        indexer._publish_graph_failure(
+            gt_dir, root=str(tmp_path), reuse_key=reuse_key,
+            error_code="GT_INDEX_PROCESS_FAILED", staged_evidence=staged,
+            identity={"identity_scope": "benchmark_bound", "task_id": "task-a",
+                      "product_source_sha": "a" * 40},
+        )
+    assert old_evidence.read_bytes() == b"old-evidence"
+    assert old_failure.read_bytes() == b"old-failure"
+
+
+def test_successful_process_with_corrupt_database_emits_sealed_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    (repo / "main.py").write_text("pass\n", encoding="utf-8")
+
+    def corrupt(_root: str, output: Path, _log_dir: Path):
+        output.write_bytes(b"not sqlite")
+        return indexer.IndexProcessResult(True, "completed", "", exit_code=0)
+
+    monkeypatch.setattr(indexer, "_run_index_bounded", corrupt)
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {"path_sha256": "a" * 64, "binary_sha256": "b" * 64},
+    )
+
+    receipt = indexer.ensure_index_with_receipt(repo, state_dir=state)
+
+    assert receipt.success is False
+    assert receipt.error_type == "GT_INDEX_OUTPUT_INVALID"
+    assert receipt.resource_evidence_sha256
+
+
+def test_concurrent_index_builds_are_serialized_and_publish_one_pair(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    (repo / "main.py").write_text("pass\n", encoding="utf-8")
+    active = 0
+    maximum = 0
+    calls = 0
+
+    def build(_root: str, output: Path, _log_dir: Path):
+        nonlocal active, maximum, calls
+        active += 1
+        maximum = max(maximum, active)
+        calls += 1
+        time.sleep(0.2)
+        connection = indexer.sqlite3.connect(output)
+        try:
+            connection.execute("create table project_meta (key text)")
+            connection.commit()
+        finally:
+            connection.close()
+        active -= 1
+        return indexer.IndexProcessResult(True, "completed", "", exit_code=0)
+
+    monkeypatch.setattr(indexer, "_run_index_bounded", build)
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {"path_sha256": "a" * 64, "binary_sha256": "b" * 64},
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(lambda _item: indexer.ensure_index(str(repo), state_dir=str(state)), range(2))
+        )
+
+    assert results[0] == results[1]
+    assert maximum == 1
+    assert calls in {1, 2}
+    graph = Path(results[0])
+    manifest = json.loads(graph.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+    assert manifest["graph_sha256"] == hashlib.sha256(graph.read_bytes()).hexdigest()
+
+
+def test_failed_refresh_preserves_previous_graph_manifest_and_resource_pair(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    source = repo / "main.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+
+    def build(_root: str, output: Path, _log_dir: Path):
+        connection = indexer.sqlite3.connect(output)
+        connection.execute("create table project_meta (key text)")
+        connection.commit()
+        connection.close()
+        return indexer.IndexProcessResult(True, "completed", "", exit_code=0)
+
+    monkeypatch.setattr(indexer, "_run_index_bounded", build)
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {"path_sha256": "a" * 64, "binary_sha256": "b" * 64},
+    )
+    graph = Path(indexer.ensure_index(str(repo), state_dir=str(state)))
+    manifest = graph.with_suffix(".manifest.json")
+    resource = graph.with_name("index-resource.json")
+    before = (graph.read_bytes(), manifest.read_bytes(), resource.read_bytes())
+    source.write_text("x = 2\n", encoding="utf-8")
+    monkeypatch.setattr(
+        indexer,
+        "_run_index_bounded",
+        lambda *_args: indexer.IndexProcessResult(
+            False, "memory_guard_triggered", "GT_INDEX_MEMORY_GUARD_TRIGGERED", exit_code=-9
+        ),
+    )
+
+    assert indexer.ensure_index(str(repo), state_dir=str(state)) is None
+    assert (graph.read_bytes(), manifest.read_bytes(), resource.read_bytes()) == before
+    valid, reason = indexer._certify_published_graph(
+        graph, manifest, expected_root=repo, expected_binary_sha256="b" * 64
+    )
+    assert valid is True
+    assert reason == "ok"
+    assert graph.with_name("index-failure-resource.json").is_file()
+
+    source.write_text("x = 1\n", encoding="utf-8")
+    assert indexer.ensure_index(str(repo), state_dir=str(state)) == str(graph)
+    assert not graph.with_name("graph.failure.json").exists()
+    assert not graph.with_name("index-failure-resource.json").exists()
+
+
+def test_failure_receipt_rejects_semantically_mismatched_pair(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    (repo / "main.py").write_text("pass\n", encoding="utf-8")
+    monkeypatch.setattr(
+        indexer,
+        "_run_index_bounded",
+        lambda *_args: indexer.IndexProcessResult(
+            False, "timeout", "GT_INDEX_TIMEOUT", exit_code=-9
+        ),
+    )
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {"path_sha256": "a" * 64, "binary_sha256": "b" * 64},
+    )
+    first = indexer.ensure_index_with_receipt(repo, state_dir=state)
+    assert first.error_type == "GT_INDEX_TIMEOUT"
+    failure_path = next(state.rglob("graph.failure.json"))
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    failure["error_code"] = "GT_INDEX_OUTPUT_INVALID"
+    failure["resource_evidence_path"] = "wrong.json"
+    failure.pop("manifest_sha256")
+    failure["manifest_sha256"] = hashlib.sha256(
+        json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    failure_path.write_text(json.dumps(failure), encoding="utf-8")
+    monkeypatch.setattr(indexer, "ensure_index", lambda *_args, **_kwargs: None)
+
+    receipt = indexer.ensure_index_with_receipt(repo, state_dir=state)
+    assert receipt.error_type == "index_failure_evidence_invalid"
+
+    evidence_path = next(state.rglob("index-failure-resource.json"))
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence["status"] = "NOT_A_REAL_STATUS"
+    evidence.pop("evidence_sha256")
+    evidence["evidence_sha256"] = hashlib.sha256(
+        json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    failure["error_code"] = "GT_INDEX_TIMEOUT"
+    failure["resource_evidence_path"] = evidence_path.name
+    failure["resource_evidence_sha256"] = hashlib.sha256(
+        evidence_path.read_bytes()
+    ).hexdigest()
+    failure.pop("manifest_sha256")
+    failure["manifest_sha256"] = hashlib.sha256(
+        json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    failure_path.write_text(json.dumps(failure), encoding="utf-8")
+
+    receipt = indexer.ensure_index_with_receipt(repo, state_dir=state)
+    assert receipt.error_type == "index_failure_evidence_invalid"
+
+
+def test_index_timeout_is_a_bound_not_a_retryable_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """GT_INDEX_TIMEOUT is a deterministic size bound: a second attempt on the
+    same input can only re-pay the same minutes. One attempt, typed timeout.
+    """
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    repo.mkdir()
+    (repo / "main.py").write_text("pass\n", encoding="utf-8")
+    calls: list[tuple] = []
+
+    def bounded(*args):
+        calls.append(args)
+        return indexer.IndexProcessResult(
+            False, "timeout", "GT_INDEX_TIMEOUT", exit_code=-9
+        )
+
+    monkeypatch.setattr(indexer, "_run_index_bounded", bounded)
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {"path_sha256": "a" * 64, "binary_sha256": "b" * 64},
+    )
+
+    receipt = indexer.ensure_index_with_receipt(repo, state_dir=state)
+
+    assert receipt.error_type == "GT_INDEX_TIMEOUT"
+    assert len(calls) == 1, "a size-bound timeout must not be retried"
+
+
+def test_index_timeout_env_override_and_malformed_fallback(monkeypatch) -> None:
+    """The bound is operator-tunable; a malformed override falls back safely.
+
+    _INDEX_TIMEOUT_SECONDS binds at import, so the override is exercised at
+    the parse seam -- the same code the module ran at import time. The
+    production default is unbounded (0): the task envelope is the real bound
+    and GT_INDEX_TIMEOUT fires only under an operator-set cap.
+    """
+    monkeypatch.setenv("GT_INDEX_TIMEOUT_SECONDS", "45")
+    assert indexer._env_seconds("GT_INDEX_TIMEOUT_SECONDS", 0) == 45
+    monkeypatch.setenv("GT_INDEX_TIMEOUT_SECONDS", "not-a-number")
+    assert indexer._env_seconds("GT_INDEX_TIMEOUT_SECONDS", 0) == 0
+    monkeypatch.delenv("GT_INDEX_TIMEOUT_SECONDS")
+    assert indexer._env_seconds("GT_INDEX_TIMEOUT_SECONDS", 0) == 0
+    assert indexer._INDEX_TIMEOUT_SECONDS == 0
+
+
+_REPO_ROOT = Path(indexer.__file__).resolve().parents[1]
+
+_LOCK_CHILD_SOURCE = '''\
+"""Worker for the cross-process publication-lock test.
+
+Runs in a fresh interpreter so ``_graph_publication_lock`` contends with a
+real second OS process - on Windows, byte-range locks are process-scoped, so
+two threads of one process could never prove the msvcrt branch works.
+"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+lock_path = Path(sys.argv[1])
+marker_path = Path(sys.argv[2])
+barrier = float(sys.argv[3])
+hold_seconds = float(sys.argv[4])
+sys.path.insert(0, sys.argv[5])
+
+from gt_engine.indexer import _graph_publication_lock
+
+while time.time() < barrier:
+    time.sleep(0.002)
+attempt = time.time()
+with _graph_publication_lock(lock_path):
+    entered = time.time()
+    time.sleep(hold_seconds)
+    released_boundary = time.time()
+marker_path.write_text(
+    json.dumps(
+        {
+            "pid": os.getpid(),
+            "attempt": attempt,
+            "entered": entered,
+            "released_boundary": released_boundary,
+            "exited": time.time(),
+        }
+    ),
+    encoding="utf-8",
+)
+'''
+
+
+def test_graph_publication_lock_serializes_two_real_processes(tmp_path: Path) -> None:
+    """Two real OS processes race the same lock file.
+
+    ``test_concurrent_index_builds_are_serialized_and_publish_one_pair``
+    covers in-process serialization; the msvcrt/fcntl branch of
+    ``_graph_publication_lock`` exists for the cross-process case, where a
+    contender must retry inside the helper rather than crash or enter
+    concurrently. Both children hit the same byte-range lock behind a
+    wall-clock barrier and record their critical-section bounds.
+    """
+    child = tmp_path / "lock_child.py"
+    child.write_text(_LOCK_CHILD_SOURCE, encoding="utf-8")
+    lock_path = tmp_path / ".graph.lock"
+    markers = [tmp_path / f"marker-{ordinal}.json" for ordinal in range(2)]
+    # Barrier past both interpreter start-ups; hold long enough that the
+    # contender's retry loop (50ms cadence) runs several times.
+    barrier = time.time() + 6.0
+    hold_seconds = 0.6
+    env = dict(os.environ, GT_INDEX_TIMEOUT_SECONDS="10")
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable, str(child), str(lock_path), str(marker),
+                str(barrier), str(hold_seconds), str(_REPO_ROOT),
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for marker in markers
+    ]
+    outputs = [process.communicate(timeout=90) for process in processes]
+
+    for process, (_out, err) in zip(processes, outputs, strict=True):
+        assert process.returncode == 0, f"lock child failed: {err}"
+    records = [json.loads(marker.read_text(encoding="utf-8")) for marker in markers]
+
+    # Two real processes, not threads of this one.
+    assert len({record["pid"] for record in records} | {os.getpid()}) == 3
+    winner, contender = sorted(records, key=lambda record: record["entered"])
+    # Disjoint critical sections: the contender could not enter before the
+    # winner's last in-section timestamp (unlock runs after it).
+    assert contender["entered"] >= winner["released_boundary"]
+    # Real contention, not a late start: the contender was already trying
+    # while the winner still held the lock.
+    assert contender["attempt"] < winner["released_boundary"]
+    # The contender retried inside the helper rather than crashing or sailing
+    # through: its wait spanned several 50ms retry intervals.
+    assert contender["entered"] - contender["attempt"] >= 0.1

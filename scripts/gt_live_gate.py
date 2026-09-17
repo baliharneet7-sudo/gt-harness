@@ -8,6 +8,7 @@ auditor.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -99,6 +100,8 @@ def evaluate_live_gate(
         )
     for task in tasks:
         task_name = str(task.get("task_name") or "?")
+        if task.get("synthetic_transport"):
+            issues.append(f"{task_name}: synthetic transport cannot qualify as paid smoke")
         if task.get("agent_error") or task.get("exception_info"):
             issues.append(f"{task_name}: unhealthy agent/harness result")
         for issue in task.get("attribution_issues") or ():
@@ -451,7 +454,9 @@ def evaluate_live_gate(
 
     observed_models: set[str] = set()
     if run_dir is not None and run_dir.is_dir():
-        for result_path in run_dir.glob("*/result.json"):
+        # Harbor/Pier artifacts preserve wrapper/job/trial directories. A
+        # one-level glob silently observes zero models in the canonical layout.
+        for result_path in run_dir.rglob("result.json"):
             try:
                 observed_models.update(_model_values(json.loads(
                     result_path.read_text(encoding="utf-8")
@@ -484,6 +489,7 @@ def evaluate_live_gate(
         "faults": faults,
         "unexposed": unexposed,
         "observed_models": sorted(observed_models),
+        "expected_model": expected_model,
         "expected_temperature": expected_temperature,
         "provider_temperatures": sorted(provider_temperatures),
         "complete_census": complete_census,
@@ -573,6 +579,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
         run_dir=Path(args.run_dir),
     )
+    report["source_sha"] = audit.get("source_sha")
+    report["workflow_run_id"] = audit.get("workflow_run_id")
+    report["audit_digest_sha256"] = audit.get("audit_digest_sha256")
+    report["audit_file_sha256"] = hashlib.sha256(audit_path.read_bytes()).hexdigest()
+    report_body = json.dumps(
+        report, sort_keys=True, separators=(",", ":")
+    ).encode()
+    report["report_digest_sha256"] = hashlib.sha256(report_body).hexdigest()
     rendered = json.dumps(report, indent=2, sort_keys=True)
     print(rendered)
     if args.output_json:

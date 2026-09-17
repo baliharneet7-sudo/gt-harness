@@ -18,6 +18,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -36,6 +37,7 @@ from gt_engine.generated_typed_capabilities import (
     LANGUAGE_MANIFEST_SHA256,
     REMOVED_TYPED_KINDS,
 )
+from gt_engine.result_envelope import envelope_for_result
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -83,6 +85,23 @@ GROUNDTRUTH_TOOL = {
     },
 }
 
+QUERY_MATCH_LIMIT = 20
+# 512 is the hard per-line ceiling. The fallback projection reserves half of
+# it so the canonical evidence and model-facing projection remain under the
+# 16 KiB whole-query ceiling even when all 20 slots are populated.
+QUERY_LINE_MAX_BYTES = 256
+QUERY_RESULT_MAX_BYTES = 16_384
+QUERY_SCAN_MAX_BYTES = 64 * 1024 * 1024
+QUERY_SCAN_TIMEOUT_SEC = 10.0
+
+
+def _truncate_utf8(value: bytes, limit: int) -> bytes:
+    """Truncate bytes without emitting a partial UTF-8 sequence."""
+
+    if len(value) <= limit:
+        return value
+    return value[:limit].decode("utf-8", "ignore").encode("utf-8")
+
 
 class _CoreCompiler(Protocol):
     """The narrow GroundTruth-core surface consumed by this harness."""
@@ -100,7 +119,7 @@ def _core_compiler() -> _CoreCompiler | ModuleType | None:
 
 
 def _format_error(template: str, error: str) -> FormatError:
-    return FormatError(
+    exc = FormatError(
         {
             "role": "user",
             "content": Template(template, undefined=StrictUndefined).render(
@@ -109,6 +128,11 @@ def _format_error(template: str, error: str) -> FormatError:
             "extra": {"interrupt_type": "FormatError"},
         }
     )
+    # InterruptAgentFlow calls super().__init__() with no args, so str(exc) is
+    # "" for every instance: the provider_failure journal row would carry an
+    # empty error forever. Keep the raw reason on the exception itself.
+    exc.gt_error_detail = error
+    return exc
 
 
 def parse_groundtruth_toolcalls(
@@ -168,7 +192,12 @@ def parse_groundtruth_toolcalls(
 class GroundTruthLitellmModel(LitellmModel):
     """LiteLLM Mini-SWE model advertising Bash and GroundTruth side by side."""
 
-    tools = (BASH_TOOL, GROUNDTRUTH_TOOL)
+    @property
+    def tools(self):
+        session = getattr(self, "_gt_session", None)
+        if session is not None and (session.disabled or not session.capability_active("typed_actions")):
+            return (BASH_TOOL,)
+        return (BASH_TOOL, GROUNDTRUTH_TOOL)
 
     def _query(self, messages: list[dict[str, str]], **kwargs: Any):
         try:
@@ -469,7 +498,13 @@ def _literal_search(request: Mapping[str, Any], root: Path) -> tuple[list[dict],
     ]
     answer: list[dict[str, Any]] = []
     omissions: list[str] = []
+    scanned_bytes = 0
+    started = time.monotonic()
+    stopped = False
     for path in sorted(paths, key=lambda item: item.as_posix()):
+        if time.monotonic() - started >= QUERY_SCAN_TIMEOUT_SEC:
+            omissions.append("query_scan_time_limit")
+            break
         try:
             relative = path.relative_to(root).as_posix()
         except ValueError:
@@ -483,22 +518,42 @@ def _literal_search(request: Mapping[str, Any], root: Path) -> tuple[list[dict],
         if not path.is_file():
             continue
         try:
-            data = path.read_bytes()
+            remaining = QUERY_SCAN_MAX_BYTES - scanned_bytes
+            size = path.stat().st_size
+            if size > remaining:
+                with path.open("rb") as handle:
+                    data = handle.read(max(0, remaining))
+                omissions.append("query_scan_byte_limit")
+                stopped = True
+            else:
+                data = path.read_bytes()
         except OSError:
             omissions.append(f"unreadable:{relative}")
             continue
+        scanned_bytes += len(data)
+        if scanned_bytes >= QUERY_SCAN_MAX_BYTES:
+            stopped = True
         for line_number, line in enumerate(data.splitlines(), start=1):
             count = line.count(query_bytes)
             if count:
+                preview = _truncate_utf8(line, QUERY_LINE_MAX_BYTES)
                 answer.append(
                     {
                         "path": relative,
                         "line": line_number,
                         "occurrences": count,
                         "line_sha256": hashlib.sha256(line).hexdigest(),
-                        "preview": line.decode("utf-8", "replace"),
+                        "preview": preview.decode("utf-8", "replace"),
                     }
                 )
+                if len(line) > QUERY_LINE_MAX_BYTES:
+                    omissions.append("query_line_limit")
+                if len(answer) >= QUERY_MATCH_LIMIT:
+                    omissions.append("query_match_limit")
+                    stopped = True
+                    break
+        if stopped:
+            break
     return answer, sorted(set(omissions))
 
 
@@ -515,57 +570,6 @@ def _deterministic_query_api() -> tuple[type, Any] | None:
         if exc.name == "groundtruth.runtime.deterministic_queries":
             return None
         raise
-
-
-def _graph_definition_search(
-    arguments: Mapping[str, Any],
-    graph_db: str | Path | None,
-    repo_root: Path,
-) -> dict[str, Any] | None:
-    """Graph-backed definition search: locate a symbol's definition.
-
-    Queries the graph's nodes for the requested symbol and returns
-    file:line:signature for each definition node (the graph-certified depth the
-    typed tool previously lacked — definition was REMOVED only because it
-    couldn't be certified; the populated graph now certifies it). Correct-or-
-    quiet: no graph / no match -> None (the caller passes through).
-    """
-    symbol = str(arguments.get("symbol") or arguments.get("name") or arguments.get("query") or "").strip()
-    if not symbol or not graph_db:
-        return None
-    import sqlite3
-
-    db = Path(graph_db)
-    if not db.is_absolute():
-        db = repo_root / db
-    if not db.is_file():
-        return None
-    try:
-        con = sqlite3.connect(f"file:{db.resolve().as_posix()}?mode=ro", uri=True)
-        try:
-            rows = con.execute(
-                "SELECT file_path, start_line, signature FROM nodes "
-                "WHERE name = ? AND COALESCE(is_test,0)=0 ORDER BY start_line LIMIT 12",
-                (symbol,),
-            ).fetchall()
-            if not rows:
-                rows = con.execute(
-                    "SELECT file_path, start_line, signature FROM nodes "
-                    "WHERE name LIKE ? AND COALESCE(is_test,0)=0 ORDER BY start_line LIMIT 12",
-                    (f"%{symbol}%",),
-                ).fetchall()
-        finally:
-            con.close()
-    except (sqlite3.Error, OSError):
-        return None
-    if not rows:
-        return None
-    lines = [f"{fp}:{ln}:{(sig or '')[:80]}" for fp, ln, sig in rows if fp]
-    return {
-        "answer": "definition of %s:\n%s" % (symbol, "\n".join(lines)),
-        "anchors": [f"{fp}:{ln}" for fp, ln, _sig in rows if fp],
-        "complete": True,
-    }
 
 
 def execute_typed_action(
@@ -589,7 +593,13 @@ def execute_typed_action(
     core = _core_compiler()
     query_api = _deterministic_query_api()
     certification_omission = ""
-    if kind not in CERTIFIED_TYPED_KINDS:
+    reason = ""
+    if kind == "why_this_edge":
+        # HAR-63 private compatibility path: an old wheel cannot expose the
+        # producer-owned query kind, but the harness may consume a complete
+        # producer record without laundering it into shell text.
+        certification_omission = ""
+    elif kind not in CERTIFIED_TYPED_KINDS:
         certification_omission = "typed_kind_removed"
     elif kind == "syntax":
         arguments = wire.get("arguments")
@@ -608,11 +618,65 @@ def execute_typed_action(
             "freshness": {"repository_snapshot": wire.get("repository_snapshot", "")},
             "semantics": "incomplete",
             "coverage": {},
+            "ambiguity": [],
             "omissions": [certification_omission],
             "raw_fallback": None,
         }
         direct_answer = None
         decision, reason, returncode = "PASS_THROUGH", certification_omission, 2
+        decision_payload = {
+            "schema": "gt.interception_decision.v1",
+            "mode": decision,
+            "reason_codes": [reason],
+        }
+    elif kind == "why_this_edge":
+        from gt_engine.why_this_edge import WhyThisEdgeAbstention, query_why_this_edge
+
+        arguments = wire.get("arguments")
+        arguments = dict(arguments) if isinstance(arguments, Mapping) else {}
+        try:
+            certified = query_why_this_edge(arguments)
+            evidence = {
+                "schema": "gt.evidence_artifact.v1",
+                "action_id": wire.get("action_id", ""),
+                "answer": certified,
+                "anchors": [certified["edge_id"], certified["callsite_id"]],
+                "witnesses": sorted(
+                    witness
+                    for values in certified["flow_witnesses"].values()
+                    for witness in values
+                ),
+                "producer": "groundtruth.why_this_edge.v1",
+                "freshness": {
+                    "source_revision": certified["source_revision"],
+                    "graph_revision": certified["graph_revision"],
+                    "completion_identity": certified["completion_identity"],
+                },
+                "semantics": "exact",
+                "coverage": {"candidate_count": certified["candidate_count"]},
+                "ambiguity": [],
+                "omissions": [],
+                "raw_fallback": None,
+            }
+            direct_answer = certified
+            decision, reason, returncode = "REPLACE", "typed_why_this_edge_exact", 0
+        except WhyThisEdgeAbstention as exc:
+            evidence = {
+                "schema": "gt.evidence_artifact.v1",
+                "action_id": wire.get("action_id", ""),
+                "answer": None,
+                "anchors": [],
+                "witnesses": [],
+                "producer": "groundtruth.why_this_edge.v1",
+                "freshness": {},
+                "semantics": "incomplete",
+                "coverage": {},
+                "ambiguity": [],
+                "omissions": [f"abstention:{exc.reason}"],
+                "raw_fallback": None,
+            }
+            direct_answer = None
+            decision, reason, returncode = "PASS_THROUGH", f"why_this_edge:{exc.reason}", 2
         decision_payload = {
             "schema": "gt.interception_decision.v1",
             "mode": decision,
@@ -720,6 +784,66 @@ def execute_typed_action(
             "mode": decision,
             "reason_codes": [reason],
         }
+    # Every public typed result carries the same conservative honesty envelope.
+    # Legacy/incomplete producers never become ``complete`` merely because a
+    # payload happens to be present.
+    freshness = evidence.get("freshness", {}) if isinstance(evidence, Mapping) else {}
+    if not isinstance(freshness, Mapping):
+        freshness = {}
+    source_revision = str(
+        freshness.get("source_revision")
+        or wire.get("repository_snapshot")
+        or ""
+    )
+    workspace_revision = _file_snapshot(root)
+    if isinstance(direct_answer, list):
+        returned_count = len(direct_answer)
+    elif isinstance(direct_answer, Mapping):
+        sequence = next(
+            (direct_answer.get(key) for key in ("matches", "results", "candidates", "items")
+             if isinstance(direct_answer.get(key), list)),
+            None,
+        )
+        returned_count = len(sequence) if isinstance(sequence, list) else (0 if direct_answer is None else 1)
+    elif direct_answer is None:
+        returned_count = 0
+    else:
+        returned_count = 1
+    true_total_value = None
+    if isinstance(evidence, Mapping):
+        for key in ("true_total", "total_count", "known_total"):
+            candidate = evidence.get(key)
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+                true_total_value = candidate
+                break
+        coverage = evidence.get("coverage")
+        if true_total_value is None and isinstance(coverage, Mapping):
+            candidate = coverage.get("true_total")
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+                true_total_value = candidate
+    if true_total_value is None and returncode == 0 and not evidence.get("omissions"):
+        true_total_value = returned_count
+    ambiguity_values = []
+    unresolved_values = []
+    if isinstance(evidence, Mapping):
+        for key in ("ambiguity", "ambiguities"):
+            value = evidence.get(key)
+            if isinstance(value, list):
+                ambiguity_values.extend(str(item) for item in value)
+        value = evidence.get("unresolved_identities")
+        if isinstance(value, list):
+            unresolved_values.extend(str(item) for item in value)
+    honesty = envelope_for_result(
+        source_revision=source_revision,
+        workspace_revision=workspace_revision,
+        payload=direct_answer,
+        returned_count=returned_count,
+        true_total=true_total_value,
+        ambiguities=tuple(ambiguity_values),
+        unresolved_identities=tuple(unresolved_values),
+        abstention_reason=(reason if returncode else None),
+        incomplete=returncode != 0 or bool(evidence.get("omissions")) if isinstance(evidence, Mapping) else returncode != 0,
+    )
     result = {
         "schema": "gt.compiled_observation.v1",
         "action_request": wire,
@@ -729,8 +853,32 @@ def execute_typed_action(
         # JSON nested inside ``direct_answer_json``.
         "direct_answer": direct_answer,
         "decision": decision_payload,
+        "honesty": honesty,
     }
     output = _canonical_bytes(result).decode("utf-8")
+    if len(output.encode("utf-8")) > QUERY_RESULT_MAX_BYTES:
+        evidence_map = result.get("evidence")
+        if isinstance(evidence_map, dict):
+            omissions = list(evidence_map.get("omissions") or ())
+            if "query_result_byte_limit" not in omissions:
+                omissions.append("query_result_byte_limit")
+            evidence_map["omissions"] = omissions
+        # Both projections contain the same fallback rows. Remove tail rows
+        # deterministically until the complete model-visible envelope fits.
+        while (
+            len(_canonical_bytes(result)) > QUERY_RESULT_MAX_BYTES
+            and isinstance(result.get("direct_answer"), list)
+            and result["direct_answer"]
+        ):
+            result["direct_answer"].pop()
+            if isinstance(evidence_map, dict) and isinstance(evidence_map.get("answer"), list):
+                evidence_map["answer"].pop()
+            if isinstance(evidence_map, dict) and isinstance(evidence_map.get("anchors"), list):
+                evidence_map["anchors"].pop()
+            if isinstance(evidence_map, dict) and isinstance(evidence_map.get("witnesses"), list):
+                evidence_map["witnesses"].pop()
+        returncode = 2
+        output = _canonical_bytes(result).decode("utf-8")
     return {
         "output": output,
         "returncode": returncode,

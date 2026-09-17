@@ -6,10 +6,14 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import re
+import sys
 import warnings
 import zipfile
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,8 +27,205 @@ def _load_validator():
     return module
 
 
-def test_finalstand_is_machine_valid() -> None:
-    result = _load_validator().validate()
+def _load_phase2():
+    path = ROOT / "scripts" / "phase2_experiment.py"
+    spec = importlib.util.spec_from_file_location("phase2_experiment", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_validation_is_read_only_unless_receipt_issuance_is_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    validator = _load_validator()
+    result = {"schema": "gt.finalstand.validation.v1", "ok": True, "errors": []}
+    monkeypatch.setattr(validator, "FINALSTAND", tmp_path)
+    monkeypatch.setattr(validator, "validate", lambda: result)
+    monkeypatch.setattr(sys, "argv", ["validate_gt_finalstand.py"])
+
+    assert validator.main() == 0
+    assert not (tmp_path / "validation_receipt.json").exists()
+
+    monkeypatch.setattr(
+        sys, "argv", ["validate_gt_finalstand.py", "--issue-receipt"]
+    )
+    assert validator.main() == 0
+    assert json.loads((tmp_path / "validation_receipt.json").read_text()) == result
+
+
+def test_har9_closeout_rejects_unbound_inputs_and_verifies_bundle() -> None:
+    phase2 = _load_phase2()
+    with pytest.raises(ValueError, match="full commit SHAs"):
+        phase2.build_closeout_receipt(
+            harness_head="arbitrary",
+            groundtruth_head="b" * 40,
+            unit_heads={"har9": "c" * 40},
+            input_receipts={"har9": "d" * 64},
+            environment_sha256="e" * 64,
+        )
+    receipt = phase2.build_closeout_receipt(
+        harness_head="a" * 40,
+        groundtruth_head="b" * 40,
+        unit_heads={"har9": "c" * 40},
+        input_receipts={"har9": "d" * 64},
+        environment_sha256="e" * 64,
+    )
+    assert phase2.verify_closeout_receipt(receipt)
+    mutated = copy.deepcopy(receipt)
+    mutated["unit_heads"]["har9"] = "f" * 40
+    assert not phase2.verify_closeout_receipt(mutated)
+    mutated = copy.deepcopy(receipt)
+    mutated["bundle_sha256"] = "0" * 64
+    assert not phase2.verify_closeout_receipt(mutated)
+
+
+def test_har9_terminal_closeout_requires_complete_concrete_identities() -> None:
+    phase2 = _load_phase2()
+    with pytest.raises(ValueError, match="missing unit heads"):
+        phase2.build_closeout_receipt(
+            harness_head="a" * 40,
+            groundtruth_head="b" * 40,
+            unit_heads={"har9": "c" * 40},
+            input_receipts={"har9": "d" * 64},
+            environment_sha256="e" * 64,
+            allow_provisional=False,
+        )
+
+
+def test_har9_closeout_rejects_unknown_units_and_missing_terminal_receipts() -> None:
+    phase2 = _load_phase2()
+    with pytest.raises(ValueError, match="unknown unit"):
+        phase2.build_closeout_receipt(
+            harness_head="a" * 40,
+            groundtruth_head="b" * 40,
+            unit_heads={"har13": "c" * 40},
+            input_receipts={"har9": "d" * 64},
+            environment_sha256="e" * 64,
+        )
+    receipt = phase2.build_closeout_receipt(
+        harness_head="a" * 40,
+        groundtruth_head="b" * 40,
+        unit_heads={"har9": "c" * 40},
+        input_receipts={"har9": "d" * 64},
+        environment_sha256="e" * 64,
+    )
+    unknown = copy.deepcopy(receipt)
+    unknown["unit_heads"]["har13"] = "f" * 40
+    assert not phase2.verify_closeout_receipt(unknown)
+    unknown = copy.deepcopy(receipt)
+    unknown["input_receipts"]["har13"] = "f" * 64
+    assert not phase2.verify_closeout_receipt(unknown)
+    terminal = copy.deepcopy(receipt)
+    terminal["unit_heads"] = {
+        name: "c" * 40 for name in phase2.HAR9_REQUIRED_UNITS
+    }
+    terminal["input_receipts"] = {"har9": "d" * 64}
+    unsigned = dict(terminal)
+    unsigned.pop("bundle_sha256")
+    terminal["bundle_sha256"] = phase2._canonical_sha256(unsigned)
+    assert not phase2.verify_closeout_receipt(terminal, require_terminal=True)
+    with pytest.raises(ValueError, match="missing input receipts"):
+        phase2.build_closeout_receipt(
+            harness_head="a" * 40,
+            groundtruth_head="b" * 40,
+            unit_heads={name: "c" * 40 for name in phase2.HAR9_REQUIRED_UNITS},
+            input_receipts={"har9": "d" * 64},
+            environment_sha256="e" * 64,
+            allow_provisional=False,
+        )
+
+
+def test_har9_closeout_requires_per_unit_repository_binding() -> None:
+    phase2 = _load_phase2()
+    receipt = phase2.build_closeout_receipt(
+        harness_head="a" * 40,
+        groundtruth_head="b" * 40,
+        unit_heads={"har42": "c" * 40, "har9": "d" * 40},
+        input_receipts={"har42": "e" * 64, "har9": "f" * 64},
+        environment_sha256="1" * 64,
+    )
+    missing = copy.deepcopy(receipt)
+    missing.pop("unit_repositories")
+    assert not phase2.verify_closeout_receipt(missing)
+    wrong = copy.deepcopy(receipt)
+    wrong["unit_repositories"]["har42"] = "harness"
+    wrong_unsigned = dict(wrong)
+    wrong_unsigned.pop("bundle_sha256")
+    wrong["bundle_sha256"] = phase2._canonical_sha256(wrong_unsigned)
+    assert not phase2.verify_closeout_receipt(wrong)
+
+
+def test_har9_assembly_input_skeleton_covers_all_units_without_authorizing_run() -> None:
+    phase2 = _load_phase2()
+    receipt = phase2.build_assembly_input_skeleton(
+        harness_head="a" * 40,
+        groundtruth_head="b" * 40,
+        unit_heads={"har5": "c" * 40, "har41": "d" * 40},
+        input_receipts={"har5": "e" * 64},
+    )
+    assert phase2.verify_assembly_input_skeleton(receipt)
+    assert set(receipt["unit_heads"]) == phase2.HAR9_REQUIRED_UNITS
+    assert set(receipt["input_receipts"]) == phase2.HAR9_REQUIRED_UNITS
+    assert receipt["unit_heads"]["har5"] == "c" * 40
+    assert receipt["unit_heads"]["har41"] == "d" * 40
+    assert receipt["unit_heads"]["har6"] == "UNVERIFIED"
+    assert receipt["authorization"]["benchmark_ready"] is False
+    assert receipt["results"] == {"provider_calls": 0, "benchmark_runs": 0}
+
+    mutated = copy.deepcopy(receipt)
+    mutated["unit_heads"]["har5"] = "f" * 40
+    assert not phase2.verify_assembly_input_skeleton(mutated)
+
+
+def test_har9_assembly_input_skeleton_rejects_unknown_observations() -> None:
+    phase2 = _load_phase2()
+    with pytest.raises(ValueError, match="unknown unit"):
+        phase2.build_assembly_input_skeleton(
+            harness_head="a" * 40,
+            groundtruth_head="b" * 40,
+            unit_heads={"har13": "c" * 40},
+        )
+
+
+def test_har9_persisted_assembly_inputs_are_deterministic_and_provisional() -> None:
+    phase2 = _load_phase2()
+    receipt = json.loads(
+        (ROOT / "gt_finalstand" / "receipts" / "har9_assembly_inputs.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert phase2.verify_assembly_input_skeleton(receipt)
+    assert receipt["state"] == "PROVISIONAL_INPUTS_PENDING_FINAL_HEADS"
+    assert receipt["authorization"]["benchmark_ready"] is False
+    assert set(receipt["unit_heads"]) == phase2.HAR9_REQUIRED_UNITS
+    rebuilt = phase2.build_assembly_input_skeleton(
+        harness_head=receipt["harness_head"],
+        groundtruth_head=receipt["groundtruth_head"],
+        unit_heads={
+            name: value
+            for name, value in receipt["unit_heads"].items()
+            if value != "UNVERIFIED"
+        },
+        input_receipts={
+            name: value
+            for name, value in receipt["input_receipts"].items()
+            if value != "UNVERIFIED"
+        },
+    )
+    assert rebuilt == receipt
+
+
+def test_finalstand_is_machine_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    validator = _load_validator()
+    # Keep the complete unit suite provider/credential-free. The API/archive
+    # verifier has dedicated response and mutation fixtures below; this test
+    # exercises the remaining checked-in finalstand graph.
+    monkeypatch.setattr(
+        validator, "_github_api_confirms_provenance", lambda _p, _w: True
+    )
+    result = validator.validate()
     assert result["errors"] == []
     assert result["counts"] == {
         "direct": 17,
@@ -33,6 +234,75 @@ def test_finalstand_is_machine_valid() -> None:
         "language_operation_pairs": 210,
         "todo_statuses": 26,
     }
+
+
+def _load_baseline_generator():
+    path = ROOT / "scripts" / "generate_gt_finalstand.py"
+    spec = importlib.util.spec_from_file_location("generate_gt_finalstand", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _baseline_spec() -> dict[str, object]:
+    return {
+        "repository": "example/gt-harness",
+        "source_revision": "a" * 40,
+        "environment": {"runner": "clean", "python": "3.12"},
+        "commands": ["pytest -q"],
+        "suites": [{"name": "provider-free", "exit_code": 0}],
+        "fixtures": {"task_set_sha256": "b" * 64},
+        "results": {"provider_calls": 0, "tests": 12, "failures": 0},
+        "producer_identity": {"repository": "groundtruth", "source_revision": "c" * 40},
+        "graph_identity": {"schema": "gt.graph.v1", "digest": "d" * 64},
+        "rollback": {"prior_complete_sha256": "e" * 64},
+    }
+
+
+def test_baseline_receipt_is_deterministic_and_mutation_rejected(tmp_path: Path) -> None:
+    generator = _load_baseline_generator()
+    first = generator.build_baseline_receipt(_baseline_spec())
+    reordered = dict(reversed(list(_baseline_spec().items())))
+    second = generator.build_baseline_receipt(reordered)
+    assert first == second
+    assert generator.verify_baseline_receipt(first)
+    mutated = json.loads(json.dumps(first))
+    mutated["results"]["tests"] = 13
+    assert not generator.verify_baseline_receipt(mutated)
+
+
+def test_baseline_cli_writes_atomic_provider_free_receipt(tmp_path: Path) -> None:
+    generator = _load_baseline_generator()
+    spec_path = tmp_path / "spec.json"
+    output = tmp_path / "receipt.json"
+    spec_path.write_text(json.dumps(_baseline_spec()), encoding="utf-8")
+    assert generator.main.__name__ == "main"
+    import subprocess
+    environment = dict(os.environ)
+    environment["GROUNDTRUTH_ROOT"] = str(tmp_path / "missing-groundtruth")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "generate_gt_finalstand.py"),
+         "--baseline-spec", str(spec_path), "--baseline-output", str(output)],
+        capture_output=True, text=True, check=False, env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    assert generator.verify_baseline_receipt(json.loads(output.read_text(encoding="utf-8")))
+
+
+def test_terminal_receipt_is_provisional_and_rejects_recomputed_head_mutation() -> None:
+    generator = _load_baseline_generator()
+    receipt = generator.build_terminal_receipt(generator.terminal_receipt_spec())
+    assert generator.verify_terminal_receipt(receipt)
+    assert receipt["authorization"]["benchmark_ready"] is False
+
+    mutated = copy.deepcopy(receipt)
+    mutated["head_state"]["repository_head"] = "f" * 40
+    unsigned = {key: value for key, value in mutated.items() if key != "receipt_sha256"}
+    mutated["receipt_sha256"] = hashlib.sha256(
+        generator._canonical_json(unsigned)
+    ).hexdigest()
+    assert not generator.verify_terminal_receipt(mutated)
 
 
 def test_single_witness_closes_fs024_without_claiming_population_efficacy() -> None:
@@ -120,8 +390,13 @@ def test_promotion_refusal_uses_terminal_offline_receipt() -> None:
     ]
 
 
-def test_fs023_provenance_cross_binds_terminal_workflow_and_artifact() -> None:
+def test_fs023_provenance_cross_binds_terminal_workflow_and_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     validator = _load_validator()
+    monkeypatch.setattr(
+        validator, "_github_api_confirms_provenance", lambda _p, _w: True
+    )
     receipt = json.loads(
         (ROOT / "gt_finalstand" / "receipts" / "fs023_provenance.json").read_text(
             encoding="utf-8"
@@ -286,7 +561,9 @@ def _zip_bytes(entries: list[tuple[str, bytes]]) -> bytes:
 
 
 def _mock_github_artifact(validator, provenance, workflow, *, extra_inner=()):
-    workflow_path = ROOT / ".github" / "workflows" / "gt_finalstand_provider_free.yml"
+    workflow_path = (
+        ROOT / "docs" / "historical-workflows" / "gt_finalstand_provider_free.yml"
+    )
     compatibility = ROOT / "gt_finalstand" / "language_operation_compatibility.json"
     receipt_entries = []
     for name in workflow["receipt_inputs"]:
@@ -443,9 +720,9 @@ def test_fs023_artifact_rejects_duplicate_traversal_and_stale_receipts(
     assert not rejected(workflow_receipt=stale)
 
 
-def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity() -> None:
+def test_historical_provider_free_workflow_is_archived_with_immutable_identity() -> None:
     workflow = (
-        ROOT / ".github" / "workflows" / "gt_finalstand_provider_free.yml"
+        ROOT / "docs" / "historical-workflows" / "gt_finalstand_provider_free.yml"
     ).read_text(encoding="utf-8")
     action_uses = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, re.MULTILINE)
     assert action_uses
@@ -498,3 +775,18 @@ def test_post_audit_and_single_witness_receipts_close_terminal_rows() -> None:
         "FS-025": "COMPLETE",
         "FS-026": "COMPLETE",
     }
+
+
+def test_har9_closeout_keeps_benchmark_approval_false() -> None:
+    module = _load_phase2()
+    receipt = module.build_closeout_receipt(
+        harness_head="a" * 40,
+        groundtruth_head="b" * 40,
+        unit_heads={"har9": "c" * 40},
+        input_receipts={"har5": "d" * 64},
+        environment_sha256="e" * 64,
+    )
+    assert receipt["schema"] == "gt.har9.closeout_receipt.v1"
+    assert receipt["authorization"]["status"] == "BENCHMARK_READY_AWAITING_USER_RUN_APPROVAL"
+    assert receipt["authorization"]["benchmark_ready"] is False
+    assert receipt["results"] == {"provider_calls": 0, "benchmark_runs": 0}

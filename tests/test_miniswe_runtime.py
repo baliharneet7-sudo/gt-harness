@@ -1,12 +1,293 @@
 from __future__ import annotations
 
+import json
+import os
+
+import pytest
+
 import gt_engine.miniswe_runtime as rt
-from gt_engine.gt_session import GTMode, GTSession, GTSessionConfig
+from gt_engine.gt_session import (
+    GTDecisionCandidate,
+    GTMode,
+    GTSession,
+    GTSessionConfig,
+)
 from gt_engine.miniswe_controller import Predicate
 from gt_engine.miniswe_evidence import EvidenceResult
 from gt_engine.miniswe_integration import MiniSweAdapter
 from gt_engine.miniswe_runtime import install_runtime_hooks
+from gt_engine.provider_limits import ProviderRequestTooLarge
 from gt_engine.task_contract import extract_task_contract
+
+
+@pytest.fixture(autouse=True)
+def isolated_git_fixture_identity(monkeypatch):
+    # These tests commit disposable repositories. Do not depend on a CI
+    # account's global identity or mutate the machine's Git configuration.
+    for name, value in {
+        "GIT_AUTHOR_NAME": "GT Test", "GIT_COMMITTER_NAME": "GT Test",
+        "GIT_AUTHOR_EMAIL": "gt-test@example.invalid",
+        "GIT_COMMITTER_EMAIL": "gt-test@example.invalid",
+    }.items():
+        monkeypatch.setenv(name, value)
+    instances = []
+    initialize = MiniSweAdapter.__init__
+
+    def tracked_initialize(instance, *args, **kwargs):
+        initialize(instance, *args, **kwargs)
+        instances.append(instance)
+
+    monkeypatch.setattr(MiniSweAdapter, "__init__", tracked_initialize)
+    yield
+    for instance in instances:
+        if instance._lsp_scheduler is not None:
+            instance._lsp_scheduler.close(wait=True)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("sed -n '1,20p' src/a.py", ("src/a.py",)),
+        ("head -n 20 src/a.py", ("src/a.py",)),
+        ("nl -ba src/a.py", ("src/a.py",)),
+        ("cat src/a.py src/b.py", ("src/a.py", "src/b.py")),
+        ("cat 'src/a file.py' | head -n 20", ("src/a file.py",)),
+    ],
+)
+def test_viewed_files_parses_operands_not_options(command, expected):
+    assert rt._viewed_files(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat src/a.py 2>/dev/null",
+        "cat src/a.py 2>&1",
+        "for f in src/*.py; do cat $f; done",
+        "cat src/a.py > /tmp/copy.txt",
+        "cat ${FILE}",
+        "cat src/a.py <<EOF",
+        "sed -n '1,5p' src/a.py 1>&2",
+    ],
+)
+def test_viewed_files_drops_shell_noise(command):
+    assert "2>/dev/null" not in rt._viewed_files(command)
+    assert all("$" not in v and ">" not in v and "<" not in v
+               for v in rt._viewed_files(command))
+
+
+def test_viewed_files_resolves_against_cd_and_root(tmp_path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    target = pkg / "monitor.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    root_file = tmp_path / "types.py"
+    root_file.write_text("y = 1\n", encoding="utf-8")
+    root = str(tmp_path)
+    assert rt._viewed_files(
+        "cd pkg && cat monitor.py", root
+    ) == (os.path.normpath(str(target)),)
+    assert rt._viewed_files(
+        "cat types.py", root
+    ) == (os.path.normpath(str(root_file)),)
+    assert rt._viewed_files(
+        "cd pkg && cat missing.py", root
+    ) == ()
+    assert rt._viewed_files("cat /nonexistent_dir_xyz/f.py", root) == ()
+
+
+def test_newfile_precedent_does_not_preempt_executed_syntax_failure(tmp_path, monkeypatch):
+    from gt_engine import miniswe_covering as covering
+
+    adapter = MiniSweAdapter(task_id="precedent", state_dir=tmp_path, predicates=[],
+                             contract=extract_task_contract("Add a parser."))
+    calls = []
+    monkeypatch.setattr(covering, "run_newfile_precedent", lambda *_: "nearby example")
+    monkeypatch.setattr(covering, "run_covering_lane", lambda *_: calls.append("covering"))
+    monkeypatch.setattr(covering, "run_syntax_probe", lambda *_:
+                        calls.append("syntax") or "new.py: syntax error")
+    rendered = rt._run_evidence(adapter, "write", "", 0, 1, ("new.py",), {},
+                                 ("new.py",), allow_live_probes=True)
+    assert calls == ["covering", "syntax"]
+    assert "[GT_EVIDENCE:syntax_result]" in rendered
+    assert "nearby example" in rendered
+    assert rendered.index("syntax error") < rendered.index("nearby example")
+
+
+def test_runtime_collects_every_candidate_before_current_syntax_wins(
+    tmp_path, monkeypatch
+):
+    from gt_engine import miniswe_covering as covering
+
+    adapter = MiniSweAdapter(
+        task_id="rank-all",
+        state_dir=tmp_path,
+        predicates=[],
+        contract=extract_task_contract("Add a parser."),
+    )
+    calls = []
+    monkeypatch.setattr(
+        covering,
+        "run_covering_lane",
+        lambda *_: calls.append("covering") or None,
+    )
+    monkeypatch.setattr(
+        covering,
+        "run_syntax_probe",
+        lambda *_: calls.append("syntax") or "new.py: syntax error",
+    )
+    monkeypatch.setattr(
+        covering,
+        "run_newfile_precedent",
+        lambda *_: calls.append("newfile") or "nearby example",
+    )
+
+    def gateway(*args, **kwargs):
+        calls.append("gateway")
+        return EvidenceResult(rendered="", sealed=False)
+
+    recipes = []
+    resolve = adapter.resolve_delivery_recipe
+
+    def capture(recipe):
+        recipes.append(recipe)
+        return resolve(recipe)
+
+    monkeypatch.setattr(rt, "run_evidence_pipeline", gateway)
+    monkeypatch.setattr(adapter, "resolve_delivery_recipe", capture)
+    original_chain = adapter._chain_head
+    rendered = rt._run_evidence(
+        adapter,
+        "write",
+        "",
+        0,
+        1,
+        ("new.py",),
+        {},
+        ("new.py",),
+        allow_live_probes=True,
+    )
+
+    assert calls == ["covering", "syntax", "gateway", "newfile"]
+    # The co-change producer no longer renders here: it registers a delivery
+    # query for the admission choke point, which is where its bytes exist.
+    assert recipes == [
+        {"kind": "cochange", "params": {"files": ["new.py"]}},
+    ]
+    assert "syntax error" in rendered
+    # No graph bound -> the recipe cannot produce current bytes -> typed skip.
+    assert [item.kind for item in adapter._pending_provider_deliveries] == [
+        "syntax_result", "new_file_destination",
+    ]
+    assert rendered.index("syntax error") < rendered.index("nearby example")
+    assert "weak-prior" not in adapter._dedup_chain
+    assert adapter._chain_head == original_chain
+
+
+def test_verification_candidate_outranks_weak_priors(tmp_path, monkeypatch):
+    from gt_engine import miniswe_covering as covering
+
+    adapter = MiniSweAdapter(
+        task_id="verification-rank",
+        state_dir=tmp_path,
+        predicates=[],
+        contract=extract_task_contract("Fix the parser."),
+    )
+    verification = (
+        "[GT_EVIDENCE:verification_plan]\npytest tests/test_parser.py"
+    )
+    adapter._pending_verification_candidate = verification
+    adapter._pending_verification_metadata = {
+        "kind": "verification_plan",
+        "dedup_key": "verification:tx-1",
+        "target": "tests/test_parser.py",
+        "semantics": "advisory_pre_edit_dependency_graph",
+    }
+    monkeypatch.setattr(covering, "run_newfile_precedent", lambda *_: "example")
+    monkeypatch.setattr(
+        rt,
+        "run_evidence_pipeline",
+        lambda *args, **kwargs: EvidenceResult(rendered="", sealed=False),
+    )
+
+    recipes = []
+    resolve = adapter.resolve_delivery_recipe
+
+    def capture(recipe):
+        recipes.append(recipe)
+        return resolve(recipe)
+
+    monkeypatch.setattr(adapter, "resolve_delivery_recipe", capture)
+    rendered = rt._run_evidence(
+        adapter,
+        "edit",
+        "",
+        0,
+        1,
+        ("src/parser.py",),
+        {},
+        ("src/parser.py",),
+    )
+    assert "verification_plan" in rendered
+    assert adapter.verification_candidate()[0] == verification
+    assert rendered.index("verification_plan") < rendered.index("example")
+    assert recipes == [
+        {"kind": "cochange", "params": {"files": ["src/parser.py"]}},
+    ]
+    assert "verification:tx-1" not in adapter._dedup_chain
+    adapter.discard_pending_provider_deliveries(reason="fixture_provider_refusal")
+    assert adapter.verification_candidate()[0] == verification
+    assert "verification:tx-1" not in adapter._dedup_chain
+    rendered = rt._run_evidence(adapter, "edit", "", 0, 2, (), {})
+    adapter.bind_provider_payload({"messages": [{"role": "user", "content": rendered}]})
+    assert adapter.verification_candidate()[0] == ""
+    assert "verification:tx-1" in adapter._dedup_chain
+
+
+def test_selected_gateway_chain_commits_only_on_exact_exposure(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from groundtruth.runtime.evidence_envelope import chain_hash
+
+    adapter = MiniSweAdapter(task_id="exposure", state_dir=tmp_path, predicates=[],
+                             contract=extract_task_contract("Fix parser."))
+    old_head = "1" * 64
+    adapter._chain_head = old_head
+    monkeypatch.setattr(rt, "_cochange_prior", lambda *args: "")
+    monkeypatch.setattr(rt, "run_evidence_pipeline", lambda *args, **kwargs:
+        EvidenceResult(rendered="[GT_EVIDENCE:caller_contract]\nexact proof", sealed=True,
+                       chain_head="2" * 64, envelope=SimpleNamespace(
+                           evidence_type="caller_contract", dedup_key="proof-key", target="a.py")))
+    rendered = rt._run_evidence(adapter, "cat a.py", "x", 0, 1, (), {})
+    assert adapter._chain_head == old_head
+    assert "proof-key" not in adapter._dedup_chain
+    assert adapter.admit_model_visible_delivery(lane="sealed", kind="caller_contract",
+        rendered=rendered, action_index=1, iteration=0, dedup_key="proof-key")
+    adapter.bind_provider_payload({"messages": [{"role": "user", "content": "formatter removed proof"}]})
+    assert adapter._chain_head == old_head
+    assert "proof-key" not in adapter._dedup_chain
+    rendered = rt._run_evidence(adapter, "cat a.py", "x", 0, 2, (), {})
+    assert adapter.admit_model_visible_delivery(lane="sealed", kind="caller_contract",
+        rendered=rendered, action_index=2, iteration=1, dedup_key="proof-key")
+    adapter.bind_provider_payload({"messages": [{"role": "user", "content": rendered}]})
+    assert adapter._chain_head == chain_hash(old_head, rendered.encode())
+    assert "proof-key" in adapter._dedup_chain
+
+
+def test_covering_selection_does_not_open_stale_graph(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from gt_engine import miniswe_covering as covering
+
+    adapter = SimpleNamespace(repo_root=str(tmp_path), graph_query_snapshot=lambda:
+        SimpleNamespace(graph_current=False, graph_path=""))
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
+
+    def query(*_args):
+        pytest.fail("stale graph query")
+
+    monkeypatch.setattr(covering, "_symbols_for_files", query)
+    assert covering.run_covering_lane(adapter, ("source.py",)) is None
 
 
 class FakeModel:
@@ -39,6 +320,59 @@ class FakeModel:
         ]
 
 
+class TransportFakeModel(FakeModel):
+    model_name = "fixture/model"
+    model_kwargs = {}
+    tools = []
+
+    def _query(self, messages, **kwargs):
+        self.calls.append(messages)
+        return {"id": "response", "model": self.model_name, "usage": {}}
+
+    def query(self, messages, **kwargs):
+        prepared = self._prepare_messages_for_api(messages)
+        response = self._query(prepared, **kwargs)
+        return {"role": "assistant", "content": "ok",
+                "extra": {"actions": [], "response": response}}
+
+
+class FlakyInternalCallModel(TransportFakeModel):
+    """Transport that fails a chosen GT-internal call kind N times, then
+    answers. ``query`` mirrors ``LitellmModel.query``'s tenacity loop: the
+    transport boundary (``self._query``, bound to ``query_transport`` at
+    install) is re-entered per attempt regardless of the num_retries kwarg.
+    """
+
+    def __init__(self, flag: str, fail_attempts: int):
+        super().__init__()
+        self.flag = flag
+        self.fail_attempts = fail_attempts
+        self.internal_attempts = 0
+
+    def _query(self, messages, **kwargs):
+        if kwargs.get(self.flag):
+            self.internal_attempts += 1
+            if self.internal_attempts <= self.fail_attempts:
+                raise TimeoutError("fixture transient provider failure")
+        return super()._query(messages, **kwargs)
+
+    def query(self, messages, **kwargs):
+        last_error: Exception | None = None
+        for _ in range(10):
+            try:
+                prepared = self._prepare_messages_for_api(messages)
+                response = self._query(prepared, **kwargs)
+                return {
+                    "role": "assistant", "content": "ok",
+                    "extra": {"actions": [], "response": response},
+                }
+            except TimeoutError as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise AssertionError("fixture exhausted provider attempts")
+
+
 class FakeEnv:
     def __init__(self):
         self.executed: list[str] = []
@@ -63,6 +397,462 @@ class FakeAgent:
 
     def get_template_vars(self):
         return {}
+
+
+def test_plan_render_receipt_matches_native_request_bytes(tmp_path, monkeypatch):
+    import hashlib
+
+    from gt_engine.event_journal import verify_event_journal
+    from gt_engine.persistent_plan import build_plan_inputs
+
+    _configure_fixture_provider(monkeypatch)
+    task = "\n".join(f"The widget must preserve behavior {index}: " + "detail " * 60 for index in range(30))
+    adapter = MiniSweAdapter(task_id="plan-render", repo_root=str(tmp_path),
+                             state_dir=tmp_path / "state", predicates=[], issue_text=task)
+    adapter.plan_inputs = build_plan_inputs(task, repo_root=str(tmp_path), capture_baseline=False)
+    from gt_engine.persistent_plan.anchors import Anchor, ModeCandidate
+
+    first_id = adapter.plan_inputs.ledger.rows[0].row_id
+    adapter.plan_inputs.anchors.anchors[first_id] = (Anchor(
+        node_id=1, name="widget", qualified_name="widget", label="Function", file_path="widget.py",
+        start_line=1, signature="def widget():", language="python", basis="exact_name"),)
+    adapter.plan_inputs.anchors.modes = (ModeCandidate("Mode", 2, "mode.py", "enum", ("A", "B"), (1,)),)
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    agent.messages = [{"role": "system", "content": "system"}, {"role": "user", "content": task}]
+    # The production block cap is deliberately generous now — the durable
+    # task anchor is prefix-cached, so inline rows are the cheap place to
+    # spend bytes. Pin a small limit here so the indexed-vs-delivered
+    # receipt fields below still exercise an omission.
+    from gt_engine.persistent_plan import render as render_module
+
+    real_render = render_module.render_plan_block
+    monkeypatch.setattr(
+        render_module,
+        "render_plan_block",
+        lambda plan, **kw: real_render(plan, **{**kw, "limit": 4_000}),
+    )
+    install_runtime_hooks(agent, _session(adapter))
+    agent.model.query(agent.messages)
+    rows = [json.loads(line) for line in adapter.store.path.read_text(encoding="utf-8").splitlines()]
+    delivered = next(row for row in rows if row["event"] == "persistent_plan_delivered")
+    request_text = agent.model.calls[-1][1]["content"]
+    # Runtime steering can follow the immutable plan in the same message.
+    suffix = request_text[request_text.index("[GT_PERSISTENT_PLAN]"):].encode()
+    block = suffix[:delivered["rendered_bytes"]]
+    assert delivered["rendered_sha256"] == hashlib.sha256(block).hexdigest()
+    assert (adapter.store.root / delivered["rendered_blob"]).read_bytes() == block
+    assert b"interaction assessment pending: Mode.A, Mode.B" in block
+    assert delivered["omitted_requirement_row_ids"]
+    assert len(delivered["indexed_row_ids"]) > len(delivered["rendered_requirement_row_ids"])
+    assert delivered["plan_rows_basis"] == "indexed_not_fully_delivered"
+    assert verify_event_journal(adapter.store.path).valid
+    from scripts.gt_audit import _native_feature_projection, _native_plan_projection
+
+    projection, issues = _native_plan_projection(rows, adapter.store.root)
+    assert issues == []
+    assert _native_feature_projection(rows, plan_projection=projection)["persistent_plan"]["status"] == "WITNESSED"
+
+
+def test_persistent_plan_block_is_paid_once_then_carried_as_pointer(
+    tmp_path, monkeypatch
+):
+    """The plan is a record, not a retransmission: the durable task message
+    keeps the full contract text, the wire carries it in full exactly once,
+    and later requests admit a stable pointer instead.
+
+    Live run 35141054074 re-sent the 2.5KB block on every one of 30 turns;
+    under a no-cache route that mass is billed every time, and under a cached
+    route it still counts toward input. The record (journal, plan/current.json,
+    `gt-plan show`) stays authoritative; the cursor carries live state."""
+    from gt_engine.persistent_plan import build_plan_inputs
+
+    _configure_fixture_provider(monkeypatch)
+    task = "The widget must preserve behavior."
+    adapter = MiniSweAdapter(
+        task_id="plan-wire", repo_root=str(tmp_path),
+        state_dir=tmp_path / "state", predicates=[], issue_text=task,
+    )
+    adapter.plan_inputs = build_plan_inputs(
+        task, repo_root=str(tmp_path), capture_baseline=False
+    )
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    agent.messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": task},
+    ]
+    install_runtime_hooks(agent, _session(adapter))
+
+    agent.model.query(agent.messages)
+    durable_task = agent.messages[1]["content"]
+    assert "[GT_PERSISTENT_PLAN]" in durable_task
+    block_sha = adapter.plan_rendering_receipt["rendered_sha256"][:8]
+    first_wire = agent.model.calls[-1]
+    assert "[GT_PERSISTENT_PLAN]" in first_wire[1]["content"]
+    assert "Requirement index:" in first_wire[1]["content"]
+
+    agent.model.query(agent.messages)
+    second_wire = agent.model.calls[-1]
+    assert "Requirement index:" not in second_wire[1]["content"]
+    pointer_line = second_wire[1]["content"].split("[GT_PERSISTENT_PLAN]")[-1]
+    assert pointer_line.startswith(f" sha256:{block_sha}")
+    assert "gt-plan show" in pointer_line
+    # The record kept the contract; only the wire view compacted.
+    assert agent.messages[1]["content"] == durable_task
+    assert len(second_wire[1]["content"]) < len(durable_task)
+
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    compacted = [row for row in rows if row.get("event") == "persistent_plan_wire_compacted"]
+    assert len(compacted) == 1
+    assert compacted[0]["rendered_sha256"] == adapter.plan_rendering_receipt["rendered_sha256"]
+    from gt_engine.event_journal import verify_event_journal
+
+    assert verify_event_journal(adapter.store.path).valid
+
+
+def test_persistent_plan_retry_attempts_share_one_provider_request_id(
+    tmp_path, monkeypatch
+):
+    """A flaky provider retries the plan call inside the model's own loop.
+
+    ``LitellmModel.query`` re-enters ``model._query`` (the GT transport
+    boundary) per tenacity attempt. One logical internal call owns one
+    request identity: each retried attempt must reuse the delivery the first
+    attempt committed, not append another ``provider_delivery`` row under the
+    same ``request_id``. Live run 35129435645 committed seven rows under
+    ``...-gt-internal-persistent-plan``; the attribution census read them as
+    duplicates and failed the canonical audit.
+    """
+    from gt_engine.persistent_plan import build_plan_inputs
+
+    _configure_fixture_provider(monkeypatch)
+    monkeypatch.setenv("GT_PROVIDER_RETRY_JITTER_MAX_SECONDS", "0")
+    task = "The widget must preserve behavior."
+    adapter = MiniSweAdapter(
+        task_id="plan-retry", repo_root=str(tmp_path),
+        state_dir=tmp_path / "state", predicates=[], issue_text=task,
+    )
+    adapter.plan_inputs = build_plan_inputs(
+        task, repo_root=str(tmp_path), capture_baseline=False
+    )
+
+    agent = FakeAgent()
+    agent.model = FlakyInternalCallModel("_gt_persistent_plan", fail_attempts=3)
+    agent.messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": task},
+    ]
+    install_runtime_hooks(agent, _session(adapter))
+    agent.model.query(agent.messages)
+    assert agent.model.internal_attempts == 4
+
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    deliveries = [row for row in rows if row.get("event") == "provider_delivery"]
+    plan_requests = [
+        row for row in deliveries
+        if str(row.get("request_id") or "").endswith("gt-internal-persistent-plan")
+    ]
+    assert len(plan_requests) == 1
+    # The auditor's request census: request ids unique, iterations strictly
+    # sequential, every request closed by exactly one response or failure.
+    request_ids = [row["request_id"] for row in deliveries]
+    assert len(request_ids) == len(set(request_ids))
+    ordered_iterations = [
+        int(row["iteration"])
+        for row in sorted(deliveries, key=lambda row: int(row["sequence"]))
+    ]
+    assert ordered_iterations == list(range(1, len(deliveries) + 1))
+    responses = {
+        row["request_id"] for row in rows if row.get("event") == "provider_response"
+    }
+    failures = {
+        row["request_id"] for row in rows if row.get("event") == "provider_failure"
+    }
+    assert set(request_ids) <= responses | failures
+    # Failed wire attempts remain journaled as attempt rows: dedup removes
+    # duplicate request rows, never the attempt accounting.
+    assert sum(
+        row.get("event") == "provider_attempt_failed" for row in rows
+    ) == 3
+
+
+def test_persistent_plan_exhausted_retries_close_as_request_failure_pair(
+    tmp_path, monkeypatch
+):
+    """When every attempt of the plan call fails, the one committed request
+    row must close against the namespaced failure row — not leak N duplicate
+    request rows nor orphan the request for the missing-responses census."""
+    from gt_engine.persistent_plan import build_plan_inputs
+
+    _configure_fixture_provider(monkeypatch)
+    monkeypatch.setenv("GT_PROVIDER_RETRY_JITTER_MAX_SECONDS", "0")
+    task = "The widget must preserve behavior."
+    adapter = MiniSweAdapter(
+        task_id="plan-retry-fail", repo_root=str(tmp_path),
+        state_dir=tmp_path / "state", predicates=[], issue_text=task,
+    )
+    adapter.plan_inputs = build_plan_inputs(
+        task, repo_root=str(tmp_path), capture_baseline=False
+    )
+
+    agent = FakeAgent()
+    agent.model = FlakyInternalCallModel("_gt_persistent_plan", fail_attempts=10)
+    agent.messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": task},
+    ]
+    install_runtime_hooks(agent, _session(adapter))
+    # The plan bootstrap is advisory: the agent turn still completes.
+    agent.model.query(agent.messages)
+    assert agent.model.internal_attempts == 10
+
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    deliveries = [row for row in rows if row.get("event") == "provider_delivery"]
+    plan_requests = [
+        row for row in deliveries
+        if str(row.get("request_id") or "").endswith("gt-internal-persistent-plan")
+    ]
+    assert len(plan_requests) == 1
+    plan_failures = [
+        row for row in rows
+        if row.get("event") == "provider_failure"
+        and str(row.get("request_id") or "").endswith("gt-internal-persistent-plan")
+    ]
+    assert len(plan_failures) == 1
+    request_ids = [row["request_id"] for row in deliveries]
+    assert len(request_ids) == len(set(request_ids))
+    ordered_iterations = [
+        int(row["iteration"])
+        for row in sorted(deliveries, key=lambda row: int(row["sequence"]))
+    ]
+    assert ordered_iterations == list(range(1, len(deliveries) + 1))
+    responses = {
+        row["request_id"] for row in rows if row.get("event") == "provider_response"
+    }
+    failures = {
+        row["request_id"] for row in rows if row.get("event") == "provider_failure"
+    }
+    assert set(request_ids) <= responses | failures
+    assert any(
+        row.get("event") == "persistent_plan_unavailable" for row in rows
+    )
+
+
+def test_persistent_plan_transport_failure_falls_back_to_deterministic_floor(
+    tmp_path, monkeypatch
+):
+    """Run 35168421439 (cyclotruc): the planning call died inside the
+    provider's flake window, ``persistent_plan_unavailable`` fired, and the
+    submit gate lost its substrate -- the run submitted over 3 live RED
+    predicates without a gate consult. The inputs (ledger rows, anchors,
+    covering checks) were all computed before the call; transport failure
+    must degrade the enrichment to the deterministic floor, never to no
+    plan at all."""
+    from gt_engine.persistent_plan import build_plan_inputs
+
+    _configure_fixture_provider(monkeypatch)
+    monkeypatch.setenv("GT_PROVIDER_RETRY_JITTER_MAX_SECONDS", "0")
+    task = (
+        "Fix the tokenizer.\n"
+        "\n"
+        "Assumptions:\n"
+        " the tokenizer must preserve behavior\n"
+    )
+    adapter = MiniSweAdapter(
+        task_id="plan-floor", repo_root=str(tmp_path),
+        state_dir=tmp_path / "state", predicates=[], issue_text=task,
+    )
+    adapter.plan_inputs = build_plan_inputs(
+        task, repo_root=str(tmp_path), capture_baseline=False
+    )
+
+    agent = FakeAgent()
+    agent.model = FlakyInternalCallModel("_gt_persistent_plan", fail_attempts=10)
+    agent.messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": task},
+    ]
+    install_runtime_hooks(agent, _session(adapter))
+    agent.model.query(agent.messages)
+
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    unavailable = [
+        row for row in rows if row.get("event") == "persistent_plan_unavailable"
+    ]
+    assert unavailable
+    assert unavailable[-1].get("fallback") == "deterministic_floor"
+    # The floor plan is installed: the gate keeps its substrate.
+    assert adapter.persistent_plan is not None
+    assert adapter.persistent_plan.rows
+    assert adapter.plan_inputs is not None
+
+
+@pytest.mark.parametrize("receipt_failure", [False, True])
+def test_plan_gate_directive_is_audited_through_native_provider_request(tmp_path, monkeypatch, receipt_failure):
+    from gt_engine.persistent_plan import build_plan_inputs
+    from scripts.gt_audit import _native_feature_projection, _native_plan_projection
+
+    _configure_fixture_provider(monkeypatch)
+    task = "The widget must preserve its public signature."
+    adapter = MiniSweAdapter(task_id="gate-exposure", repo_root=str(tmp_path),
+                             state_dir=tmp_path / "state", predicates=[], issue_text=task)
+    adapter.plan_inputs = build_plan_inputs(task, repo_root=str(tmp_path), capture_baseline=False)
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    agent.messages = [{"role": "system", "content": "system"}, {"role": "user", "content": task}]
+    session = _session(adapter)
+    monkeypatch.setattr(session, "plan_gate_budget", lambda: (600.0, None))
+    install_runtime_hooks(agent, session)
+    agent.model.query(agent.messages)
+    if receipt_failure:
+        original_put = adapter.store.put_blob
+        def fail_gate_receipt(namespace, *args, **kwargs):
+            if namespace == "plan_gate_directives":
+                raise OSError("fixture receipt store failure")
+            return original_put(namespace, *args, **kwargs)
+        monkeypatch.setattr(adapter.store, "put_blob", fail_gate_receipt)
+    agent.execute_actions({"extra": {"actions": [{"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}]}})
+    assert agent.env.executed == []
+    assert any("GT PLAN GATE" in item.get("content", "") for item in agent.messages)
+    if receipt_failure:
+        assert session.disabled_stage == "plan_gate_delivery_receipt"
+        rows = [json.loads(line) for line in adapter.store.path.read_text().splitlines()]
+        assert any(row.get("event") == "gt_degraded_fail_open"
+                   and row.get("stage") == "plan_gate_delivery_receipt" for row in rows)
+        assert not any(row.get("event") == "plan_gate_directive_prepared" for row in rows)
+        return
+    agent.model.query(agent.messages)
+    rows = [json.loads(line) for line in adapter.store.path.read_text().splitlines()]
+    projection, issues = _native_plan_projection(rows, adapter.store.root)
+    assert issues == []
+    assert _native_feature_projection(rows, plan_projection=projection)["plan_gate"]["status"] == "WITNESSED"
+
+
+def test_native_action_batch_has_session_owned_execution_receipts(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    agent = FakeAgent()
+    adapter = MiniSweAdapter(task_id="execution-batch", state_dir=tmp_path, predicates=[])
+    def execute(action):
+        result = subprocess.run([sys.executable, "-c", action["command"]],
+                                capture_output=True, text=True, check=False)
+        return {"output": result.stdout + result.stderr, "returncode": result.returncode}
+    agent.env.execute = execute
+    monkeypatch.setattr(rt, "_run_evidence", lambda *args, **kwargs: "")
+    install_runtime_hooks(agent, _session(adapter))
+    outputs = agent.execute_actions({"extra": {"actions": [
+        {"command": "print('real output')"}, {"command": "pass"},
+        {"command": "raise RuntimeError('real failure')"},
+    ]}})
+    assert len(outputs) == 3
+    rows = [json.loads(line) for line in adapter.store.path.read_text().splitlines()]
+    starts = [row for row in rows if row["event"] == "execution_started"]
+    finishes = [row for row in rows if row["event"] == "execution_finished"]
+    assert len(starts) == len(finishes) == 3
+    assert [row["action_index"] for row in starts] == [1, 2, 3]
+    assert [row["execution_id"] for row in starts] == [row["execution_id"] for row in finishes]
+    assert all(row["result_sha256"] for row in finishes)
+
+
+def test_native_restart_restores_original_plan_without_another_planning_call(tmp_path, monkeypatch):
+    from gt_engine.persistent_plan import build_plan_inputs
+
+    _configure_fixture_provider(monkeypatch)
+    task = "The widget must preserve compatibility."
+    plans = []
+    for attempt in range(2):
+        adapter = MiniSweAdapter(task_id="native-plan-restart", repo_root=str(tmp_path),
+                                 state_dir=tmp_path / "state", predicates=[], issue_text=task)
+        adapter.plan_inputs = build_plan_inputs(task, repo_root=str(tmp_path), capture_baseline=False,
+                                               source_revision=f"revision-{attempt}")
+        agent = FakeAgent()
+        agent.model = TransportFakeModel()
+        agent.messages = [{"role": "system", "content": "system"}, {"role": "user", "content": task}]
+        install_runtime_hooks(agent, _session(adapter))
+        agent.model.query(agent.messages)
+        if not attempt:
+            import hashlib
+
+            request_dir = adapter.store.root / "plan" / "requests"
+            request_dir.mkdir(parents=True, exist_ok=True)
+            (request_dir / "01-revise.json").write_text(json.dumps({
+                "plan_digest": hashlib.sha256(adapter.persistent_plan.canonical_json().encode()).hexdigest(),
+                "row_id": adapter.persistent_plan.rows[0].row_id, "operation": "revise",
+                "value": {"approach": "Preserve the public widget signature during the change."},
+            }))
+            adapter.apply_plan_requests()
+        plans.append(adapter.persistent_plan.canonical_json())
+        if attempt:
+            assert len(agent.model.calls) == 1, "restart spent another planning provider call"
+            assert adapter.persistent_plan.inputs.source_revision == "revision-0"
+            assert adapter.unmet_plan_rows(), "historical plan restored passing authority"
+            assert "Preserve the public widget signature" in json.dumps(agent.model.calls[-1])
+    assert plans[0] == plans[1]
+
+
+def test_fast_paths_have_distinct_native_action_indices(tmp_path):
+    agent = FakeAgent()
+    adapter = MiniSweAdapter(task_id="fast-paths", state_dir=tmp_path, predicates=[])
+    install_runtime_hooks(agent, _session(adapter))
+    actions = [{"command": "echo hello"}, {"command": ""},
+               {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}]
+    agent.execute_actions({"extra": {"actions": actions}})
+    rows = [json.loads(line) for line in adapter.store.path.read_text().splitlines()]
+    starts = [row for row in rows if row["event"] == "execution_started"]
+    assert [row["action_index"] for row in starts] == [1, 2, 3]
+    assert agent.env.executed == [action["command"] for action in actions]
+
+
+def test_external_edit_cannot_dirty_repository(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "a.py").write_text("x = 1\n", encoding="utf-8")
+    external = tmp_path / "scratch.py"
+    external.write_text("x = 1\n", encoding="utf-8")
+    adapter = MiniSweAdapter(task_id="external-edit", repo_root=str(repository),
+                             state_dir=tmp_path / "state", predicates=[])
+    agent = FakeAgent()
+    edits = []
+    monkeypatch.setattr(adapter, "note_edit", lambda paths: edits.append(paths))
+    monkeypatch.setattr(rt, "_run_evidence", lambda *args, **kwargs: "")
+
+    def execute(action):
+        external.write_text("x = 2\n", encoding="utf-8")
+        return {"output": "", "returncode": 0}
+
+    agent.env.execute = execute
+    install_runtime_hooks(agent, adapter)
+    agent.execute_actions({"extra": {"actions": [
+        {"command": f"sed -i 's/1/2/' {external.as_posix()}"}
+    ]}})
+    assert external.read_text(encoding="utf-8") == "x = 2\n"
+    assert edits == []
+
+
+def test_fallback_preimage_does_not_read_external_file(tmp_path):
+    from types import SimpleNamespace
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    external = tmp_path / "scratch.py"
+    external.write_text("outside", encoding="utf-8")
+    adapter = SimpleNamespace(repo_root=str(repository))
+    assert rt._capture_edit_preimage(
+        adapter, f"sed -i 's/outside/changed/' {external.as_posix()}"
+    ) is None
 
 
 class AlwaysSuppressBoundary:
@@ -94,8 +884,52 @@ def _session(adapter, mode=GTMode.ADVISORY):
     )
 
 
-def test_runtime_hooks_capture_provider_payload_and_action(tmp_path):
+def _configure_fixture_provider(monkeypatch):
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "100000")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "1000")
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_SOURCE", "fixture")
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _: 1)
+
+
+def test_native_first_source_creation_bootstraps_installed_graph(tmp_path):
+    import os
+    import subprocess
+
+    if os.name != "posix" or not os.environ.get("GT_INDEX_BINARY"):
+        pytest.skip("installed Linux producer required")
+    root = tmp_path / "empty"
+    root.mkdir()
+    adapter = MiniSweAdapter(task_id="first-source", state_dir=tmp_path / "state",
+                             repo_root=str(root), predicates=[])
     agent = FakeAgent()
+
+    def execute(action):
+        result = subprocess.run(["bash", "-c", action["command"]], cwd=root,
+                                capture_output=True, text=True, check=False)
+        return {"output": result.stdout + result.stderr, "returncode": result.returncode}
+
+    agent.env.execute = execute
+    install_runtime_hooks(agent, _session(adapter))
+    agent.execute_actions({"extra": {"actions": [{"command": "printf ready"}]}})
+    assert not adapter.engine_state.graph_path
+    agent.execute_actions({"extra": {"actions": [
+        {"command": "printf 'def first(): return 1\\n' > first.py"}
+    ]}})
+    assert (root / "first.py").read_text() == "def first(): return 1\n"
+    # The boundary build is synchronous: no worker exists to wait on, and a
+    # normal native view must consume the completed publication.
+    adapter.refresh_graph()
+    agent.execute_actions({"extra": {"actions": [{"command": "cat first.py"}]}})
+    assert adapter.graph_fresh
+    rows = [json.loads(line) for line in adapter.store.path.read_text().splitlines()]
+    publications = [row for row in rows if row["event"] == "graph_publication"]
+    assert publications[-1]["repository_revision"] == adapter.repository_revision
+
+
+def test_runtime_hooks_capture_provider_payload_and_action(tmp_path, monkeypatch):
+    _configure_fixture_provider(monkeypatch)
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
     adapter = MiniSweAdapter(task_id="t", state_dir=tmp_path,
                              predicates=[Predicate("p", "p")])
     handle = install_runtime_hooks(agent, adapter)
@@ -103,15 +937,19 @@ def test_runtime_hooks_capture_provider_payload_and_action(tmp_path):
         {"role": "user", "content": "task"},
     ])
     assert prepared[0]["content"].startswith("task")
+    assert not adapter.deliveries
+    agent.model.query([{"role": "user", "content": "task"}])
     assert adapter.deliveries
     agent.execute_actions({"extra": {"actions": [{"cmd": "printf ok"}]}})
     assert handle.installed is True
     assert adapter.iteration == 1
 
 
-def test_native_groundtruth_action_is_routed_without_shell_execution(tmp_path):
+def test_native_groundtruth_action_is_routed_without_shell_execution(tmp_path, monkeypatch):
+    _configure_fixture_provider(monkeypatch)
     (tmp_path / "mod.py").write_text("needle = 1\n", encoding="utf-8")
     agent = FakeAgent()
+    agent.model = TransportFakeModel()
     adapter = MiniSweAdapter(
         task_id="t",
         state_dir=tmp_path / "state",
@@ -144,7 +982,7 @@ def test_native_groundtruth_action_is_routed_without_shell_execution(tmp_path):
     matches = answer["matches"] if isinstance(answer, dict) else answer
     assert matches[0]["path"] == "mod.py"
     assert adapter._pending_typed_observations
-    agent.model._prepare_messages_for_api([*agent.messages, *messages])
+    agent.model.query([*agent.messages, *messages])
     assert adapter._pending_typed_observations == []
     rows = [
         __import__("json").loads(line)
@@ -154,6 +992,86 @@ def test_native_groundtruth_action_is_routed_without_shell_execution(tmp_path):
     assert len(joined) == 1
     assert joined[0]["final_observation_sha256"]
     assert joined[0]["provider_payload_sha256"] == adapter.deliveries[-1].payload_sha256
+
+
+def test_graph_independent_typed_query_does_not_refresh_stale_graph(
+    monkeypatch, tmp_path,
+):
+    (tmp_path / "mod.py").write_text("needle = 1\n", encoding="utf-8")
+    agent = FakeAgent()
+    adapter = MiniSweAdapter(
+        task_id="t",
+        state_dir=tmp_path / "state",
+        predicates=[Predicate("p", "p")],
+        repo_root=str(tmp_path),
+        graph_db=str(tmp_path / "graph.db"),
+    )
+    adapter.graph_fresh = False
+    phases = []
+
+    def refresh_graph(*, phase="graph_query"):
+        phases.append(phase)
+        adapter.graph_fresh = True
+        return True
+
+    monkeypatch.setattr(adapter, "refresh_graph", refresh_graph)
+    install_runtime_hooks(agent, adapter)
+    agent.execute_actions(
+        {
+            "extra": {
+                "actions": [
+                    {
+                        "tool_name": "groundtruth",
+                        "tool_call_id": "gt-refresh",
+                        "gt_action": {
+                            "kind": "exact_literal_search",
+                            "arguments": {"literal": "needle", "paths": ["mod.py"]},
+                        },
+                    }
+                ]
+            }
+        }
+    )
+
+    assert phases == []
+    assert adapter.graph_fresh is False
+
+
+def test_ordinary_provider_turn_does_not_rebuild_a_stale_graph(monkeypatch, tmp_path):
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    adapter = MiniSweAdapter(
+        task_id="t",
+        state_dir=tmp_path / "state",
+        predicates=[Predicate("p", "p")],
+        repo_root=str(tmp_path),
+        graph_db=str(tmp_path / "graph.db"),
+    )
+    adapter.graph_fresh = False
+    phases = []
+
+    def refresh_graph(*, phase="graph_query"):
+        phases.append(phase)
+        adapter.graph_fresh = True
+        return True
+
+    monkeypatch.setattr(adapter, "refresh_graph", refresh_graph)
+    install_runtime_hooks(agent, adapter)
+    agent.model._prepare_messages_for_api(
+        [{"role": "user", "content": "continue after an edit"}]
+    )
+
+    assert phases == []
+    assert adapter.graph_fresh is False
+
+
+def test_groundtruth_reads_exact_raw_output_not_bounded_model_view():
+    result = {
+        "output": "bounded",
+        "extra": {"raw_output": "exact diagnostic output"},
+    }
+
+    assert rt._observation_output(result) == "exact diagnostic output"
 
 
 def test_malformed_groundtruth_action_fails_open_without_becoming_shell(tmp_path):
@@ -188,6 +1106,7 @@ def test_real_miniswe_entrypoint_builds_pinned_adapter(tmp_path):
         output=None,
         temperature=1.0,
         gt_off=False,
+        wall_time_limit_seconds=123,
     )
     assert agent._gt_runtime_hook_handle.installed is True
     assert adapter.contract is not None
@@ -195,18 +1114,272 @@ def test_real_miniswe_entrypoint_builds_pinned_adapter(tmp_path):
     assert session is not None
     assert agent._gt_runtime_hook_handle.session is session
     assert session.mode is GTMode.ADVISORY
+    assert session.assurance_state.value == "FULL"
+    assert set(session.config.capabilities) == {
+        "exact_provider_payload",
+        "provider_response_ids",
+        "structured_actions",
+        "structured_results",
+        "workspace_deltas",
+        "filesystem_snapshots",
+        "tool_call_deferral",
+        "parsed_test_results",
+    }
+    assert agent.config.wall_time_limit_seconds == 123
 
 
-def test_provider_response_is_bound_to_delivery(tmp_path):
+def test_provider_response_is_bound_to_delivery(tmp_path, monkeypatch):
+    _configure_fixture_provider(monkeypatch)
     agent = FakeAgent()
+    agent.model = TransportFakeModel()
     adapter = MiniSweAdapter(task_id="t", state_dir=tmp_path,
                              predicates=[Predicate("p", "p")])
     install_runtime_hooks(agent, _session(adapter, GTMode.ENFORCED))
-    agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
-    request_id = adapter.deliveries[-1].request_id
-    assert not adapter.terminal_confirmed(request_id)
     agent.model.query([{"role": "user", "content": "task"}])
+    request_id = adapter.deliveries[-1].request_id
     assert adapter.terminal_confirmed(request_id)
+
+
+def test_provider_admission_uses_prepared_payload_and_conserves_refusal(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "100")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "20")
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_SOURCE", "provider:/models")
+
+    class PreparedBoundaryModel(FakeModel):
+        model_name = "openai/meta/muse-spark-1.2-contributor"
+        model_kwargs = {}
+        tools = []
+
+        def __init__(self):
+            super().__init__()
+            self.transport_calls = 0
+
+        def _query(self, messages, **kwargs):
+            self.transport_calls += 1
+            return {"id": "resp", "status": "completed", "model": "m"}
+
+        def query(self, messages, **kwargs):
+            prepared = self._prepare_messages_for_api(messages)
+            response = self._query(prepared, **kwargs)
+            return {
+                "role": "assistant",
+                "content": "ok",
+                "extra": {
+                    "actions": [],
+                    "response": {
+                        "id": response["id"],
+                        "model": "meta/muse-spark-1.2-contributor",
+                        "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+                    },
+                },
+            }
+
+    agent = FakeAgent()
+    agent.model = PreparedBoundaryModel()
+    adapter = MiniSweAdapter(
+        task_id="t", state_dir=tmp_path, predicates=[], issue_text="Fix it."
+    )
+    install_runtime_hooks(agent, _session(adapter))
+
+    # The raw history is huge only because ``extra`` duplicates content.  The
+    # native prepare seam strips it before admission.
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _payload: 79)
+    agent.model.query(
+        [
+            {
+                "role": "tool",
+                "content": "real evidence",
+                "extra": {"duplicate": "x" * 1_000_000},
+            }
+        ]
+    )
+    assert agent.model.transport_calls == 1
+
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _payload: 81)
+    with pytest.raises(ProviderRequestTooLarge):
+        agent.model.query([{"role": "user", "content": "genuinely too large"}])
+    assert agent.model.transport_calls == 1
+    assert len(adapter.deliveries) == 1
+    assert adapter.terminal_confirmed(adapter.deliveries[-1].request_id)
+
+    monkeypatch.delenv("GT_PROVIDER_CONTEXT_WINDOW_SOURCE")
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _payload: 12)
+    with pytest.raises(rt.ProviderContextWindowUnavailable):
+        agent.model.query([{"role": "user", "content": "metadata unavailable"}])
+    assert agent.model.transport_calls == 1
+    events = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    refusal = [row for row in events if row.get("event") == "provider_admission"][-1]
+    assert refusal["reason"] == "GT_PROVIDER_CONTEXT_WINDOW_UNAVAILABLE"
+    assert refusal["request_tokens"] == 12
+    assert refusal["request_bytes"] > 0
+    assert refusal["metadata_source"] == ""
+
+
+def test_final_provider_refusal_does_not_consume_gt_delivery(tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "100")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "20")
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_SOURCE", "fixture")
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    adapter = MiniSweAdapter(task_id="t", state_dir=tmp_path, predicates=[],
+                             contract=extract_task_contract("Fix compute()."))
+    install_runtime_hooks(agent, _session(adapter))
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _: 81)
+    prepared = agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
+    assert "GT_TASK_CONTRACT" in prepared[-1]["content"]
+    assert not adapter.contract_shipped
+    assert not adapter.deliveries
+    with pytest.raises(ProviderRequestTooLarge):
+        agent.model._query(prepared)
+    assert not adapter.contract_shipped
+    assert not adapter.deliveries
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _: 79)
+    retry = agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
+    assert "GT_TASK_CONTRACT" in retry[-1]["content"]
+    agent.model._query(retry)
+    assert adapter.contract_shipped
+    assert len(adapter.deliveries) == 1
+
+
+def test_recovery_retries_through_real_admission_and_transport_hooks(tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "100")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "20")
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_SOURCE", "fixture")
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    adapter = MiniSweAdapter(task_id="recovery-wire", state_dir=tmp_path, predicates=[])
+    adapter.start_task()
+    adapter.note_failure_fingerprint("failure", epoch=0)
+    adapter.note_edit(["module.py"])
+    adapter.note_failure_fingerprint("failure", epoch=1)
+    rendered = adapter.pending_transient
+    install_runtime_hooks(agent, _session(adapter))
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _: 81)
+    messages = [{"role": "user", "content": "task"}]
+    with pytest.raises(ProviderRequestTooLarge):
+        agent.model._query(messages)
+    assert not agent.model.calls
+    assert adapter._recovery_delivered == 0
+    assert adapter.pending_transient == rendered
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _: 79)
+    agent.model._query(messages)
+    assert agent.model.calls[-1][-1]["content"] == rendered
+    assert adapter._recovery_delivered == 1
+    assert adapter.deliveries[-1].delivery_ids
+    assert messages == [{"role": "user", "content": "task"}]
+    agent.model._query(messages)
+    assert all(rendered not in item["content"] for item in agent.model.calls[-1])
+    assert adapter._recovery_delivered == 1
+
+
+def test_chain_conflict_never_reaches_transport_and_can_be_reprepared(tmp_path, monkeypatch):
+    from gt_engine.miniswe_integration import ExposureChainConflict
+
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "100")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "20")
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_SOURCE", "fixture")
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _: 10)
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    adapter = MiniSweAdapter(task_id="chain-wire", state_dir=tmp_path, predicates=[])
+    install_runtime_hooks(agent, _session(adapter))
+    initial = adapter._chain_head
+    rendered = "[GT_EVIDENCE:caller_contract] dependent proof"
+
+    def stage(previous):
+        adapter.stage_exposure(rendered=rendered, dedup_key="B",
+                               previous_chain_head=previous, next_chain_head="head-b")
+        assert adapter.admit_model_visible_delivery(
+            lane="sealed", kind="caller_contract", rendered=rendered,
+            action_index=1, iteration=0, dedup_key="B")
+
+    stage("missing-head-a")
+    messages = [{"role": "user", "content": rendered}]
+    with pytest.raises(ExposureChainConflict):
+        agent.model._query(messages)
+    assert not agent.model.calls
+    assert not adapter.deliveries
+    assert adapter._chain_head == initial
+    assert not adapter._pending_provider_deliveries
+    stage(initial)
+    agent.model._query(messages)
+    assert agent.model.calls == [messages]
+    assert adapter._chain_head == "head-b"
+    assert adapter._model_visible_delivery_count == 1
+
+
+def test_prepare_failure_discards_staged_delivery(tmp_path, monkeypatch):
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    adapter = MiniSweAdapter(
+        task_id="t",
+        state_dir=tmp_path,
+        predicates=[],
+        contract=extract_task_contract("Fix compute()."),
+    )
+    session = _session(adapter)
+    install_runtime_hooks(agent, session)
+
+    def fail_after_staging(messages, *, iteration):
+        adapter.admit_model_visible_delivery(
+            lane="prompt",
+            kind="context_delta",
+            rendered="[GT_FIXTURE] staged",
+            dedup_key="fixture",
+            action_index=0,
+            iteration=iteration,
+        )
+        raise RuntimeError("fixture prepare failure")
+
+    monkeypatch.setattr(session, "before_model", fail_after_staging)
+    original = [{"role": "user", "content": "task"}]
+    assert agent.model._prepare_messages_for_api(original) == original
+    assert not adapter.deliveries
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    discarded = [
+        row for row in rows if row.get("event") == "prepared_deliveries_discarded"
+    ]
+    assert discarded[-1]["reason"] == "prepare_messages_error"
+
+
+def test_disable_between_prepare_and_transport_discards_delivery(tmp_path, monkeypatch):
+    _configure_fixture_provider(monkeypatch)
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    adapter = MiniSweAdapter(
+        task_id="t",
+        state_dir=tmp_path,
+        predicates=[],
+        contract=extract_task_contract("Fix compute()."),
+    )
+    session = _session(adapter)
+    install_runtime_hooks(agent, session)
+    prepared = agent.model._prepare_messages_for_api(
+        [{"role": "user", "content": "task"}]
+    )
+    assert "GT_TASK_CONTRACT" in prepared[-1]["content"]
+
+    session.degrade("fixture", RuntimeError("disabled before transport"))
+    agent.model._query(prepared)
+
+    assert not adapter.contract_shipped
+    assert not adapter.deliveries
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    discarded = [
+        row for row in rows if row.get("event") == "prepared_deliveries_discarded"
+    ]
+    assert discarded[-1]["reason"] == "gt_disabled_before_transport"
 
 
 def test_submit_magic_string_executes_when_no_red_evidence(tmp_path):
@@ -219,13 +1392,22 @@ def test_submit_magic_string_executes_when_no_red_evidence(tmp_path):
         {"cmd": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"},
     ]}})
     # D3-G: with no RED receipt, UNKNOWN predicates no longer block submission.
-    assert adapter.phase == "FINISHED"
+    # This environment returns ordinary "ok", not Submitted. Command text alone
+    # must not declare completion before a native terminal result exists.
+    assert adapter.phase == "IMPLEMENT"
     assert agent.env.executed
+
     assert not any(m.get("role") == "user" and "GT REQUIRES" in str(m.get("content"))
                    for m in msgs)
 
 
-def test_advisory_mode_never_blocks_submit_on_red_evidence(tmp_path):
+def test_advisory_mode_still_gates_submit_on_red_evidence(tmp_path):
+    """Advisory is not a gate bypass. The benchmark runs advisory
+    (--gt-mode advisory) and run 35168421439 showed the hole this test used
+    to certify: a RED predicate + no plan shipped the submit because the
+    consult never ran. The pre-execution gate is mode-uniform -- refusal
+    suppresses, journals the decision, and issues the directive; what
+    advisory changes is the post-execution decision's enforced flag."""
     agent = FakeAgent()
     adapter = MiniSweAdapter(task_id="t", state_dir=tmp_path,
                              predicates=[Predicate("p", "p")])
@@ -236,10 +1418,29 @@ def test_advisory_mode_never_blocks_submit_on_red_evidence(tmp_path):
     msgs = agent.execute_actions({"extra": {"actions": [
         {"cmd": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"},
     ]}})
-    assert adapter.phase == "FINISHED"
+    assert adapter.phase == "IMPLEMENT"  # Refused, not submitted.
+    assert not agent.env.executed
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    decision = next(
+        row for row in reversed(rows) if row["event"] == "plan_gate_decision"
+    )
+    assert decision["accepted"] is False
+    assert decision["unresolved_predicates"] == ["p"]
+    # The directive reaches the model as a user message.
+    assert any(m.get("role") == "user" and "GT PLAN GATE" in str(m.get("content"))
+               for m in msgs)
+
+    # A clean submit in advisory still executes natively.
+    adapter.record_receipt("p", "pytest", 0, "1 passed",
+                           epoch=adapter.workspace_epoch, status="GREEN",
+                           semantic=True)
+    msgs = agent.execute_actions({"extra": {"actions": [
+        {"cmd": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"},
+    ]}})
     assert agent.env.executed
-    assert not any(m.get("role") == "user" and "GT ADVISORY" in str(m.get("content"))
-                   for m in msgs)
 
 
 def test_enforced_mode_refuses_only_current_red_evidence(monkeypatch, tmp_path):
@@ -257,7 +1458,7 @@ def test_enforced_mode_refuses_only_current_red_evidence(monkeypatch, tmp_path):
     ]}})
     assert adapter.phase == "IMPLEMENT"
     assert not agent.env.executed
-    assert any(m.get("role") == "user" and "Submission not executed" in str(m.get("content"))
+    assert any(m.get("role") == "user" and "GT ENFORCED" in str(m.get("content"))
                for m in msgs)
 
 
@@ -271,7 +1472,7 @@ def test_submit_magic_string_executes_when_contract_proven(tmp_path):
     agent.execute_actions({"extra": {"actions": [
         {"cmd": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"},
     ]}})
-    assert adapter.phase == "FINISHED"
+    assert adapter.phase == "IMPLEMENT"  # FakeEnv returned ok, not Submitted.
     assert agent.env.executed
 
 
@@ -318,7 +1519,7 @@ def test_git_based_edit_detection_catches_heredoc_write(tmp_path):
     assert adapter.workspace_epoch == 1
 
 
-def test_result_level_submit_interception_refuses_bypass(monkeypatch, tmp_path):
+def test_result_level_submit_cannot_reuse_preexecution_authority(monkeypatch, tmp_path):
     from minisweagent.exceptions import Submitted
 
     class BypassEnv:
@@ -329,11 +1530,14 @@ def test_result_level_submit_interception_refuses_bypass(monkeypatch, tmp_path):
             self.executed.append(action.get("command", ""))
             # The command text has no marker, but its OUTPUT begins with the
             # magic string - Mini-SWE's _check_finished would raise Submitted.
-            raise Submitted({
+            error = Submitted({
                 "role": "exit",
                 "content": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfake",
                 "extra": {"exit_status": "Submitted", "submission": "fake"},
             })
+            error.gt_execution_result = {"output": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfake",
+                                         "returncode": 0, "exception_info": ""}
+            raise error
 
     agent = FakeAgent()
     agent.env = BypassEnv()
@@ -345,28 +1549,148 @@ def test_result_level_submit_interception_refuses_bypass(monkeypatch, tmp_path):
     agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
     adapter.record_receipt("p", "pytest", 1, "1 failed", epoch=0, status="RED",
                            semantic=True)
-    msgs = agent.execute_actions({"extra": {"actions": [
-        {"command": "python -c \"print('COMPLETE_' 'TASK_AND_SUBMIT_FINAL_OUTPUT')\"",
-         "tool_call_id": "c1"},
-    ]}})
-    # The gate refused at the RESULT level: the run continues (no Submitted
-    # propagates) and the model sees an explicit, nonterminal GT advisory.
-    assert adapter.phase == "IMPLEMENT"
-    assert any(m.get("role") == "user" and "Submission not executed" in str(m.get("content"))
-               for m in msgs)
+    with pytest.raises(Submitted):
+        agent.execute_actions({"extra": {"actions": [
+            {"command": "python -c \"print('COMPLETE_' 'TASK_AND_SUBMIT_FINAL_OUTPUT')\"",
+             "tool_call_id": "c1"},
+        ]}})
     assert agent.env.executed
+    rows = [json.loads(line) for line in adapter.store.path.read_text().splitlines()]
+    assert not any(row["event"] in {"submit_refusal", "action_suppressed"} for row in rows)
+    assert agent._gt_runtime_hook_handle.session.disabled_stage == "terminal_refusal_authority"
 
 
-def test_result_level_submit_interception_accepts_when_proven(tmp_path):
+def test_output_marker_submit_journals_post_terminal_gate_verdict(tmp_path):
+    """A marker assembled at runtime never matches is_submit_command's text
+    check, so the submit executes and lands on the advisory post-execution
+    path. Nothing can be suppressed there -- but the journal must still
+    carry the verdict the gate would have reached, marked
+    enforcement=post_terminal. Run 35168421439's journal had no gate row at
+    all: "no gate row" and "gate saw clean evidence" were indistinguishable.
+    """
+    from minisweagent.exceptions import Submitted
+
+    class MarkerOutputEnv:
+        def __init__(self):
+            self.executed = []
+
+        def execute(self, action):
+            self.executed.append(action.get("command", ""))
+            error = Submitted({
+                "role": "exit",
+                "content": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfake",
+                "extra": {"exit_status": "Submitted", "submission": "fake"},
+            })
+            error.gt_execution_result = {
+                "output": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfake",
+                "returncode": 0,
+                "exception_info": "",
+            }
+            raise error
+
+    agent = FakeAgent()
+    agent.env = MarkerOutputEnv()
+    adapter = MiniSweAdapter(task_id="t", state_dir=tmp_path,
+                             predicates=[Predicate("p", "p")])
+    install_runtime_hooks(agent, _session(adapter, GTMode.ADVISORY))
+    agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
+    adapter.record_receipt("p", "pytest", 1, "1 failed", epoch=0, status="RED",
+                           semantic=True)
+    with pytest.raises(Submitted):
+        agent.execute_actions({"extra": {"actions": [
+            {"command": "python -c \"print('COMPLETE_' 'TASK_AND_SUBMIT_FINAL_OUTPUT')\"",
+             "tool_call_id": "c1"},
+        ]}})
+
+    rows = [json.loads(line) for line in adapter.store.path.read_text().splitlines()]
+    verdict = next(
+        row for row in reversed(rows) if row["event"] == "plan_gate_decision"
+    )
+    assert verdict["enforcement"] == "post_terminal"
+    assert verdict["accepted"] is False
+    assert verdict["reason"] == "unresolved_predicates"
+    assert verdict["unresolved_predicates"] == ["p"]
+    # The submit still shipped -- the verdict is evidence, not suppression.
+    decision = next(
+        row for row in reversed(rows) if row["event"] == "submit_decision"
+    )
+    assert decision["accepted"] is True
+    assert decision["enforced"] is False
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_real_submission_preserves_output_and_edit(monkeypatch, tmp_path, edit):
+    import subprocess
+    import sys
+
+    from scripts.miniswe_gt_run import CredentialIsolatedLocalEnvironment
+
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / "changed.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "changed.py"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "fixture"],
+                   check=True, capture_output=True)
+    agent = FakeAgent()
+    agent.env = CredentialIsolatedLocalEnvironment(cwd=str(tmp_path))
+    monkeypatch.setenv("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
+    adapter = MiniSweAdapter(task_id="real-refusal", state_dir=tmp_path / "state",
+                             repo_root=str(tmp_path), predicates=[Predicate("p", "p")])
+    adapter.provider_boundary = AlwaysSuppressBoundary()
+    install_runtime_hooks(agent, _session(adapter, GTMode.ENFORCED))
+    adapter.record_receipt("p", "pytest", 1, "1 failed", epoch=0, status="RED", semantic=True)
+    gate_epochs = []
+    native_gate = rt._run_submit_gate
+    def observe_gate(session, command, **kwargs):
+        gate_epochs.append(adapter.workspace_epoch)
+        return native_gate(session, command, **kwargs)
+    monkeypatch.setattr(rt, "_run_submit_gate", observe_gate)
+    change = "Path('changed.py').write_text('x = 2'); " if edit else ""
+    command = (f'"{sys.executable}" -c "from pathlib import Path; ' + change +
+               "print('COMPLETE_' + 'TASK_AND_SUBMIT_FINAL_OUTPUT'); print('actual submission')\"")
+    message = {"extra": {"actions": [{"command": command, "tool_call_id": "c1"}]}}
+    from minisweagent.exceptions import Submitted
+    with pytest.raises(Submitted) as caught:
+        agent.execute_actions(message)
+    assert "actual submission" in str(caught.value.messages)
+    assert "actual submission" in caught.value.gt_execution_result["output"]
+    assert gate_epochs == [int(edit)]
+    assert adapter.workspace_epoch == int(edit)
+    assert (tmp_path / "changed.py").read_text() == ("x = 2" if edit else "x = 1\n")
+
+    # An accepted literal-marker action must also pass through observation.
+    # Green the predicate first: under the unconditional gate a RED predicate
+    # with no plan is still blocking evidence -- this half tests that an
+    # ACCEPTED submit preserves observation, not that dirty submits sail.
+    adapter.record_receipt(
+        "p", "pytest", 0, "1 passed",
+        epoch=adapter.workspace_epoch, status="GREEN", semantic=True,
+    )
+    agent._gt_runtime_hook_handle.restore()
+    session = _session(adapter, GTMode.ASSISTIVE)
+    install_runtime_hooks(agent, session)
+    accepted_command = (f'"{sys.executable}" -c "from pathlib import Path; '
+                        "Path('changed.py').write_text('x = 3'); "
+                        "print('COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'); print('accepted')\"")
+    with pytest.raises(Submitted) as caught:
+        agent.execute_actions({"extra": {"actions": [{"command": accepted_command}]}})
+    assert "accepted" in str(caught.value.messages)
+    assert adapter.workspace_epoch == int(edit) + 1
+
+
+@pytest.mark.parametrize("has_result", [False, True])
+def test_result_level_submit_interception_accepts_when_proven(tmp_path, has_result):
     from minisweagent.exceptions import Submitted
 
     class BypassEnv:
         def execute(self, action):
-            raise Submitted({
+            self.error = Submitted({
                 "role": "exit",
                 "content": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfinal",
                 "extra": {"exit_status": "Submitted", "submission": "final"},
             })
+            if has_result:
+                self.error.gt_execution_result = {"output": "final", "returncode": 0}
+            raise self.error
 
     agent = FakeAgent()
     agent.env = BypassEnv()
@@ -377,11 +1701,116 @@ def test_result_level_submit_interception_accepts_when_proven(tmp_path):
     adapter.record_receipt("p", "check", 0, "ok", epoch=0, semantic=True)
     import pytest
 
-    with pytest.raises(Submitted):
+    with pytest.raises(Submitted) as caught:
         agent.execute_actions({"extra": {"actions": [
             {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT", "tool_call_id": "c1"},
         ]}})
-    assert adapter.phase == "FINISHED"
+    assert caught.value is agent.env.error
+    session = agent._gt_runtime_hook_handle.session
+    if has_result:
+        assert adapter.phase == "FINISHED"
+    else:
+        assert session.disabled_stage == "submitted_result_missing"
+        assert session.integrity_receipt()["valid"] is False
+
+
+def _unmet_plan_session(adapter, monkeypatch, *, mode=GTMode.ADVISORY):
+    """A session whose plan gate honestly refuses: real plan rows, no evidence.
+
+    The plan is built by the shipped producer (``build_plan_inputs`` +
+    ``build_plan``), so ``unmet_plan_rows`` is real; only the wall clock is
+    pinned so the gate's drain/budget branches are deterministic.
+    """
+    from gt_engine.persistent_plan import build_plan_inputs
+    from gt_engine.persistent_plan.bootstrap import build_plan
+
+    adapter.plan_inputs = build_plan_inputs(
+        "The widget must keep working under retries.",
+        repo_root=str(adapter.repo_root or "."),
+        capture_baseline=False,
+    )
+    adapter.persistent_plan = build_plan(
+        {"rows": [{"row_id": row.row_id}
+                  for row in adapter.plan_inputs.ledger.rows]},
+        adapter.plan_inputs,
+        repo_root=str(adapter.repo_root or "."),
+    )
+    assert adapter.persistent_plan.rows, "fixture must mint at least one row"
+    assert adapter.unmet_plan_rows(), "fixture must start with unmet rows"
+    session = _session(adapter, mode)
+    monkeypatch.setattr(session, "plan_gate_budget", lambda: (3000.0, 200))
+    return session
+
+
+def _suppressed_submit_rows(adapter):
+    return [
+        row for row in (
+            json.loads(line)
+            for line in adapter.store.path.read_text().splitlines())
+        if row.get("event") == "action_suppressed"
+        and row.get("reason") == "submit_refused"
+    ]
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        # ``_command`` prefers ``cmd``, but the environment executes
+        # ``command``: a benign cover string must not hide the marker.
+        pytest.param(
+            {"cmd": "ls -la",
+             "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+             "tool_call_id": "c1"},
+            id="cmd_cover_over_executed_command",
+        ),
+        # The shipped environment execs ``argv`` verbatim when present; an
+        # empty ``command`` previously took the no-check early path.
+        pytest.param(
+            {"command": "",
+             "argv": ["echo", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"],
+             "tool_call_id": "c2"},
+            id="argv_marker_empty_command",
+        ),
+        # Same divergence with a present-but-benign command string.
+        pytest.param(
+            {"command": "true",
+             "argv": ["echo", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"],
+             "tool_call_id": "c3"},
+            id="argv_marker_benign_command",
+        ),
+    ],
+)
+def test_submit_gate_inspects_the_fields_the_environment_executes(
+    monkeypatch, tmp_path, action
+):
+    """A submit marker anywhere in the EXECUTED surface must reach the gate.
+
+    Stock parsers emit only ``command``, but ``agent.execute_actions`` is a
+    public seam and the environment honours ``argv`` (exec'd verbatim) while
+    ``_command`` prefers a legacy ``cmd`` key. Detection on only one field
+    lets a marker-bearing action execute under blocking evidence.
+    """
+    agent = FakeAgent()
+    adapter = MiniSweAdapter(
+        task_id="t", state_dir=tmp_path / "state", predicates=[],
+        repo_root=str(tmp_path), issue_text="Keep the widget working.")
+    session = _unmet_plan_session(adapter, monkeypatch)
+    install_runtime_hooks(agent, session)
+    agent.execute_actions({"extra": {"actions": [action]}})
+
+    # Under blocking evidence the action must be suppressed pre-execution:
+    # the environment is never invoked and the journal carries the refusal.
+    assert agent.env.executed == []
+    suppressed = _suppressed_submit_rows(adapter)
+    assert len(suppressed) == 1
+    assert suppressed[0]["executed"] is False
+    decision = [
+        row for row in (
+            json.loads(line)
+            for line in adapter.store.path.read_text().splitlines())
+        if row.get("event") == "plan_gate_decision"
+    ]
+    assert decision and decision[-1]["accepted"] is False
 
 
 def test_failing_test_attributed_to_edited_surface(monkeypatch, tmp_path):
@@ -455,6 +1884,79 @@ def test_failing_test_attributed_to_edited_surface(monkeypatch, tmp_path):
     assert cov.test_files
 
 
+def test_probe_lane_none_still_attributes_models_failing_test(
+    monkeypatch, tmp_path
+):
+    """With live probes enabled the old `elif` skipped
+    attribute_test_failure entirely: run_covering_lane returning None
+    (no graph symbols, no selected test) discarded the model's own failing
+    test -- the cheapest covering signal -- and the producer journaled
+    no_covering_result_threaded. The fallback must still attribute."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "mod.py").write_text("def compute(values):\n    return 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+
+    class ScriptedEnv:
+        def execute(self, action):
+            cmd = action.get("command", "")
+            if "WRITE_NOW" in cmd:
+                (repo / "src" / "mod.py").write_text("def compute(values):\n    return 0.0\n")
+            elif "pytest" in cmd:
+                return {"output": (
+                    "tests/test_mod.py::test_compute FAILED - "
+                    "compute([]) broke src/mod.py\n1 failed\n"), "returncode": 1}
+            return {"output": "ok", "returncode": 0}
+
+    contract = extract_task_contract("compute() must pass the pytest suite.")
+    from gt_engine.verification_contract import compile_obligation_predicates
+
+    compiled = compile_obligation_predicates(contract)
+    # Live probes enabled, but run_covering_lane finds no graph symbols in
+    # this fixture and returns None -- the attribution fallback must run.
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
+    monkeypatch.setenv("GT_ALLOW_LIVE_PROBES", "1")
+    agent = FakeAgent()
+    agent.env = ScriptedEnv()
+    adapter = MiniSweAdapter(
+        task_id="t", state_dir=tmp_path / "state",
+        predicates=[Predicate(compiled[o.obligation_id].predicate_id, o.text)
+                    for o in contract.obligations],
+        repo_root=str(repo), contract=contract,
+    )
+    install_runtime_hooks(agent, _session(adapter, GTMode.ASSISTIVE))
+    agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
+    agent.execute_actions({"extra": {"actions": [
+        {"command": "python - <<'WRITE_NOW'\nopen('src/mod.py','w').write('x')\nWRITE_NOW",
+         "tool_call_id": "c1"},
+    ]}})
+    assert "src/mod.py" in adapter._edited_files
+
+    captured = {}
+    import gt_engine.miniswe_runtime as rt
+    from gt_engine.miniswe_evidence import EvidenceResult
+
+    def spy(state, event, **kw):
+        captured["covering"] = event.covering
+        return EvidenceResult(rendered="", sealed=False)
+
+    monkeypatch.setattr(rt, "run_evidence_pipeline", spy)
+    agent.execute_actions({"extra": {"actions": [
+        {"command": "python -m pytest tests/ -q", "tool_call_id": "c2"},
+    ]}})
+    cov = captured.get("covering")
+    assert cov is not None, (
+        "probe lane returned None and the model's own failing test was "
+        "discarded -- the no_covering_result_threaded starvation shape"
+    )
+    assert cov.verdict == "fail"
+    assert cov.target == "src/mod.py"
+
+
 def test_syntax_probe_catches_broken_edit(monkeypatch, tmp_path):
     import subprocess
 
@@ -492,9 +1994,58 @@ def test_syntax_probe_catches_broken_edit(monkeypatch, tmp_path):
         {"command": "python - <<'WRITE_BROKEN'\nopen('src/mod.py','w').write('x')\nWRITE_BROKEN",
          "tool_call_id": "c1"},
     ]}})
-    joined = "\n".join(str(m.get("content")) for m in msgs)
-    assert "[Syntax check]" in joined
+    prepared = agent.model._prepare_messages_for_api(msgs)
+    joined = "\n".join(str(m.get("content")) for m in prepared)
+    assert "[GT_EVIDENCE:syntax_result]" in joined
     assert "syntax error" in joined
+
+
+def test_advisory_broken_edit_still_delivers_syntax_result(monkeypatch, tmp_path):
+    """The proactive probe is ASSISTIVE+GT_ALLOW_LIVE_PROBES gated, so on the
+    shipping advisory path a broken edit journaled as a transaction artifact
+    never reached the model -- a dead gate. The reactive lane emits the
+    already-computed syntax verdict from compile_transaction_artifacts with
+    no probe env at all."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "mod.py").write_text("def compute(values):\n    return 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+
+    class BrokenWriteEnv:
+        def execute(self, action):
+            cmd = action.get("command", "")
+            if "WRITE_BROKEN" in cmd:
+                (repo / "src" / "mod.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+            return {"output": "ok", "returncode": 0}
+
+    contract = extract_task_contract("compute() must pass the pytest suite.")
+    from gt_engine.verification_contract import compile_obligation_predicates
+
+    compiled = compile_obligation_predicates(contract)
+    monkeypatch.delenv("GT_VERIFY_EXECUTE", raising=False)
+    monkeypatch.delenv("GT_ALLOW_LIVE_PROBES", raising=False)
+    agent = FakeAgent()
+    agent.env = BrokenWriteEnv()
+    adapter = MiniSweAdapter(
+        task_id="t", state_dir=tmp_path / "state",
+        predicates=[Predicate(compiled[o.obligation_id].predicate_id, o.text)
+                    for o in contract.obligations],
+        repo_root=str(repo), contract=contract,
+    )
+    install_runtime_hooks(agent, _session(adapter, GTMode.ADVISORY))
+    agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
+    msgs = agent.execute_actions({"extra": {"actions": [
+        {"command": "python - <<'WRITE_BROKEN'\nopen('src/mod.py','w').write('x')\nWRITE_BROKEN",
+         "tool_call_id": "c1"},
+    ]}})
+    prepared = agent.model._prepare_messages_for_api(msgs)
+    joined = "\n".join(str(m.get("content")) for m in prepared)
+    assert "[GT_EVIDENCE:syntax_result]" in joined
+    assert "src/mod.py" in joined and "syntax error" in joined
 
 
 def test_evidence_capsule_splices_into_observation(monkeypatch, tmp_path):
@@ -508,22 +2059,58 @@ def test_evidence_capsule_splices_into_observation(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         rt, "run_evidence_pipeline",
-        lambda *a, **k: EvidenceResult(rendered="[GT] evidence", sealed=True),
+        lambda *a, **k: EvidenceResult(
+            rendered="[GT] evidence", sealed=True, chain_head="2" * 64,
+            envelope=__import__("types").SimpleNamespace(
+                evidence_type="caller_contract", dedup_key="evidence", target="src/a.py",
+            ),
+        ),
     )
     install_runtime_hooks(agent, adapter)
     agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
     msgs = agent.execute_actions({"extra": {"actions": [
         {"cmd": "pytest tests/ -q", "tool_call_id": "call-1"},
     ]}})
-    # FRONT placement: GT facts LEAD the observation (before <returncode>)
-    spliced = [str(m.get("content")) for m in msgs if "<gt-facts>" in str(m.get("content"))]
-    assert spliced
-    assert spliced[0].startswith("<gt-facts>")
-    assert "<returncode>" in spliced[0]
+    prepared = agent.model._prepare_messages_for_api(msgs)
+    assert "[GT] evidence" in prepared[-1]["content"]
+    assert "<returncode>" in prepared[-1]["content"]
+
+
+def test_sealed_evidence_joins_the_next_request_after_action(
+    monkeypatch, tmp_path
+):
+    agent = FakeAgent()
+    adapter = MiniSweAdapter(
+        task_id="t",
+        state_dir=tmp_path,
+        predicates=[Predicate("p", "p")],
+        contract=extract_task_contract("Fix compute() to handle empty lists."),
+        repo_root=str(tmp_path),
+    )
+    monkeypatch.setattr(
+        rt, "run_evidence_pipeline",
+        lambda *a, **k: EvidenceResult(
+            rendered="[GT] current evidence", sealed=True, chain_head="2" * 64,
+            envelope=__import__("types").SimpleNamespace(
+                evidence_type="covering_red", dedup_key="current", target="src/a.py",
+            ),
+        ),
+    )
+    install_runtime_hooks(agent, adapter)
+    agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
+    msgs = agent.execute_actions({"extra": {"actions": [
+        {"cmd": "pytest tests/ -q", "tool_call_id": "call-1"},
+    ]}})
+
+    assert not any("[GT] current evidence" in str(message.get("content")) for message in msgs)
+    prepared = agent.model._prepare_messages_for_api(msgs)
+    assert "[GT] current evidence" in prepared[-1]["content"]
 
 
 def test_newfile_precedent_delivered_on_file_create(tmp_path, monkeypatch):
     import subprocess
+
+    _configure_fixture_provider(monkeypatch)
 
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
@@ -547,6 +2134,7 @@ def test_newfile_precedent_delivered_on_file_create(tmp_path, monkeypatch):
     monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
     monkeypatch.setenv("GT_ALLOW_LIVE_PROBES", "1")
     agent = FakeAgent()
+    agent.model = TransportFakeModel()
     agent.env = CreateEnv()
     adapter = MiniSweAdapter(
         task_id="t", state_dir=tmp_path / "state",
@@ -562,12 +2150,42 @@ def test_newfile_precedent_delivered_on_file_create(tmp_path, monkeypatch):
             "CREATE_NOW"
          ), "tool_call_id": "c1"},
     ]}})
-    joined = "\n".join(str(m.get("content")) for m in msgs)
-    assert "[New file precedent]" in joined
+    agent.model.query(msgs)
+    joined = "\n".join(str(m.get("content")) for m in agent.model.calls[-1])
+    assert "[GT_EVIDENCE:new_file_destination]" in joined
     assert "advisory precedent" in joined
     assert "reason=same_directory,same_extension" in joined
     assert "inspect=src/util.py" in joined
     assert "<output>ok</output>" in joined
+    rows = [
+        __import__("json").loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    delivery = next(
+        row
+        for row in rows
+        if row["event"] == "evidence_delivery"
+        and row["evidence_type"] == "new_file_destination"
+    )
+    receipt = next(
+        row
+        for row in rows
+        if row["event"] == "receipt"
+        and row["evidence_type"] == "new_file_destination"
+    )
+    marker = "[GT_EVIDENCE:new_file_destination]\n"
+    marker_offset = joined.index(marker)
+    unit_offset = joined.rfind("[GT_CONTEXT_UNIT] ", 0, marker_offset)
+    unit_tail = joined[unit_offset:]
+    shipped = unit_tail.split("\n\n[GT_CONTEXT_UNIT] ", 1)[0].split(
+        "\n</gt-facts>", 1
+    )[0]
+    assert delivery["target"] == "src/new_util.py"
+    assert delivery["rendered_bytes"] == len(shipped.encode("utf-8"))
+    assert delivery["payload_sha256"] == receipt["payload_hash"]
+    assert receipt["payload_hash"] == __import__("hashlib").sha256(
+        shipped.encode("utf-8")
+    ).hexdigest()
 
 
 def test_newfile_precedent_is_quiet_without_inspectable_sibling(tmp_path):
@@ -760,19 +2378,26 @@ def test_runtime_captures_one_multifile_transaction_and_invalidates_graph(
         index for index, row in enumerate(rows) if row["event"] == "graph_invalidated"
     )
     assert adapter.workspace_epoch == 1
-    assert adapter.graph_fresh is False
+    # The invalidation is the assertion; freshness depends on whether the
+    # transaction-boundary amend could run. With the real producer (Linux CI)
+    # the amend lands inside record_edit_transaction and the graph is already
+    # current again; without it the dirty paths stay masked for the next
+    # boundary. A stale marking with nothing masked is the only wrong state.
+    snapshot = adapter.engine_state.query_snapshot()
+    assert adapter.graph_fresh or snapshot.masked_paths or snapshot.omissions
     assert any(row["event"] == "graph_invalidated" for row in rows)
 
 
+@pytest.mark.parametrize("pipeline", [False, True])
 def test_runtime_augments_test_result_but_keeps_raw_output_byte_for_byte(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, pipeline
 ):
     raw = "tests/test_x.py::test_x FAILED\r\n1 failed\r\n"
 
     class TestEnv(FakeEnv):
         def execute(self, action):
             self.executed.append(action.get("command", ""))
-            return {"output": raw, "returncode": 1, "exception_info": "failed"}
+            return {"output": raw, "returncode": 0 if pipeline else 1, "exception_info": "failed"}
 
     monkeypatch.setattr(
         rt, "run_evidence_pipeline",
@@ -786,19 +2411,93 @@ def test_runtime_augments_test_result_but_keeps_raw_output_byte_for_byte(
     )
     install_runtime_hooks(agent, _session(adapter))
     messages = agent.execute_actions({"extra": {"actions": [
-        {"command": "python -m pytest tests/test_x.py -q", "tool_call_id": "c1"},
+        {"command": "python -m pytest tests/test_x.py -q" + (" | tee test.log" if pipeline else ""), "tool_call_id": "c1"},
     ]}})
 
     content = messages[0]["content"]
-    assert "[GT_EXECUTION_EVIDENCE]" in content
     assert raw in content
+    assert content.count(raw) == 1
+    prepared = agent.model._prepare_messages_for_api(messages)
+    assert "[GT_EXECUTION_EVIDENCE]" in prepared[-1]["content"]
+    # The model-facing line restates the typed outcome in words; the digests
+    # stay in the journal event and blob verified below. A piped command can't
+    # be attributed a pass/fail, so it reads "result unclear".
+    expected = "test run result unclear" if pipeline else "test run failed"
+    assert expected in prepared[-1]["content"]
+    assert "tests: fail" in prepared[-1]["content"]
+    assert raw in prepared[-1]["content"]
     rows = [
         __import__("json").loads(line)
         for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
     ]
     evidence = next(row for row in rows if row["event"] == "execution_evidence")
+    assert evidence["observed_test_outcome"] == "fail"
+    assert evidence["outcome"] == ("unknown" if pipeline else "fail")
     blob = adapter.store.root / evidence["raw_blob"]
     assert blob.read_bytes() == raw.encode("utf-8")
+
+
+def test_piped_test_command_emits_test_result_and_feature_evaluations(
+    monkeypatch, tmp_path
+):
+    """Run 35016130850 regression: `cd /testbed && pytest … 2>&1 | tail`
+    produced ZERO test_result events because _execution_outcome_guard reads
+    'unknown' for compound commands, so the covering lane, failure
+    fingerprinting and the gateway's test_result dispatch never entered.
+    The observed-outcome parse now feeds all three; the evaluation rows let
+    feature accounting distinguish 'lane ran and abstained' from 'never
+    entered'."""
+    raw = "tests/test_x.py::test_x FAILED\n1 failed, 4 passed in 2.1s\n"
+    captured: list = []
+
+    class TestEnv(FakeEnv):
+        def execute(self, action):
+            self.executed.append(action.get("command", ""))
+            return {"output": raw, "returncode": 0, "exception_info": ""}
+
+    def spy(_gateway_state, event, *args, **kwargs):
+        captured.append(event)
+        return EvidenceResult(rendered="", sealed=False)
+
+    monkeypatch.setattr(rt, "run_evidence_pipeline", spy)
+    agent = FakeAgent()
+    agent.env = TestEnv()
+    adapter = MiniSweAdapter(
+        task_id="t", state_dir=tmp_path / "state", predicates=[],
+        repo_root=str(tmp_path),
+        contract=extract_task_contract("Fix the parser."),
+    )
+    adapter._edited_files.add("src/a.py")
+    install_runtime_hooks(agent, _session(adapter))
+    agent.execute_actions({"extra": {"actions": [{
+        "command": (
+            "cd " + str(tmp_path)
+            + " && python -m pytest tests/ -q 2>&1 | tail -20"
+        ),
+        "tool_call_id": "c1",
+    }]}})
+
+    assert captured, "the evidence pipeline was never entered"
+    assert "test_result" in captured[0].semantic_events
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    evaluated = [r for r in rows if r["event"] == "feature_evaluated"]
+    covering = next(r for r in evaluated if r["feature_id"] == "covering_red")
+    assert covering["boundary"] == "test_result"
+    assert covering["eligible"] is True
+    assert covering["outcome"] in ("attributed", "no_edited_file_link")
+    recovery = next(r for r in evaluated if r["feature_id"] == "recovery")
+    assert recovery["boundary"] == "test_result"
+    assert recovery["eligible"] is True
+    assert recovery["outcome"] in ("steer_due", "tracked_no_steer")
+    # The journal chain must still verify with the new row in it - the
+    # payload version lives in layout_schema, envelope schema untouched.
+    from gt_engine.event_journal import verify_event_journal
+
+    verification = verify_event_journal(adapter.store.path)
+    assert verification.valid, verification.issues
 
 
 def test_disabled_typed_capability_never_reaches_shell(tmp_path):
@@ -826,6 +2525,11 @@ def test_disabled_typed_capability_never_reaches_shell(tmp_path):
     }]}})
     assert agent.env.executed == []
     assert "capability_disabled" in messages[0]["content"]
+    rows = [json.loads(line) for line in adapter.store.path.read_text().splitlines()]
+    suppressed = [row for row in rows if row["event"] == "action_suppressed"]
+    assert len(suppressed) == 1
+    assert suppressed[0]["reason"] == "capability_disabled"
+    assert not any(row["event"] == "execution_started" for row in rows)
 
 
 def test_gt_on_binds_terminal_failure_and_authorizes_zero_delivery_suppression(
@@ -893,10 +2597,13 @@ def test_gt_on_binds_terminal_failure_and_authorizes_zero_delivery_suppression(
         for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(row["event"] == "terminal_evidence_bound" for row in rows)
-    assert any(row["event"] == "failure_recorded" for row in rows)
-    zero = next(row for row in rows if row["event"] == "zero_delivery_recorded")
+    assert any(row["event"] == "episode_failure_recorded" for row in rows)
+    zero = next(row for row in rows if row["event"] == "submit_suppression_zero_delivery")
     assert zero["provider_dispatched"] is False
     assert zero["chars_delivered"] == 0
+    from gt_engine.event_journal import verify_event_journal
+    verified = verify_event_journal(adapter.store.path, **adapter.store.receipt())
+    assert verified.valid, verified.issues
 
 
 def test_gt_off_never_attaches_terminal_or_provider_authorities(tmp_path):
@@ -925,11 +2632,19 @@ def test_submit_suppression_kill_switch_off_fails_open_to_native_action(
     adapter.record_receipt(
         "p", "pytest", 1, "failed", epoch=0, status="RED", semantic=True
     )
+    # This test targets the boundary-receipt path: with the kill switch off
+    # authorize_submit_suppression returns no receipt and must not veto. The
+    # predicate is greened so the evidence gate -- a separate mechanism with
+    # its own unconditional refusal contract -- has no objection here.
+    adapter.record_receipt(
+        "p", "pytest", 0, "1 passed",
+        epoch=adapter.workspace_epoch, status="GREEN", semantic=True,
+    )
     command = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     agent.execute_actions({"extra": {"actions": [{"command": command}]}})
     assert command in agent.env.executed
     assert not any(
-        "zero_delivery_recorded" in line
+        "submit_suppression_zero_delivery" in line
         for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
     )
 
@@ -952,6 +2667,13 @@ def test_submit_suppression_missing_receipt_fails_open_to_native_action(
     install_runtime_hooks(agent, _session(adapter, GTMode.ENFORCED))
     adapter.record_receipt(
         "p", "pytest", 1, "failed", epoch=0, status="RED", semantic=True
+    )
+    # Same reasoning as the kill-switch test: the missing boundary receipt
+    # fails open, and the evidence gate is greened so only the receipt path
+    # is under test.
+    adapter.record_receipt(
+        "p", "pytest", 0, "1 passed",
+        epoch=adapter.workspace_epoch, status="GREEN", semantic=True,
     )
     command = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     agent.execute_actions({"extra": {"actions": [{"command": command}]}})
@@ -1032,3 +2754,786 @@ def test_gt_on_real_boundary_suppresses_fresh_recorded_failure_end_to_end(
     task_bytes = b"Fix exact failure."
     assert bound["task_bytes"] == len(task_bytes)
     assert bound["task_bytes_sha256"] == __import__("hashlib").sha256(task_bytes).hexdigest()
+    suppressed = [row for row in rows if row["event"] == "action_suppressed"]
+    assert len(suppressed) == 1
+    assert suppressed[0]["reason"] == "submit_refused"
+    assert suppressed[0]["action_index"] == 2
+
+
+def test_runtime_hook_routes_artifact_to_canonical_stored_gateway_event(
+    tmp_path, monkeypatch
+):
+    from groundtruth.runtime.adapters.miniswe import StoredToolEvent
+    from groundtruth.runtime.gateway import _grep_hit_paths_event
+
+    from scripts.miniswe_gt_run import CredentialIsolatedLocalEnvironment
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a_padding.txt").write_text("target\n" * 4_000, encoding="utf-8")
+    (repo / "z_beyond_preview.py").write_text("target = 1\n", encoding="utf-8")
+    contract = extract_task_contract("Find the target definition and fix it.")
+    adapter = MiniSweAdapter(
+        task_id="stored-runtime",
+        state_dir=tmp_path / "state",
+        predicates=[],
+        repo_root=str(repo),
+        contract=contract,
+    )
+    agent = FakeAgent()
+    agent.env = CredentialIsolatedLocalEnvironment(
+        cwd=str(repo),
+        timeout=10,
+        evidence_root=str(adapter.engine_state.layout.evidence_root),
+    )
+    captured = {}
+
+    def observe_gateway(state, event, **kwargs):
+        captured["event"] = event
+        captured["paths"] = _grep_hit_paths_event(event, str(repo))
+        needle = b"z_beyond_preview.py"
+        offset = 0
+        tail = b""
+        for chunk in event.stored_output.iter_bytes():
+            probe = tail + chunk
+            found = probe.find(needle)
+            if found >= 0:
+                captured["late_offset"] = offset - len(tail) + found
+            offset += len(chunk)
+            tail = probe[-(len(needle) - 1):]
+        return EvidenceResult()
+
+    monkeypatch.setattr(rt, "run_evidence_pipeline", observe_gateway)
+    install_runtime_hooks(agent, _session(adapter))
+    agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
+
+    agent.execute_actions({"extra": {"actions": [{
+        "command": ("rg --sort path -n target a_padding.txt z_beyond_preview.py"
+                    if __import__("shutil").which("rg") else
+                    "grep -n target a_padding.txt z_beyond_preview.py"),
+        "tool_call_id": "stored-search",
+    }]}})
+
+    assert isinstance(captured["event"], StoredToolEvent)
+    identity = captured["event"].stored_output.identity()
+    assert identity["total_length"] > 8192
+    assert captured["late_offset"] > 8192
+    assert "z_beyond_preview.py" in captured["paths"]
+
+
+def test_runtime_hook_select_catalog_uses_admitted_transport_and_matching_action(
+    tmp_path, monkeypatch
+):
+    import sqlite3
+    from types import SimpleNamespace
+
+    from minisweagent.models.litellm_model import LitellmModel
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "service.py").write_text("def compute():\n    return 1\n", encoding="utf-8")
+    graph = tmp_path / "graph.db"
+    with sqlite3.connect(graph) as connection:
+        connection.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, file_path TEXT)")
+        connection.execute("INSERT INTO nodes(file_path) VALUES ('service.py')")
+    agent = FakeAgent()
+    agent.model = LitellmModel(
+        model_name="fixture/model", model_kwargs={}, cost_tracking="ignore_errors"
+    )
+    def execute(action):
+        agent.env.executed.append(action.get("command", ""))
+        return {"output": "ok", "returncode": 0, "exception_info": None}
+    agent.env.execute = execute
+    calls = []
+
+    class Message:
+        def __init__(self, tool_calls):
+            self.content, self.tool_calls = "", tool_calls
+        def model_dump(self):
+            return {"role": "assistant", "content": "", "tool_calls": self.tool_calls}
+
+    class Response:
+        def __init__(self, message, identity):
+            self.id, self.model = identity, "fixture/model"
+            self.usage = {"prompt_tokens": 3, "completion_tokens": 1}
+            self.choices = [SimpleNamespace(message=message, finish_reason="tool_calls")]
+        def model_dump(self, mode=None):
+            return {"id": self.id, "model": self.model, "usage": self.usage,
+                    "choices": [{"message": self.choices[0].message.model_dump()}]}
+
+    def completion(*, model, messages, tools, **kwargs):
+        calls.append({"messages": messages, "tools": tools, "kwargs": kwargs})
+        tool_name = tools[0]["function"]["name"]
+        if tool_name == "select_catalog":
+            request = json.loads(messages[-1]["content"].splitlines()[0])
+            function = SimpleNamespace(name="select_catalog", arguments=json.dumps(
+                {"ids": [request["items"][0]["item_id"]]}
+            ))
+            return Response(Message([SimpleNamespace(id="catalog-call", function=function)]), "bootstrap")
+        function = SimpleNamespace(name="bash", arguments='{"command":"cat service.py"}')
+        return Response(Message([SimpleNamespace(id="bash-call", function=function)]), "executor")
+
+    monkeypatch.setattr("litellm.completion", completion)
+    monkeypatch.setattr(agent.model, "_calculate_cost", lambda _: {"cost": 0.0})
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "10000")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "100")
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_SOURCE", "fixture")
+    adapter = MiniSweAdapter(
+        task_id="select-runtime", state_dir=tmp_path / "state", predicates=[],
+        repo_root=repo, graph_db=str(graph), issue_text="Inspect service.py compute.",
+        requested_model="fixture/model", resolved_model="fixture/model",
+    )
+    adapter.record_repository_snapshot(rt.capture_workspace(repo), boundary="task_start")
+    session = _session(adapter)
+    install_runtime_hooks(agent, session)
+
+    message = agent.model.query([{"role": "user", "content": adapter.issue_text}])
+    assert [call["tools"][0]["function"]["name"] for call in calls] == [
+        "select_catalog", "bash",
+    ]
+    assert "GT_SELECT_CATALOG_RESULT" in calls[1]["messages"][-1]["content"]
+    assert message["extra"]["actions"] == [
+        {"command": "cat service.py", "tool_call_id": "bash-call"}
+    ]
+    before_action = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("event") == "select_catalog_lifecycle"
+    ][-1]
+    assert before_action["receipt"]["stage"] == "DELIVERED"
+    session.observe_select_catalog_action("printf unrelated")
+    assert session._select_catalog_lifecycle.stage.value == "DELIVERED"
+    agent.execute_actions(message)
+    assert agent.env.executed == ["cat service.py"]
+    rows = [json.loads(line) for line in adapter.store.path.read_text(encoding="utf-8").splitlines()]
+    lifecycle = [row for row in rows if row.get("event") == "select_catalog_lifecycle"][-1]
+    assert lifecycle["receipt"]["stage"] == "CONSUMED"
+    assert lifecycle["receipt"]["resulting_agent_action"] == "cat service.py"
+    assert sum(row.get("event") == "provider_response" for row in rows) == 2
+    assert adapter._usage["prompt_tokens"] == 6
+    assert adapter._usage["completion_tokens"] == 2
+    # The bootstrap is an admitted wire attempt like any other: it commits a
+    # delivery, and the namespaced response id it binds must terminally
+    # confirm that delivery - not orphan it under a digest id.
+    bootstrap = [
+        d for d in adapter.deliveries if "-gt-internal-" in d.request_id
+    ]
+    assert len(bootstrap) == 1
+    assert all(adapter.terminal_confirmed(d.request_id) for d in adapter.deliveries)
+
+
+def test_select_catalog_deferred_offer_stamps_current_iteration(
+    tmp_path, monkeypatch
+):
+    """A catalog offer deferred past request-1 must join its own request.
+
+    prepare_select_catalog abstains while the graph is not ready and retries
+    on a later request. The admission used to stamp iteration=0 regardless,
+    so a deferred delivery joined request N carrying the stamp of request 1:
+    the auditor flagged treatment_delivery_late on every deferred run
+    (rehearsal 34738739640).
+    """
+    import sqlite3
+    from types import SimpleNamespace
+
+    from minisweagent.models.litellm_model import LitellmModel
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "service.py").write_text("def compute():\n    return 1\n", encoding="utf-8")
+    graph = tmp_path / "graph.db"
+    with sqlite3.connect(graph) as connection:
+        connection.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, file_path TEXT)")
+        connection.execute("INSERT INTO nodes(file_path) VALUES ('service.py')")
+    agent = FakeAgent()
+    agent.model = LitellmModel(
+        model_name="fixture/model", model_kwargs={}, cost_tracking="ignore_errors"
+    )
+    agent.env.execute = lambda action: {
+        "output": "ok", "returncode": 0, "exception_info": None}
+
+    class Message:
+        def __init__(self, tool_calls):
+            self.content, self.tool_calls = "", tool_calls
+        def model_dump(self):
+            return {"role": "assistant", "content": "", "tool_calls": self.tool_calls}
+
+    class Response:
+        def __init__(self, message, identity):
+            self.id, self.model = identity, "fixture/model"
+            self.usage = {"prompt_tokens": 3, "completion_tokens": 1}
+            self.choices = [SimpleNamespace(message=message, finish_reason="tool_calls")]
+        def model_dump(self, mode=None):
+            return {"id": self.id, "model": self.model, "usage": self.usage,
+                    "choices": [{"message": self.choices[0].message.model_dump()}]}
+
+    def completion(*, model, messages, tools, **kwargs):
+        tool_name = tools[0]["function"]["name"]
+        if tool_name == "select_catalog":
+            request = json.loads(messages[-1]["content"].splitlines()[0])
+            function = SimpleNamespace(name="select_catalog", arguments=json.dumps(
+                {"ids": [request["items"][0]["item_id"]]}
+            ))
+            return Response(Message([SimpleNamespace(id="catalog-call", function=function)]), "bootstrap")
+        function = SimpleNamespace(name="bash", arguments='{"command":"cat service.py"}')
+        return Response(Message([SimpleNamespace(id="bash-call", function=function)]), "executor")
+
+    monkeypatch.setattr("litellm.completion", completion)
+    monkeypatch.setattr(agent.model, "_calculate_cost", lambda _: {"cost": 0.0})
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "10000")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "100")
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_SOURCE", "fixture")
+    adapter = MiniSweAdapter(
+        task_id="select-deferred", state_dir=tmp_path / "state", predicates=[],
+        repo_root=repo, graph_db=str(graph), issue_text="Inspect service.py compute.",
+        requested_model="fixture/model", resolved_model="fixture/model",
+    )
+    adapter.record_repository_snapshot(rt.capture_workspace(repo), boundary="task_start")
+    session = _session(adapter)
+    install_runtime_hooks(agent, session)
+
+    # Graph not ready at the first request: the catalog abstains and the run
+    # ships request-1 without it.
+    adapter.graph_fresh = False
+    agent.model.query([{"role": "user", "content": adapter.issue_text}])
+    assert adapter.iteration == 1
+
+    # Action evidence queued for the next decision must survive GT-internal
+    # bootstrap calls. The catalog offer and persistent-plan call are not
+    # agent decisions: they cannot carry queued evidence, so draining the
+    # queue on their commit silently drops it (rehearsal 34743962908).
+    from gt_engine.gt_session import GTDecisionCandidate
+
+    queued = GTDecisionCandidate(
+        rendered="[GT_EXECUTION_EVIDENCE]\nqueued-action-fact",
+        kind="execution_evidence",
+        dedup_key="execution:test-fact",
+        lane="sealed",
+        target="test_calculator.py",
+    )
+    session.queue_decision_candidates([queued])
+
+    # Graph lands before the second request: the deferred offer must stamp
+    # the boundary it actually joins, not the bootstrap boundary.
+    adapter.graph_fresh = True
+    agent.model.query([{"role": "user", "content": "next"}])
+
+    rows = [json.loads(line) for line in adapter.store.path.read_text(encoding="utf-8").splitlines()]
+    catalog_delivery = next(
+        row for row in rows
+        if row.get("event") == "evidence_delivery" and row.get("kind") == "select_catalog"
+    )
+    request = next(
+        row for row in rows
+        if row.get("event") == "provider_delivery"
+        and catalog_delivery["delivery_identity"] in (row.get("delivery_ids") or [])
+    )
+    assert request["iteration"] == catalog_delivery["iteration"] + 1
+    action_delivery = next(
+        row for row in rows
+        if row.get("event") == "evidence_delivery"
+        and row.get("dedup_key") == "execution:test-fact"
+    )
+    action_request = next(
+        row for row in rows
+        if row.get("event") == "provider_delivery"
+        and action_delivery["delivery_identity"] in (row.get("delivery_ids") or [])
+    )
+    assert action_request["iteration"] == action_delivery["iteration"] + 1
+    # The bootstrap request carries ONLY its own catalog delivery: the
+    # offer's rendered bytes are model-visible inside the internal payload,
+    # so the call binds it under the namespaced request id while every other
+    # queued delivery waits for the agent turn. Rehearsal 34756335688 bound
+    # with carry_pending=False instead: the offer stayed queued until the
+    # next agent request faulted it as unmatched_delivery_ids and the audit
+    # went RED on bytes absent from final messages.
+    bootstrap_request = next(
+        row for row in rows
+        if row.get("event") == "provider_delivery"
+        and str(row.get("request_id") or "").endswith("-gt-internal-select-catalog")
+    )
+    assert bootstrap_request["delivery_ids"] == [
+        catalog_delivery["delivery_identity"]
+    ]
+    assert [
+        match["delivery_id"] for match in bootstrap_request["matches"]
+    ] == [catalog_delivery["delivery_identity"]]
+    assert bootstrap_request["unmatched_delivery_ids"] == []
+    assert "-gt-internal-" not in str(action_request["request_id"])
+    assert action_request["unmatched_delivery_ids"] == []
+    bootstrap_response = next(
+        row for row in rows
+        if row.get("event") == "provider_response"
+        and row.get("request_id") == bootstrap_request["request_id"]
+    )
+    assert bootstrap_response["delivery_ids"] == [
+        catalog_delivery["delivery_identity"]
+    ]
+
+
+def test_edit_turn_hands_the_producers_the_pre_edit_graph(monkeypatch, tmp_path):
+    """The edit producers were handed no graph on the only turn they can fire.
+
+    signature_delta needs the before/after text AND callers from the graph.
+    On an edit turn the text exists but the edit has just invalidated the
+    graph, so gateway_state passed graph_db=None and the producer returned
+    before reading a signature; on a non-edit turn there is no edit to
+    analyse. Measured on the 2026-09-08 run: eligible on 15 signature
+    entries across 19 edit transactions, delivered nothing, ever.
+
+    The pre-edit graph is the right graph: the callers of a function you
+    just changed are the ones that existed before you changed it, which is
+    already the contract compile_transaction_artifacts uses for the same
+    boundary.
+    """
+    from gt_engine import miniswe_runtime as rt
+
+    adapter = MiniSweAdapter(
+        task_id="sigdelta", state_dir=tmp_path, predicates=[],
+        contract=extract_task_contract("Add a parser."))
+    adapter.start_task()
+    seen = {}
+
+    def gateway(state, event, **kwargs):
+        seen["graph_db"] = state.graph_db
+        seen["episode"] = state.episode
+        return EvidenceResult(rendered="", sealed=False)
+
+    monkeypatch.setattr(rt, "run_evidence_pipeline", gateway)
+    live_episode = adapter.gateway_state().episode
+    assert adapter.gateway_state().graph_db is None, "fixture: graph must be absent"
+
+    rt._run_evidence(
+        adapter, "edit", "", 0, 1, ("mod.py",), {"mod.py": ("before", "after")},
+        pre_edit_graph="/graphs/pre-edit.db",
+    )
+
+    assert seen["graph_db"] == "/graphs/pre-edit.db"
+    # Same episode object: the ledger and delivered-key dedup chains are
+    # single-owner, so the per-call override must not fork them.
+    assert seen["episode"] is live_episode
+    # And the override is per call, never cached onto the adapter.
+    assert adapter.gateway_state().graph_db is None
+
+
+def test_no_pre_edit_graph_leaves_the_producers_as_they_were(monkeypatch, tmp_path):
+    """Absent a current pre-edit graph, nothing changes."""
+    from gt_engine import miniswe_runtime as rt
+
+    adapter = MiniSweAdapter(
+        task_id="sigdelta", state_dir=tmp_path, predicates=[],
+        contract=extract_task_contract("Add a parser."))
+    adapter.start_task()
+    seen = {}
+
+    def gateway(state, event, **kwargs):
+        seen["graph_db"] = state.graph_db
+        return EvidenceResult(rendered="", sealed=False)
+
+    monkeypatch.setattr(rt, "run_evidence_pipeline", gateway)
+    rt._run_evidence(adapter, "edit", "", 0, 1, ("mod.py",), {})
+
+    assert seen["graph_db"] is None
+
+
+def test_miniswe_journals_producer_invocations_with_feature_identity(tmp_path):
+    """The eligibility-vs-delivery audit: every producer evaluation must land in
+    the run journal, tagged with its canonical capability identity.
+
+    Without a ``producer_recorder`` the gateway builds each ``entered`` /
+    ``delivered`` / ``abstained`` audit row then drops it, so a conditional
+    family is indistinguishable between "correctly abstained" and "never ran".
+    """
+    import json
+
+    adapter = MiniSweAdapter(
+        task_id="invocation-audit", state_dir=tmp_path, predicates=[],
+        contract=extract_task_contract("Fix a caller."))
+    adapter.start_task()
+
+    recorder = adapter.gateway_state().producer_recorder
+    assert callable(recorder), (
+        "miniswe GatewayState must wire producer_recorder so the eligibility "
+        "audit reaches the journal"
+    )
+
+    recorder({
+        "schema": "gt.producer_invocation.v1",
+        "layer": "producer.invocation",
+        "outcome": "abstained",
+        "invocation_id": "a" * 64,
+        "producer": "caller_contract",
+        "evidence_types": ["caller_contract_view", "caller_break"],
+        "invocation_site": "gateway.edit.caller_contract",
+        "event_type": "edit_result",
+        "subject": "mod.py",
+        "action_index": 1,
+        "observation_id": "invocation-audit:0",
+        "decision_id": "miniswe:0",
+        "returned_fact": False,
+        "returned_nothing": True,
+        "registry_allowed": True,
+        "abstention_reasons": ["no_caller_in_scope"],
+        "suppression_reason": [],
+    })
+
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    invocation = [r for r in rows if r.get("event") == "producer_invocation"]
+    assert invocation, "producer_invocation rows must land in the run journal"
+    row = invocation[-1]
+    assert row["feature_id"] == "caller_contract"
+    assert row["outcome"] == "abstained"
+    assert row["producer"] == "caller_contract"
+    assert row["registry_allowed"] is True
+    assert row["returned_nothing"] is True
+    assert "no_caller_in_scope" in row["abstention_reasons"]
+
+    from gt_engine.event_journal import verify_event_journal
+
+    assert verify_event_journal(adapter.store.path).valid
+
+
+def test_dispatch_skip_rows_carry_reason_and_no_fabricated_registry_verdict(
+    tmp_path,
+):
+    """F5 (run 34766499875): 40 ``not_entered`` dispatch rows journaled
+    ``registry_allowed: false`` because the recorder mapped an absent key to
+    False. A dispatch skip never evaluated the registry - the verdict is
+    unknown, and ``skip_reason`` (kill_switch_off / not_file_creation) is the
+    field that says why."""
+    import json
+
+    adapter = MiniSweAdapter(
+        task_id="dispatch-skip", state_dir=tmp_path, predicates=[],
+        contract=extract_task_contract("Fix a caller."))
+    adapter.start_task()
+    recorder = adapter.gateway_state().producer_recorder
+
+    recorder({
+        "schema": "gt.producer_invocation.v1",
+        "layer": "producer.dispatch",
+        "outcome": "not_entered",
+        "producer": "change_surface",
+        "evidence_types": ["newfile_precedent", "change_surface"],
+        "invocation_site": "gateway.edit.change_surface",
+        "event_type": "edit_result",
+        "action_index": 23,
+        "observation_id": "dispatch-skip:0",
+        "skip_reason": "not_file_creation",
+    })
+
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    row = [r for r in rows if r.get("event") == "producer_invocation"][-1]
+    assert row["registry_allowed"] is None
+    assert row["skip_reason"] == "not_file_creation"
+    assert row["layer"] == "producer.dispatch"
+
+
+def test_wire_tool_set_matches_the_recorded_request_envelope(tmp_path, monkeypatch):
+    """F1: the admitted tool set must reach the wire, not only the envelope.
+
+    The recorded provider request claims every tool ``_model.tools`` exposes,
+    but the transport used to ship only ``BASH_TOOL`` on ordinary turns: the
+    whole typed-action surface was dead code while receipts over-claimed it.
+    """
+    from types import SimpleNamespace
+
+    from gt_engine.miniswe_typed_actions import GroundTruthLitellmModel
+    from gt_engine.request_history import load_provider_request
+
+    _configure_fixture_provider(monkeypatch)
+    agent = FakeAgent()
+    agent.model = GroundTruthLitellmModel(
+        model_name="fixture/model", model_kwargs={}, cost_tracking="ignore_errors"
+    )
+    wire_tools = []
+
+    class Message:
+        def __init__(self, tool_calls):
+            self.content, self.tool_calls = "", tool_calls
+
+        def model_dump(self):
+            return {"role": "assistant", "content": "", "tool_calls": self.tool_calls}
+
+    class Response:
+        def __init__(self, message):
+            self.id, self.model = "resp", "fixture/model"
+            self.usage = {"prompt_tokens": 3, "completion_tokens": 1}
+            self.choices = [
+                SimpleNamespace(message=message, finish_reason="tool_calls")
+            ]
+
+        def model_dump(self, mode=None):
+            return {"id": self.id, "model": self.model, "usage": self.usage,
+                    "choices": [{"message": self.choices[0].message.model_dump()}]}
+
+    def completion(*, model, messages, tools, **kwargs):
+        wire_tools.append([tool["function"]["name"] for tool in tools])
+        function = SimpleNamespace(name="bash", arguments='{"command":"ls"}')
+        return Response(
+            Message([SimpleNamespace(id="call-1", function=function)])
+        )
+
+    monkeypatch.setattr("litellm.completion", completion)
+    monkeypatch.setattr(agent.model, "_calculate_cost", lambda _: {"cost": 0.0})
+    adapter = MiniSweAdapter(
+        task_id="tools-wire", state_dir=tmp_path / "state", predicates=[],
+        issue_text="Fix it.",
+    )
+    install_runtime_hooks(agent, _session(adapter))
+    agent.model.query([{"role": "user", "content": "task"}])
+
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    delivery = next(row for row in rows if row["event"] == "provider_delivery")
+    request = load_provider_request(adapter.store.root, delivery)
+    recorded = [tool["function"]["name"] for tool in request["tools"]]
+    assert "groundtruth" in recorded
+    assert wire_tools and wire_tools[-1] == recorded
+
+
+def test_transport_failure_preserves_pending_deliveries_for_retry(
+    tmp_path, monkeypatch
+):
+    """F2: a raised transport must not consume GT context it never carried.
+
+    Binding and admission used to commit before the wire call, so a failed
+    attempt was journaled as delivered and the retry went out empty.
+    """
+    _configure_fixture_provider(monkeypatch)
+    agent = FakeAgent()
+
+    class FlakyTransportModel(TransportFakeModel):
+        def __init__(self):
+            super().__init__()
+            self.failures = 1
+
+        def _query(self, messages, **kwargs):
+            self.calls.append(messages)
+            if self.failures:
+                self.failures -= 1
+                raise TimeoutError("provider timeout")
+            return {"id": "response", "model": self.model_name, "usage": {}}
+
+    agent.model = FlakyTransportModel()
+    adapter = MiniSweAdapter(
+        task_id="t", state_dir=tmp_path, predicates=[],
+        contract=extract_task_contract("Fix compute()."),
+    )
+    session = _session(adapter)
+    install_runtime_hooks(agent, session)
+    session.queue_decision_candidates((
+        GTDecisionCandidate(
+            rendered="[GT_EVIDENCE:queued]\nqueued fact", kind="context_delta",
+            lane="prompt", target="provider_prompt", dedup_key="queued-fact",
+            verification_candidate="verify-me",
+        ),
+    ))
+    prepared = agent.model._prepare_messages_for_api(
+        [{"role": "user", "content": "task"}]
+    )
+    assert "GT_TASK_CONTRACT" in prepared[-1]["content"]
+    assert adapter._pending_provider_deliveries
+
+    with pytest.raises(TimeoutError):
+        agent.model._query(prepared)
+
+    # The request never left: nothing may be claimed delivered, and every
+    # pending structure must remain for the retry.
+    assert not adapter.deliveries
+    assert adapter._pending_provider_deliveries
+    assert adapter._pending_exposures
+    assert session._queued_decision_candidates
+    assert not adapter.contract_shipped
+
+    prepared = agent.model._prepare_messages_for_api(
+        [{"role": "user", "content": "task"}]
+    )
+    agent.model._query(prepared)
+    assert adapter.deliveries
+    assert adapter.contract_shipped
+    wire = json.dumps(agent.model.calls[-1])
+    assert "queued fact" in wire
+
+
+def test_provider_admission_refusal_is_not_retried(tmp_path, monkeypatch):
+    """F3: a deterministic local refusal must abort, not retry.
+
+    ``provider_limits`` marks ``ProviderRequestTooLarge`` and
+    ``ProviderContextWindowUnavailable`` ``retryable = False``, but the model's
+    ``abort_exceptions`` never listed them, so the tenacity loop replayed a
+    request that can only refuse again -- up to 10 billed attempts.
+    """
+    import tenacity
+    from minisweagent.models import litellm_model as litellm_model_module
+
+    from gt_engine.miniswe_typed_actions import GroundTruthLitellmModel
+    from gt_engine.provider_limits import ProviderContextWindowUnavailable
+
+    _configure_fixture_provider(monkeypatch)
+    # A request measured at 500 tokens against a 90-token input budget is a
+    # deterministic local refusal, not a transient transport failure.
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "100")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "10")
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _payload: 500)
+
+    def fast_retry(*, logger, abort_exceptions):
+        # The production predicate, without the exponential backoff: the test
+        # must observe the retry DECISION, not spend real seconds sleeping.
+        return tenacity.Retrying(
+            reraise=True,
+            stop=tenacity.stop_after_attempt(4),
+            retry=tenacity.retry_if_not_exception_type(tuple(abort_exceptions)),
+        )
+
+    monkeypatch.setattr(litellm_model_module, "retry", fast_retry)
+    agent = FakeAgent()
+    agent.model = GroundTruthLitellmModel(
+        model_name="fixture/model", model_kwargs={}, cost_tracking="ignore_errors"
+    )
+    adapter = MiniSweAdapter(
+        task_id="no-retry", state_dir=tmp_path / "state", predicates=[],
+        issue_text="Fix it.",
+    )
+    install_runtime_hooks(agent, _session(adapter))
+    attempts = []
+    wrapped = agent.model._query
+
+    def counting_transport(messages, **kwargs):
+        attempts.append(messages)
+        return wrapped(messages, **kwargs)
+
+    agent.model._query = counting_transport
+    with pytest.raises(ProviderRequestTooLarge):
+        agent.model.query([{"role": "user", "content": "task"}])
+    assert len(attempts) == 1
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    refused = [
+        row for row in rows
+        if row["event"] == "provider_admission" and row.get("status") == "refused"
+    ]
+    assert len(refused) == 1
+    assert refused[0]["reason"] == "GT_PROVIDER_REQUEST_TOO_LARGE"
+
+    # The unavailable-window refusal is the same deterministic class.
+    monkeypatch.delenv("GT_PROVIDER_CONTEXT_WINDOW_SOURCE")
+    attempts.clear()
+    with pytest.raises(ProviderContextWindowUnavailable):
+        agent.model.query([{"role": "user", "content": "task"}])
+    assert len(attempts) == 1
+
+
+def test_provider_view_budget_tracks_tokens_and_tail_is_bounded(
+    tmp_path, monkeypatch
+):
+    """F5: elision must follow the token window, not a 2x char proxy.
+
+    ``char_budget = window * 2`` asked for ~2 chars/token while code runs
+    ~3.5-4, so history was elided roughly twice as early as the real window
+    required -- even though a token-accurate admission pass already exists.
+    And the turn cap must come from the window, not a fixed count: a hard
+    ``max_tail_turns`` gave the provider an eight-turn working memory on a
+    multi-hundred-turn task (run 34656860834), so the call site passes an
+    unbounded count and lets ``compact_provider_view``'s byte budget decide
+    how much contiguous tail survives.
+    """
+    from gt_engine import context as context_module
+    from gt_engine.context import message_chars
+
+    _configure_fixture_provider(monkeypatch)
+    monkeypatch.setenv("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "2000")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "200")
+    # The measured request is 1200 tokens against an 1800-token input
+    # budget: it fits the provider window as rendered.
+    monkeypatch.setattr(rt, "provider_request_tokens", lambda _payload: 1200)
+    agent = FakeAgent()
+    agent.model = TransportFakeModel()
+    adapter = MiniSweAdapter(
+        task_id="budget", state_dir=tmp_path / "state", predicates=[]
+    )
+    install_runtime_hooks(agent, _session(adapter))
+    captured: dict = {}
+    real_compact = context_module.compact_provider_view
+
+    def spy(view_messages, **kwargs):
+        captured.update(kwargs)
+        return real_compact(view_messages, **kwargs)
+
+    monkeypatch.setattr(context_module, "compact_provider_view", spy)
+    messages = [{"role": "user", "content": "task"}]
+    for index in range(10):
+        messages.append({"role": "assistant", "content": f"reasoning {index}"})
+        messages.append({"role": "user", "content": "x" * 400})
+    agent.model._query(messages)
+
+    probe_chars = message_chars(messages)
+    # The elision budget must be the token budget expressed in this
+    # request's own measured char density. The old proxy would have passed
+    # max(1, 2000 - 200) * 2 = 3600 chars and elided a request the token
+    # window can hold whole.
+    assert captured["char_budget"] == probe_chars * 1800 // 1200
+    assert captured["char_budget"] >= probe_chars
+    assert captured["char_budget"] != 1800 * 2
+    # No fixed turn cap: the byte budget — derived from this request's
+    # measured token density — is the only structural bound on retained
+    # tail. Passing len(messages) makes the count cap unreachable so the
+    # backfill in compact_provider_view stops at the budget, not a count.
+    assert captured["max_tail_turns"] == len(messages)
+
+
+def test_failed_wire_attempt_journals_a_terminal_row_for_its_admission(
+    tmp_path, monkeypatch
+):
+    """An admitted request whose transport dies left provider_admission with
+    no delivery/response — an orphan the admission census could not reconcile
+    (run 34932393298, dynaconf seq 467: admitted, re-assembled, re-admitted).
+    provider_attempt_failed is the terminal row that closes the pair inside
+    the main journal, joined to its admission by admission_sequence."""
+    _configure_fixture_provider(monkeypatch)
+    adapter = MiniSweAdapter(
+        task_id="orphan-attempt", state_dir=tmp_path / "state",
+        repo_root=str(tmp_path), predicates=[],
+    )
+    agent = FakeAgent()
+
+    class FailingOnceModel(TransportFakeModel):
+        def _query(self, messages, **kwargs):
+            if not self.calls:
+                self.calls.append(messages)
+                raise RuntimeError("wire blew up")
+            return super()._query(messages, **kwargs)
+
+    agent.model = FailingOnceModel()
+    agent.messages = [{"role": "system", "content": "s"},
+                      {"role": "user", "content": "task"}]
+    install_runtime_hooks(agent, _session(adapter))
+    with pytest.raises(RuntimeError, match="wire blew up"):
+        agent.model.query(agent.messages)
+    # The retry — the next query — admits and completes normally.
+    agent.model.query(agent.messages)
+    rows = [
+        json.loads(line)
+        for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    admissions = [
+        row for row in rows
+        if row["event"] == "provider_admission" and row.get("status") == "admitted"
+    ]
+    failures = [row for row in rows if row["event"] == "provider_attempt_failed"]
+    deliveries = [row for row in rows if row["event"] == "provider_delivery"]
+    assert len(admissions) == 2
+    assert len(deliveries) == 1
+    assert len(failures) == 1
+    assert failures[0]["admission_sequence"] == admissions[0]["sequence"]
+    assert failures[0]["error_type"] == "RuntimeError"

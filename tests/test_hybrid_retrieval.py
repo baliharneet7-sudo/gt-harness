@@ -1,1275 +1,1092 @@
+"""Tests for gt_engine.retrieval.
+
+The synthetic fixture mirrors the real graph's shape rather than a convenient
+one: ``nodes_fts`` is an external-content FTS5 table over ``nodes``, code
+symbols carry a NULL ``stable_id`` (as they do on every graph built today), and
+``properties`` holds the extracted behavioural facts keyed by ``node_id``.
+A fixture that handed out stable ids would silently pass while the real graph
+failed.
+"""
+
 from __future__ import annotations
 
-import math
-from dataclasses import replace
+import hashlib
+import os
+import sqlite3
+from pathlib import Path
 
-import gt_engine.hybrid_retrieval as hybrid_module
-from gt_engine.hybrid_retrieval import (
-    BM25RetrievalChannel,
-    DenseRetrievalChannel,
-    EvidenceAuthority,
-    EvidenceOrigin,
-    ExactRetrievalChannel,
-    HybridRetriever,
-    LexicalRetrievalChannel,
-    RepositoryDocument,
-    RetrievalActionState,
-    RetrievalCandidate,
-    RetrievalChannel,
-    RetrievalIntent,
-    RetrievalState,
-    StructuralLink,
-    StructuralRetrievalChannel,
-    build_preemptive_frame,
-    filter_provider_known_context,
-    reciprocal_rank_fusion,
-    retrieval_query_terms,
-)
+import pytest
 
+from gt_engine import dense_runtime, retrieval
 
-def _state(**overrides: object) -> RetrievalState:
-    values: dict[str, object] = {
-        "task_text": "repair allocator cleanup",
-        "intent": RetrievalIntent.IMPLEMENTATION_CONTEXT,
-        "source_revision": "source-1",
-    }
-    values.update(overrides)
-    return RetrievalState(**values)
+REAL_GRAPH = Path(os.environ.get("GT_RETRIEVAL_TEST_GRAPH",
+    r"D:\tmp\claude\D--gt-harness\d4578d92-0fad-4131-b9ed-3ade34ece4fc"
+    r"\scratchpad\ark-new.db"
+))
+
+# (id, label, name, qualified_name, file_path, language, start_line, end_line,
+#  signature)
+_NODES = [
+    (1, "File", "clone.ts", "ark/util/clone.ts", "ark/util/clone.ts", "typescript", 1, 40, ""),
+    (2, "Function", "deepClone", "deepClone", "ark/util/clone.ts", "typescript", 9, 11,
+     "<input extends object>(input: input): input"),
+    (3, "Function", "_clone", "_clone", "ark/util/clone.ts", "typescript", 12, 30,
+     "(input: unknown): unknown"),
+    (4, "Function", "parseRegex", "parseRegex", "ark/regex/parse.ts", "typescript", 4, 60,
+     "(pattern: string): RegexNode"),
+    (5, "Class", "Scope", "InternalScope", "ark/type/scope.ts", "typescript", 202, 400, ""),
+    # A fact node: carries a stored stable_id and must never be retrieved as a
+    # symbol, because nobody can open it.
+    (6, "CompletenessFact", "empty input fact", "empty input fact",
+     "ark/util/clone.ts", "typescript", 9, 9, ""),
+]
+
+_STORED_STABLE_IDS = {6: "fact-stable-id-6"}
 
 
-def _candidate(
-    path: str,
-    channel: RetrievalChannel,
-    rank: int,
-    *,
-    text: str = "implementation",
-) -> RetrievalCandidate:
-    return RetrievalCandidate(
-        path=path,
-        start_line=1,
-        end_line=2,
-        symbol=None,
-        text=text,
-        channel=channel,
-        channel_rank=rank,
-        relation=None,
-        provenance=(channel.value,),
-        source_revision="source-1",
-        channel_score=1.0 / rank,
-    )
+def test_retrieval_accepts_all_additive_declaration_labels() -> None:
+    assert {"Element", "Table"} <= set(retrieval.SYMBOL_LABELS)
+
+# (id, node_id, kind, value, confidence)
+_PROPERTIES = [
+    (1, 3, "guard_clause",
+     "return: (input === null || isEmpty(input)) -> return", 1.0),
+    (2, 3, "boundary_condition", "empty_check|input.length === 0 => {", 0.9),
+    (3, 2, "param", "input:: object [required]", 1.0),
+    (4, 4, "return_shape", "value|compileRegexPattern(pattern)", 0.8),
+    (5, 5, "class_field", "unit: UnitTypeParser<$> = value => this.units([value])", 1.0),
+    # A low-confidence single-term mention: must rank below a symbol with two
+    # confident matching facts.
+    (6, 1, "docstring", "utilities for cloning input structures", 0.2),
+]
 
 
-class FakeDenseBackend:
-    """Deterministic semantic witness; no external model is involved."""
-
-    identity = "fake-dense-v1"
-
-    def embed_query(self, text: str) -> tuple[float, ...]:
-        del text
-        return (1.0, 0.0)
-
-    def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        return tuple(
-            (1.0, 0.0) if "releases reserved storage" in text else (0.0, 1.0) for text in texts
+def _build_fixture(path: Path) -> Path:
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY,
+                label TEXT NOT NULL,
+                name TEXT NOT NULL,
+                qualified_name TEXT,
+                file_path TEXT NOT NULL,
+                signature TEXT,
+                language TEXT NOT NULL,
+                start_line INTEGER,
+                end_line INTEGER,
+                stable_id TEXT,
+                source_revision TEXT
+            );
+            CREATE TABLE properties (
+                id INTEGER PRIMARY KEY,
+                node_id INTEGER NOT NULL REFERENCES nodes(id),
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                line INTEGER,
+                confidence REAL DEFAULT 1.0
+            );
+            CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                name, qualified_name, signature, file_path,
+                content='nodes', content_rowid='id'
+            );
+            """
         )
-
-
-class BrokenDenseBackend:
-    def embed_query(self, text: str) -> tuple[float, ...]:
-        del text
-        raise RuntimeError("model unavailable")
-
-    def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        del texts
-        raise AssertionError("query failure should short-circuit")
-
-
-def test_typed_state_builds_trajectory_conditioned_query_without_gold_fields():
-    state = _state(
-        task_text="repair allocator cleanup",
-        active_paths=("src/allocator.py",),
-        active_symbols=("Arena.release",),
-        changed_paths=("src/pool.py",),
-        diagnostics=("tests/test_pool.py:44 leaked block",),
-        validation_state="fail",
-    )
-
-    query = state.query_text()
-
-    assert "repair allocator cleanup" in query
-    assert "src/allocator.py" in query
-    assert "Arena.release" in query
-    assert "tests/test_pool.py:44 leaked block" in query
-    assert not hasattr(state, "gold_files")
-
-
-def test_diagnostic_query_plan_prioritizes_current_failure_over_full_task_prose():
-    state = _state(
-        task_text="rewrite the entire service and update unrelated documentation",
-        intent=RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE,
-        action=RetrievalActionState(
-            operation="validate",
-            executable="pytest",
-            targets=("tests/test_pool.py",),
-        ),
-        active_symbols=("Arena.release",),
-        diagnostics=("tests/test_pool.py:44 leaked block in Arena.release",),
-        validation_state="fail",
-    )
-
-    plan = state.query_plan()
-
-    assert "tests/test_pool.py:44" in plan.primary_text
-    assert "Arena.release" in plan.primary_text
-    assert "rewrite the entire service" not in plan.primary_text
-    assert "rewrite the entire service" in plan.fallback_text
-    assert state.sparse_query_text() == plan.primary_text
-    assert state.dense_query_text() == plan.primary_text
-
-
-def test_legacy_raw_action_is_normalized_to_typed_state_without_heredoc_body():
-    state = _state(
-        proposed_action=(
-            "python - <<'PY'\n"
-            "SECRET_PROGRAM_BODY = 'must never enter retrieval'\n"
-            "print(SECRET_PROGRAM_BODY)\n"
-            "PY"
+        connection.executemany(
+            "INSERT INTO nodes (id,label,name,qualified_name,file_path,language,"
+            "start_line,end_line,signature,stable_id,source_revision) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,'rev-1')",
+            [(*row, _STORED_STABLE_IDS.get(row[0])) for row in _NODES],
         )
-    )
-
-    assert isinstance(state.action, RetrievalActionState)
-    assert state.action.executable == "python"
-    assert "SECRET_PROGRAM_BODY" not in state.query_text()
-    assert "must never enter retrieval" not in state.sparse_query_text()
-
-
-def test_legacy_inline_program_body_is_not_retrieval_query_text():
-    state = _state(proposed_action="python -c \"print('PRIVATE_INLINE_PROGRAM')\"")
-
-    assert isinstance(state.action, RetrievalActionState)
-    assert state.action.executable == "python"
-    assert "PRIVATE_INLINE_PROGRAM" not in state.query_text()
-
-
-def test_explicit_typed_action_contributes_only_bounded_semantic_fields():
-    state = _state(
-        action=RetrievalActionState(
-            operation="validate",
-            executable="pytest",
-            targets=("tests/test_allocator.py",),
-            validation_kind="pytest",
+        connection.executemany(
+            "INSERT INTO properties (id,node_id,kind,value,line,confidence) "
+            "VALUES (?,?,?,?,NULL,?)",
+            _PROPERTIES,
         )
+        # External-content tables are populated by rebuild, exactly as the
+        # producer does it.
+        connection.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
+        connection.commit()
+    finally:
+        connection.close()
+    return path
+
+
+@pytest.fixture()
+def graph(tmp_path: Path) -> Path:
+    return _build_fixture(tmp_path / "fixture.db")
+
+
+def _identity(node_id: int) -> str:
+    """The stable id retrieval will mint for a fixture node."""
+    row = next(item for item in _NODES if item[0] == node_id)
+    stored = _STORED_STABLE_IDS.get(node_id)
+    if stored:
+        return stored
+    from gt_engine.resolution_provenance import stable_symbol_id
+
+    return stable_symbol_id(
+        language=row[5],
+        path=row[4],
+        qualified_name=row[3],
+        native_kind=row[1],
+        start_line=row[6],
+        end_line=row[7],
     )
 
-    query = state.query_text()
 
-    assert "operation=validate" in query
-    assert "executable=pytest" in query
-    assert "targets=tests/test_allocator.py" in query
-
-
-def test_exact_lexical_and_bm25_channels_are_independent_rankers():
-    documents = (
-        RepositoryDocument(
-            "src/allocator.py",
-            "def cleanup_allocator(): pass",
-            symbol="cleanup_allocator",
-        ),
-        RepositoryDocument("src/network.py", "def open_socket(): pass", symbol="open_socket"),
-        RepositoryDocument("tests/test_allocator.py", "cleanup allocator regression test"),
-    )
-    state = _state(task_text="cleanup allocator")
-
-    exact = ExactRetrievalChannel(documents).retrieve(state, limit=10)
-    lexical = LexicalRetrievalChannel(documents).retrieve(state, limit=10)
-    bm25 = BM25RetrievalChannel(documents).retrieve(state, limit=10)
-
-    assert exact[0].path == "src/allocator.py"
-    assert lexical[0].path in {"src/allocator.py", "tests/test_allocator.py"}
-    assert bm25[0].path in {"src/allocator.py", "tests/test_allocator.py"}
-    assert {row.channel for row in exact} == {RetrievalChannel.EXACT}
-    assert {row.channel for row in lexical} == {RetrievalChannel.LEXICAL}
-    assert {row.channel for row in bm25} == {RetrievalChannel.BM25}
+# ---------------------------------------------------------------------------
+# 1. lexical
+# ---------------------------------------------------------------------------
 
 
-def test_prepared_sparse_channels_do_not_retokenize_documents_per_query(monkeypatch):
-    marker = "unique_document_marker"
-    documents = (RepositoryDocument("src/allocator.py", f"cleanup allocator {marker}"),)
-    retriever = HybridRetriever(documents, dense_backend=None)
-    original = hybrid_module._tokens
-    observed: list[str] = []
+def test_lexical_rank_returns_stable_id_score_snippet_triples(graph: Path) -> None:
+    result = retrieval.lexical_rank(graph, "deepClone", 5)
 
-    def recording_tokens(text: str) -> tuple[str, ...]:
-        observed.append(text)
-        return original(text)
-
-    monkeypatch.setattr(hybrid_module, "_tokens", recording_tokens)
-    retriever.retrieve(_state(task_text="cleanup allocator"), token_budget=200)
-    retriever.retrieve(_state(task_text="cleanup allocator again"), token_budget=200)
-
-    assert not any(marker in text for text in observed)
+    assert result.available is True
+    assert result.source is retrieval.RetrievalSource.LEXICAL
+    assert list(result) == list(result.ranking)
+    stable_id, score, snippet = result[0]
+    assert stable_id == _identity(2)
+    assert score > 0.0  # bm25 is negated on the way in: bigger is better
+    assert snippet
 
 
-def test_exact_channel_splits_snake_and_camel_case_symbols():
-    documents = (
-        RepositoryDocument(
-            "src/helpers.py",
-            "def cleanupAllocatorCache(): pass",
-            symbol="cleanupAllocatorCache",
-        ),
-    )
+def test_lexical_rank_excludes_non_symbol_labels(graph: Path) -> None:
+    result = retrieval.lexical_rank(graph, "empty input", 10)
 
-    ranked = ExactRetrievalChannel(documents).retrieve(
-        _state(task_text="repair allocator cache cleanup"),
-        limit=10,
-    )
-
-    assert ranked[0].path == "src/helpers.py"
-    assert "exact_symbol_token" in ranked[0].provenance
+    assert _identity(6) not in [row.stable_id for row in result]
 
 
-def test_short_or_common_symbol_is_rank_only_and_never_exact_certified():
-    for symbol in ("x", "run"):
-        documents = (
-            RepositoryDocument(
-                f"src/worker_{symbol}.py",
-                f"def {symbol}(): pass",
-                symbol=symbol,
-            ),
+def test_lexical_rank_is_ordered_by_score_then_stable_id(graph: Path) -> None:
+    result = retrieval.lexical_rank(graph, "input pattern clone", 10)
+
+    keys = [(-row.score, row.stable_id) for row in result]
+    assert keys == sorted(keys)
+
+
+def test_lexical_rank_rejects_no_indexable_terms(graph: Path) -> None:
+    result = retrieval.lexical_rank(graph, "?? -- !!", 5)
+
+    assert list(result) == []
+    assert result.available is True  # it ran; the query had nothing to run on
+    assert result.reason == "query_has_no_indexable_terms"
+
+
+def test_lexical_rank_survives_fts5_operator_punctuation(graph: Path) -> None:
+    # A raw MATCH of this string would raise fts5: syntax error.
+    result = retrieval.lexical_rank(graph, 'deepClone AND (NOT "input*")', 5)
+
+    assert result.available is True
+    assert [row.stable_id for row in result]
+
+
+def test_lexical_rank_reports_absent_fts_table(tmp_path: Path) -> None:
+    path = tmp_path / "bare.db"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY)")
+    connection.commit()
+    connection.close()
+
+    result = retrieval.lexical_rank(path, "anything", 5)
+
+    assert result.available is False
+    assert result.reason == "nodes_fts_absent"
+
+
+def _corrupt_fts_stats(path: Path, *, claimed_rows: int = 1) -> None:
+    """Force the exact state the gate-one graph carried: the FTS5 averages
+    record (``nodes_fts_data`` id=1, first varint = ``nRow``) claims fewer
+    indexed rows than the doclists actually hold. ``bm25``'s idf term
+    ``log((nRow - nHit + 0.5)/(nHit + 0.5))`` then takes ``log`` of a
+    non-positive value, SQLite maps the NaN to SQL NULL, and every score the
+    query returns is NULL. Reproduced from the run-35056493769 artifact, whose
+    stats claimed 95,644 rows against 190,953 docsize entries.
+    """
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "UPDATE nodes_fts_data SET block = ? || substr(block, 2) WHERE id = 1",
+            (bytes([claimed_rows]),),
         )
-        state = _state(task_text=f"repair {symbol}")
-        channel = ExactRetrievalChannel(documents)
-
-        ranked = channel.retrieve(state, limit=10)
-        result = HybridRetriever((), channels=(channel,)).retrieve(state)
-
-        assert "exact_symbol" not in ranked[0].provenance
-        assert result.selected_context == ()
+        connection.commit()
+    finally:
+        connection.close()
 
 
-def test_exact_symbol_certification_requires_unique_explicit_identifier():
-    duplicate_documents = (
-        RepositoryDocument("src/one.py", "def calculateTotal(): pass", symbol="calculateTotal"),
-        RepositoryDocument("src/two.py", "def calculateTotal(): pass", symbol="calculateTotal"),
+def test_lexical_rank_degrades_typed_on_null_bm25(graph: Path) -> None:
+    _corrupt_fts_stats(graph)
+
+    # "clone" matches more rows than the corrupted nRow admits, so every
+    # score bm25 returns for it is NULL — the gate-one failure shape.
+    result = retrieval.lexical_rank(graph, "clone", 5)
+
+    # A corrupt index must degrade the source with a named reason — never
+    # raise, and never pretend it ran and found nothing.
+    assert result.available is False
+    assert result.reason is not None and "bm25" in result.reason
+    assert list(result) == []
+
+
+def test_lexical_rank_malformed_shadow_is_typed(graph: Path) -> None:
+    # A structurally damaged shadow table raises sqlite3.Error on MATCH —
+    # already a typed fts_query_failed, pinned here so it cannot regress.
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute("DELETE FROM nodes_fts_docsize")
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = retrieval.lexical_rank(graph, "clone", 5)
+
+    assert result.available is False
+    assert result.reason is not None and result.reason.startswith("fts_query_failed:")
+
+
+def test_hybrid_rank_survives_null_bm25_lexical(graph: Path) -> None:
+    _corrupt_fts_stats(graph)
+
+    result = retrieval.hybrid_rank(graph, "clone empty input", 5, use_dense=False)
+
+    by_source = {str(s.source): s for s in result.sources}
+    assert by_source["lexical"].available is False
+    assert "bm25" in (by_source["lexical"].reason or "")
+    # The property source still answers the behavioural query; fusion runs on
+    # what is left instead of dying with the lexical crash.
+    assert by_source["property"].available is True
+    assert [row.stable_id for row in by_source["property"]]
+
+
+# ---------------------------------------------------------------------------
+# 2. property
+# ---------------------------------------------------------------------------
+
+
+def test_property_rank_reaches_a_guard_clause_and_returns_the_owning_symbol(
+    graph: Path,
+) -> None:
+    """The point of the property surface: behaviour text, symbol result."""
+    result = retrieval.property_rank(graph, "validates empty input", 5)
+
+    assert result.available is True
+    top = result[0]
+    # _clone's guard_clause carries both "empty" and "input"; the result is the
+    # symbol that owns the clause, and the snippet names the kind that matched
+    # so a reader can see why.
+    assert top.stable_id == _identity(3)
+    assert top.snippet.startswith("guard_clause: ")
+    # covers 2 of 3 query terms; weight = guard 2x1.0 + boundary 2x0.9 = 3.8
+    assert top.score == pytest.approx(2 + (1 - 1 / 4.8))
+
+
+def test_property_rank_scores_coverage_first_then_weighted_evidence(
+    graph: Path,
+) -> None:
+    result = retrieval.property_rank(graph, "input", 5)
+    scores = {row.stable_id: row.score for row in result}
+
+    # One query term, so all three sit at coverage 1 and the weighted evidence
+    # term orders them within that level.
+    # _clone: guard_clause (1 term x 1.0) + boundary_condition (1 x 0.9) = 1.9
+    assert scores[_identity(3)] == pytest.approx(1 + (1 - 1 / 2.9))
+    # deepClone: one param fact at confidence 1.0
+    assert scores[_identity(2)] == pytest.approx(1 + (1 - 1 / 2.0))
+    # the File node's single low-confidence docstring mention ranks last
+    assert scores[_identity(1)] == pytest.approx(1 + (1 - 1 / 1.2))
+    assert list(scores) == [_identity(3), _identity(2), _identity(1)]
+
+
+def test_property_rank_puts_coverage_above_accumulated_evidence(
+    graph: Path,
+) -> None:
+    """A symbol matching the whole query beats one matching it loudly once."""
+    result = retrieval.property_rank(graph, "empty pattern", 5)
+    scores = {row.stable_id: row.score for row in result}
+
+    # _clone matches only "empty" (twice, confidently); parseRegex matches only
+    # "pattern" (once) -- both at coverage 1, so weight decides.
+    assert scores[_identity(3)] > scores[_identity(4)]
+    assert 1.0 < scores[_identity(3)] < 2.0
+    assert 1.0 < scores[_identity(4)] < 2.0
+
+
+def test_property_rank_can_be_restricted_to_kinds(graph: Path) -> None:
+    result = retrieval.property_rank(
+        graph, "input", 5, kinds=("guard_clause",)
     )
-    unique_documents = duplicate_documents[:1]
-    state = _state(task_text="repair `calculateTotal()`")
 
-    duplicate = ExactRetrievalChannel(duplicate_documents).retrieve(state, limit=10)
-    unique = ExactRetrievalChannel(unique_documents).retrieve(state, limit=10)
-
-    assert all("exact_symbol" not in row.provenance for row in duplicate)
-    assert "exact_symbol" in unique[0].provenance
-
-    selected = HybridRetriever(unique_documents, dense_backend=None).retrieve(state)
-    assert selected.selected_context == ()
-    assert unique[0].authority is EvidenceAuthority.IDENTITY_ONLY
-    assert "no_decision_relevant_evidence" in selected.reason_codes
+    assert [row.stable_id for row in result] == [_identity(3)]
 
 
-def test_ordinary_task_prose_cannot_be_promoted_to_exact_symbol_authority():
-    documents = (
-        RepositoryDocument("terminal/terminal.go", "func clear() {}", symbol="clear"),
-        RepositoryDocument(
-            "eval/modules.go",
-            "func require_cache_info() {}",
-            symbol="require_cache_info",
-        ),
-    )
-    state = _state(
-        task_text=(
-            "Clear the module cache and update `require_cache_info()` so "
-            "ABS_MODULE_PATH remains authoritative."
+def test_property_rank_escapes_like_wildcards(graph: Path) -> None:
+    # "_clone" tokenises to a term containing LIKE's single-char wildcard; if it
+    # were not escaped this would match far more than it should.
+    result = retrieval.property_rank(graph, "_clone", 5)
+
+    assert [row.stable_id for row in result] == []
+
+
+def test_property_rank_is_ordered_by_score_then_stable_id(graph: Path) -> None:
+    result = retrieval.property_rank(graph, "input value pattern", 10)
+
+    keys = [(-row.score, row.stable_id) for row in result]
+    assert keys == sorted(keys)
+
+
+# ---------------------------------------------------------------------------
+# 2b. property — FTS5 path vs LIKE fallback (REV-277 required follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _build_fixture_with_properties_fts(path: Path) -> Path:
+    """Build the standard fixture plus ``properties_fts``."""
+    db = _build_fixture(path)
+    con = sqlite3.connect(db)
+    try:
+        con.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS properties_fts "
+            "USING fts5(kind, value, content='properties', content_rowid='id')"
         )
-    )
-
-    ranked = ExactRetrievalChannel(documents).retrieve(state, limit=10)
-    by_symbol = {row.symbol: row for row in ranked}
-
-    assert "exact_symbol" not in by_symbol["clear"].provenance
-    assert "exact_symbol" in by_symbol["require_cache_info"].provenance
-
-
-def test_exact_path_certification_requires_a_complete_path_token():
-    documents = (RepositoryDocument("src/calculate.py", "def calculate(): pass"),)
-
-    explicit = ExactRetrievalChannel(documents).retrieve(
-        _state(task_text="inspect src/calculate.py"),
-        limit=10,
-    )
-    app_absolute = ExactRetrievalChannel(documents).retrieve(
-        _state(task_text="inspect /app/src/calculate.py"),
-        limit=10,
-    )
-    suffix_collision = ExactRetrievalChannel(documents).retrieve(
-        _state(task_text="inspect src/calculate.py.bak"),
-        limit=10,
-    )
-
-    assert "exact_path" in explicit[0].provenance
-    assert "exact_path" in app_absolute[0].provenance
-    assert "exact_path" not in suffix_collision[0].provenance
-
-
-def test_claim_identity_ignores_global_revision_but_tracks_semantic_evidence():
-    original = RetrievalCandidate(
-        path="src/calculate.py",
-        start_line=4,
-        end_line=8,
-        symbol="calculateTotal",
-        text="def calculateTotal(): return 1",
-        channel=RetrievalChannel.STRUCTURAL,
-        channel_rank=1,
-        relation="CALLS",
-        provenance=("graph_edge:7", "trust:CERTIFIED"),
-        source_revision="source-1",
-    )
-
-    assert replace(original, source_revision="source-unrelated").claim_hash == original.claim_hash
-    assert (
-        replace(original, text="def calculateTotal(): return 2").claim_hash
-        != original.claim_hash
-    )
-    assert replace(original, relation="IMPORTS").claim_hash != original.claim_hash
-    # Physical graph row IDs are rebuild-local.  The same bounded semantic
-    # fact must retain one delivery identity after an unrelated graph rebuild.
-    assert replace(original, provenance=("graph_edge:8",)).claim_hash == original.claim_hash
-    assert (
-        replace(
-            original,
-            provenance=(
-                *original.provenance,
-                "delivery_support:certified",
-                "support_channel:structural",
-            ),
-        ).claim_hash
-        == original.claim_hash
-    )
-
-
-def test_structural_channel_returns_the_edge_endpoint_span_not_arbitrary_file_span():
-    documents = (
-        RepositoryDocument(
-            "src/errors.ts",
-            "export class ResolutionError {}",
-            1,
-            1,
-            "ResolutionError",
-        ),
-        RepositoryDocument(
-            "src/container.test.ts",
-            "it('surfaces ResolutionError', () => expect(resolve()).toThrow(ResolutionError))",
-            10,
-            10,
-            "surfaces_resolution_error",
-        ),
-        RepositoryDocument(
-            "src/container.test.ts",
-            "it('supports Symbol.toStringTag', () => expect(container).toBeDefined())",
-            80,
-            80,
-            "symbol_to_string_tag",
-        ),
-    )
-    result = HybridRetriever(
-        documents,
-        structural_links=(
-            StructuralLink(
-                "src/errors.ts",
-                "src/container.test.ts",
-                "ASSERTED_BY",
-                confidence=1.0,
-                certified=True,
-                source_symbol="ResolutionError",
-                source_start_line=1,
-                target_symbol="surfaces_resolution_error",
-                target_start_line=10,
-            ),
-        ),
-        dense_backend=None,
-    ).retrieve(
-        RetrievalState(
-            task_text="change ResolutionError",
-            intent=RetrievalIntent.CHANGE_IMPACT,
-            active_paths=("src/errors.ts",),
-            source_revision="source-1",
-        ),
-        selection_limit=1,
-        token_budget=200,
-    )
-
-    structural = next(
-        row
-        for row in result.ranked_spans
-        if row.channel is RetrievalChannel.STRUCTURAL
-    )
-    assert structural.start_line == 10
-    assert structural.symbol == "surfaces_resolution_error"
-    assert "Symbol.toStringTag" not in structural.text
-
-
-def test_unresolved_structural_endpoint_never_carries_alignment_certificate():
-    documents = (
-        RepositoryDocument("src/errors.ts", "export class ResolutionError {}"),
-        RepositoryDocument(
-            "src/container.test.ts",
-            "it('supports Symbol.toStringTag', () => expect(container).toBeDefined())",
-            80,
-            80,
-            "symbol_to_string_tag",
-        ),
-    )
-    result = HybridRetriever(
-        documents,
-        structural_links=(
-            StructuralLink(
-                "src/errors.ts",
-                "src/container.test.ts",
-                "ASSERTED_BY",
-                confidence=1.0,
-                certified=True,
-                target_symbol="missing_test_symbol",
-                target_start_line=10,
-            ),
-        ),
-        dense_backend=None,
-    ).retrieve(
-        RetrievalState(
-            task_text="change ResolutionError",
-            intent=RetrievalIntent.CHANGE_IMPACT,
-            active_paths=("src/errors.ts",),
-            source_revision="source-1",
-        ),
-        selection_limit=1,
-    )
-
-    structural = next(
-        row
-        for row in result.ranked_spans
-        if row.channel is RetrievalChannel.STRUCTURAL
-    )
-    assert "edge_endpoint_unresolved" in structural.provenance
-    assert not any(item.startswith("edge_endpoint_start:") for item in structural.provenance)
-    assert result.selected_context == ()
-
-
-def test_closed_token_budget_does_not_execute_any_retrieval_channel() -> None:
-    class MustNotRun:
-        channel = RetrievalChannel.EXACT
-
-        def retrieve(self, state, *, limit):  # pragma: no cover - RED sentinel
-            raise AssertionError("retrieval ran after its delivery budget closed")
-
-    result = HybridRetriever((), channels=(MustNotRun(),)).retrieve(
-        _state(),
-        token_budget=0,
-    )
-
-    assert result.abstained is True
-    assert result.reason_codes == ("context_budget_closed",)
-    assert result.channel_receipts == ()
-
-
-def test_retrieved_unchanged_evidence_keeps_claim_across_unrelated_revisions():
-    document = RepositoryDocument(
-        "src/calculate.py",
-        "def calculateTotal(): return 1",
-        symbol="calculateTotal",
-        provenance=("graph_node:4",),
-    )
-    retriever = HybridRetriever((document,), dense_backend=None)
-
-    before = retriever.retrieve(
-        _state(task_text="inspect src/calculate.py", source_revision="source-1")
-    )
-    after = retriever.retrieve(
-        _state(task_text="inspect src/calculate.py", source_revision="source-2")
-    )
-    changed = HybridRetriever(
-        (
-            replace(
-                document,
-                text="def calculateTotal(): return 2",
-            ),
-        ),
-        dense_backend=None,
-    ).retrieve(_state(task_text="inspect src/calculate.py", source_revision="source-2"))
-
-    assert before.ranked_spans[0].claim_hash == after.ranked_spans[0].claim_hash
-    assert changed.ranked_spans[0].claim_hash != after.ranked_spans[0].claim_hash
-
-
-def test_dense_channel_finds_semantic_candidate_sparse_terms_do_not_name():
-    documents = (
-        RepositoryDocument("src/reclaimer.py", "releases reserved storage after use"),
-        RepositoryDocument("src/socket.py", "opens a remote network connection"),
-    )
-    state = _state(task_text="repair allocator cleanup")
-
-    dense = DenseRetrievalChannel(documents, FakeDenseBackend()).retrieve(state, limit=2)
-
-    assert dense[0].path == "src/reclaimer.py"
-    assert dense[0].channel is RetrievalChannel.DENSE
-
-
-def test_dense_channel_can_use_a_bounded_cascade_candidate_pool():
-    class CapturingBackend(FakeDenseBackend):
-        documents: tuple[str, ...] = ()
-
-        def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-            self.documents = texts
-            return super().embed_documents(texts)
-
-    backend = CapturingBackend()
-    documents = tuple(
-        RepositoryDocument(f"src/{index}.py", "releases reserved storage after use")
-        for index in range(4)
-    )
-    channel = DenseRetrievalChannel(documents, backend)
-    channel.set_candidate_paths(("src/2.py", "src/0.py"))
-
-    result = channel.retrieve(_state(), limit=10)
-
-    assert [row.path for row in result] == ["src/0.py", "src/2.py"]
-    assert len(backend.documents) == 2
-    assert "candidate_pool=2/4_docs/2_paths" in channel.availability_reason
-
-
-def test_dense_candidate_limit_bounds_spans_when_a_path_has_many_documents():
-    class CapturingBackend(FakeDenseBackend):
-        documents: tuple[str, ...] = ()
-
-        def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-            self.documents = texts
-            return super().embed_documents(texts)
-
-    backend = CapturingBackend()
-    documents = tuple(
-        RepositoryDocument(f"src/{index // 4}.py", "releases reserved storage after use")
-        for index in range(12)
-    )
-    channel = DenseRetrievalChannel(documents, backend)
-    channel.set_candidate_paths(("src/0.py", "src/1.py", "src/2.py"), document_limit=5)
-
-    channel.retrieve(_state(), limit=10)
-
-    assert len(backend.documents) == 5
-
-
-def test_dense_backend_receives_path_symbol_and_exact_source_text():
-    class CapturingBackend(FakeDenseBackend):
-        documents: tuple[str, ...] = ()
-
-        def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-            self.documents = texts
-            return super().embed_documents(texts)
-
-    backend = CapturingBackend()
-    document = RepositoryDocument(
-        "src/reclaimer.py",
-        "releases reserved storage after use",
-        symbol="release_pool",
-    )
-
-    DenseRetrievalChannel((document,), backend).retrieve(_state(), limit=1)
-
-    assert "path: src/reclaimer.py" in backend.documents[0]
-    assert "symbol: release_pool" in backend.documents[0]
-    assert "releases reserved storage after use" in backend.documents[0]
-
-
-def test_structural_channel_uses_known_path_as_seed_and_returns_related_file():
-    documents = (
-        RepositoryDocument("src/allocator.py", "def allocate(): pass"),
-        RepositoryDocument("tests/test_allocator.py", "def test_allocate(): pass"),
-    )
-    links = (
-        StructuralLink(
-            source_path="src/allocator.py",
-            target_path="tests/test_allocator.py",
-            relation="tested_by",
-            confidence=1.0,
-        ),
-    )
-    state = _state(active_paths=("src/allocator.py",), intent=RetrievalIntent.VALIDATION_CONTEXT)
-
-    ranked = StructuralRetrievalChannel(documents, links).retrieve(state, limit=10)
-
-    assert [row.path for row in ranked] == ["tests/test_allocator.py"]
-    assert ranked[0].relation == "tested_by"
-
-
-def test_high_confidence_cochange_fact_is_not_alone_a_delivery_certificate():
-    documents = (
-        RepositoryDocument("src/anchor.py", "anchor_surface"),
-        RepositoryDocument("src/neighbor.py", "zqxv_payload"),
-    )
-    state = _state(
-        task_text="repair foobar",
-        active_paths=("src/anchor.py",),
-        intent=RetrievalIntent.CHANGE_IMPACT,
-    )
-    retriever = HybridRetriever(
-        documents,
-        structural_links=(
-            StructuralLink(
-                "src/anchor.py",
-                "src/neighbor.py",
-                "COCHANGE",
-                confidence=1.0,
-                certified=False,
-            ),
-        ),
-    )
-
-    result = retriever.retrieve(state, selection_limit=1)
-
-    assert result.ranked_files[0].path == "src/neighbor.py"
-    assert result.selected_context == ()
-    assert result.abstained is True
-
-
-def test_certified_structural_candidate_without_edge_endpoint_abstains() -> None:
-    class StructuralOnly:
-        channel = RetrievalChannel.STRUCTURAL
-
-        def retrieve(self, state: RetrievalState, *, limit: int):
-            del state, limit
-            return (
-                RetrievalCandidate(
-                    path="tests/test_container.py",
-                    start_line=80,
-                    end_line=80,
-                    symbol="unrelated_test",
-                    text="def test_unrelated(): pass",
-                    channel=self.channel,
-                    channel_rank=1,
-                    relation="ASSERTED_BY",
-                    provenance=("structural_certified", "action_target:src/errors.py"),
-                    source_revision="source-1",
-                ),
-            )
-
-    result = HybridRetriever((), channels=(StructuralOnly(),)).retrieve(_state())
-
-    assert result.selected_context == ()
-    assert result.reason_codes == ("insufficient_independent_support",)
-
-
-def test_exact_certificate_delivers_exact_span_not_unaligned_structural_representative() -> None:
-    class StaticChannel:
-        def __init__(self, candidate: RetrievalCandidate) -> None:
-            self.channel = candidate.channel
-            self.candidate = candidate
-
-        def retrieve(self, state: RetrievalState, *, limit: int):
-            del state, limit
-            return (self.candidate,)
-
-    exact = replace(
-        _candidate("src/errors.py", RetrievalChannel.EXACT, 1, text="class ResolutionError: pass"),
-        provenance=("exact_path",),
-    )
-    unrelated = replace(
-        _candidate(
-            "src/errors.py",
-            RetrievalChannel.STRUCTURAL,
-            1,
-            text="def unrelated_helper(): pass",
-        ),
-        relation="CALLS",
-        provenance=("structural_certified",),
-    )
-
-    result = HybridRetriever(
-        (),
-        channels=(StaticChannel(exact), StaticChannel(unrelated)),
-    ).retrieve(_state(task_text="repair src/errors.py"), selection_limit=1)
-
-    assert result.selected_context == ()
-    assert "no_decision_relevant_evidence" in result.reason_codes
-
-
-def test_rrf_is_equal_weight_k60_and_aggregates_unique_files_deterministically():
-    channel_results = {
-        RetrievalChannel.LEXICAL: (
-            _candidate("src/a.py", RetrievalChannel.LEXICAL, 1),
-            _candidate("src/b.py", RetrievalChannel.LEXICAL, 2),
-        ),
-        RetrievalChannel.DENSE: (
-            _candidate("src/b.py", RetrievalChannel.DENSE, 1),
-            _candidate("src/a.py", RetrievalChannel.DENSE, 2),
-            _candidate("src/a.py", RetrievalChannel.DENSE, 3),
-        ),
-    }
-
-    ranked = reciprocal_rank_fusion(channel_results, k=60)
-
-    assert [row.path for row in ranked] == ["src/a.py", "src/b.py"]
-    assert math.isclose(ranked[0].fused_score, (1 / 61) + (1 / 62))
-    assert math.isclose(ranked[1].fused_score, (1 / 62) + (1 / 61))
-    assert ranked[0].channel_ranks == (
-        (RetrievalChannel.LEXICAL, 1),
-        (RetrievalChannel.DENSE, 2),
+        con.execute("INSERT INTO properties_fts(properties_fts) VALUES('rebuild')")
+        con.commit()
+    finally:
+        con.close()
+    return db
+
+
+@pytest.fixture()
+def graph_with_fts(tmp_path: Path) -> Path:
+    return _build_fixture_with_properties_fts(tmp_path / "fts_fixture.db")
+
+
+def test_property_rank_uses_fts_when_properties_fts_exists(
+    graph_with_fts: Path,
+) -> None:
+    result = retrieval.property_rank(graph_with_fts, "input", 10)
+
+    assert result.available is True
+    assert result.detail["index"] == "properties_fts"
+    assert len(result) > 0
+
+
+def test_property_rank_falls_back_to_like_scan_when_fts_absent(
+    graph: Path,
+) -> None:
+    result = retrieval.property_rank(graph, "input", 10)
+
+    assert result.available is True
+    assert result.detail["index"] == "like_scan"
+    assert len(result) > 0
+
+
+def test_property_rank_falls_back_on_corrupt_fts(tmp_path: Path) -> None:
+    db = _build_fixture_with_properties_fts(tmp_path / "corrupt.db")
+    con = sqlite3.connect(db)
+    try:
+        # Corrupt the FTS shadow table so MATCH raises an error.
+        con.execute("DROP TABLE IF EXISTS properties_fts_data")
+        con.commit()
+    finally:
+        con.close()
+
+    result = retrieval.property_rank(db, "input", 10)
+
+    # Should fall back to LIKE rather than failing.
+    assert result.available is True
+    assert result.detail["index"] == "like_scan"
+
+
+def test_property_rank_fts_is_token_based_not_substring(
+    graph_with_fts: Path, graph: Path,
+) -> None:
+    """Document the semantic difference: FTS5 MATCH is token-based, LIKE is
+    substring-based.  ``"parse"`` matches ``"parseRegex"`` under LIKE (it is a
+    substring) but not under FTS5 (it is a different token).  This test pins
+    that the difference is a decision on record rather than a surprise."""
+    fts_result = retrieval.property_rank(graph_with_fts, "parse", 10)
+    like_result = retrieval.property_rank(graph, "parse", 10)
+
+    fts_ids = {row.stable_id for row in fts_result}
+    like_ids = {row.stable_id for row in like_result}
+
+    # The LIKE scan finds "parseRegex" as a substring match in properties;
+    # FTS5 MATCH does not because "parse" != "parseRegex" as a token.
+    # Both behaviours are correct for their semantics — but they differ,
+    # and this test makes the difference explicit.
+    assert like_ids >= fts_ids, (
+        "FTS results should be a subset of LIKE results for partial-token queries"
     )
 
 
-def test_hybrid_selection_keeps_active_path_spans_but_excludes_prior_claims():
-    documents = (
-        RepositoryDocument("src/allocator.py", "cleanup allocator current implementation"),
-        RepositoryDocument(
-            "src/reclaimer.py",
-            "allocator cleanup releases reserved storage after use",
-        ),
-        RepositoryDocument("tests/test_allocator.py", "cleanup allocator regression test"),
-    )
-    links = (
-        StructuralLink(
-            source_path="src/allocator.py",
-            target_path="src/reclaimer.py",
-            relation="calls",
-            certified=True,
-            target_start_line=1,
-        ),
-    )
-    first = HybridRetriever(
-        documents, structural_links=links, dense_backend=FakeDenseBackend()
-    ).retrieve(
-        _state(
-            task_text="repair allocator cleanup in src/reclaimer.py",
-            active_paths=("src/allocator.py",),
-        ),
-        selection_limit=3,
-        token_budget=200,
-    )
-    exposed = first.selected_context[0].claim_hash
-
-    second = HybridRetriever(
-        documents, structural_links=links, dense_backend=FakeDenseBackend()
-    ).retrieve(
-        _state(
-            task_text="repair allocator cleanup in src/reclaimer.py",
-            active_paths=("src/allocator.py",),
-            previously_exposed_claims=(exposed,),
-        ),
-        selection_limit=3,
-        token_budget=200,
-    )
-
-    assert "src/allocator.py" in {row.path for row in first.ranked_files}
-    assert "src/allocator.py" not in {row.path for row in first.selected_context}
-    assert exposed not in {row.claim_hash for row in second.selected_context}
-    dense_receipt = next(
-        row for row in first.channel_receipts if row.channel is RetrievalChannel.DENSE
-    )
-    assert dense_receipt.available is True
-    assert dense_receipt.backend_identity == "fake-dense-v1"
+# ---------------------------------------------------------------------------
+# 3. dense
+# ---------------------------------------------------------------------------
 
 
-def test_model_authored_active_file_can_rank_but_cannot_be_delivered_as_context():
-    documents = (
-        RepositoryDocument(
-            "src/allocator.py",
-            "def repair_allocator(): return 'model hypothesis'",
-            symbol="repair_allocator",
-            origin=EvidenceOrigin.MODEL_AUTHORED,
-            origin_revision="source-2",
-        ),
-        RepositoryDocument(
-            "src/preexisting.py",
-            "def unrelated(): return None",
-            symbol="unrelated",
-        ),
-    )
-    result = HybridRetriever(documents).retrieve(
-        _state(
-            task_text="Fix `repair_allocator` in src/allocator.py",
-            active_paths=("src/allocator.py",),
-            changed_paths=("src/allocator.py",),
-            source_revision="source-2",
-        ),
-        selection_limit=2,
-        token_budget=200,
-    )
+def test_dense_rank_degrades_when_model_dir_is_unset(
+    graph: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GT_DENSE_MODEL_DIR", raising=False)
 
-    assert result.ranked_files[0].path == "src/allocator.py"
-    assert all(row.path != "src/allocator.py" for row in result.selected_context)
-    assert "model_authored_context_rejected" in result.reason_codes
+    result = retrieval.dense_rank(graph, "validates empty input", 5)
+
+    assert result.available is False
+    assert result.reason == "dense_model_dir_unset"
+    assert list(result) == []
 
 
-def test_certified_cross_file_relation_from_active_file_is_deliverable():
-    documents = (
-        RepositoryDocument(
-            "src/allocator.py",
-            "def repair_allocator(): pass",
-            symbol="repair_allocator",
-            origin=EvidenceOrigin.MODEL_AUTHORED,
-            origin_revision="source-2",
-        ),
-        RepositoryDocument(
-            "src/reclaimer.py",
-            "def release_reserved(): pass",
-            symbol="release_reserved",
-            origin=EvidenceOrigin.PREEXISTING_REPOSITORY,
-            origin_revision="source-1",
-        ),
-    )
-    links = (
-        StructuralLink(
-            source_path="src/allocator.py",
-            target_path="src/reclaimer.py",
-            relation="calls",
-            certified=True,
-            source_symbol="repair_allocator",
-            target_symbol="release_reserved",
-            confidence=1.0,
-        ),
-    )
-    result = HybridRetriever(documents, structural_links=links).retrieve(
-        _state(
-            task_text="Fix allocator cleanup",
-            active_paths=("src/allocator.py",),
-            changed_paths=("src/allocator.py",),
-            source_revision="source-2",
-        ),
-        selection_limit=2,
-        token_budget=200,
-    )
+def test_dense_rank_degrades_when_assets_are_absent(
+    graph: Path, tmp_path: Path
+) -> None:
+    empty = tmp_path / "no-model"
+    empty.mkdir()
 
-    assert [row.path for row in result.selected_context] == ["src/reclaimer.py"]
-    selected = result.selected_context[0]
-    assert selected.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
-    assert selected.authority is EvidenceAuthority.CERTIFIED_RELATION
+    result = retrieval.dense_rank(graph, "clone", 5, model_dir=empty)
+
+    assert result.available is False
+    assert result.reason == "dense_model_assets_absent"
+    assert result.detail["missing"] == [
+        "model.onnx", "tokenizer.json", "manifest.json",
+    ]
+    assert list(result) == []
 
 
-def test_provider_history_source_text_is_not_redelivered():
-    documents = (
-        RepositoryDocument("src/seed.py", "def seed(): pass", symbol="seed"),
-        RepositoryDocument(
-            "src/related.py",
-            "def related_contract():\n    return 42",
-            symbol="related_contract",
-        ),
-    )
-    result = HybridRetriever(
-        documents,
-        structural_links=(
-            StructuralLink(
-                source_path="src/seed.py",
-                target_path="src/related.py",
-                relation="calls",
-                certified=True,
-                target_symbol="related_contract",
-                target_start_line=1,
-            ),
-        ),
-    ).retrieve(
-        _state(active_paths=("src/seed.py",)),
-        token_budget=200,
-    )
+def test_dense_rank_degrades_when_the_runtime_raises(
+    graph: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_dir = _stub_model_dir(tmp_path)
 
-    filtered = filter_provider_known_context(
-        result,
-        [
-            {
-                "role": "tool",
-                "content": "def related_contract():\n    return 42",
-            }
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("onnxruntime missing")
+
+    monkeypatch.setattr(dense_runtime, "rank_documents", _boom)
+
+    result = retrieval.dense_rank(graph, "clone", 5, model_dir=model_dir)
+
+    assert result.available is False
+    assert result.reason.startswith("dense_runtime_failed:RuntimeError")
+    assert list(result) == []
+
+
+def _stub_model_dir(tmp_path: Path) -> Path:
+    model_dir = tmp_path / "snowflake-arctic-embed-m"
+    model_dir.mkdir(exist_ok=True)
+    (model_dir / "model.onnx").write_bytes(b"onnx")
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (model_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    return model_dir
+
+
+def _install_fake_embedder(monkeypatch: pytest.MonkeyPatch, model_dir: Path) -> None:
+    """A two-dimensional stand-in for the ONNX forward pass.
+
+    Documents mentioning "empty" point one way, everything else the other; the
+    query points at the "empty" axis.  Enough to prove the wiring without
+    requiring the pinned 428 MB asset.
+    """
+    monkeypatch.setattr(
+        dense_runtime,
+        "_verified_assets",
+        lambda _root: (model_dir / "model.onnx", model_dir / "tokenizer.json"),
+    )
+    monkeypatch.setattr(dense_runtime, "_DIMENSION", 2)
+    monkeypatch.setattr(
+        dense_runtime,
+        "_embed",
+        lambda _m, _t, texts: [
+            (1.0, 0.0) if "empty" in text.lower() else (0.0, 1.0) for text in texts
         ],
     )
 
-    assert result.selected_context
-    assert filtered.selected_context == ()
-    assert filtered.abstained is True
-    assert "provider_history_already_contains_evidence" in filtered.reason_codes
 
+def test_dense_rank_runs_standalone_over_a_bounded_pool(
+    graph: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_dir = _stub_model_dir(tmp_path)
+    _install_fake_embedder(monkeypatch, model_dir)
 
-def test_character_budget_is_applied_before_evidence_is_selected():
-    documents = (
-        RepositoryDocument("src/seed.py", "def seed(): pass", symbol="seed"),
-        RepositoryDocument(
-            "src/allocator.py",
-            "def release_allocator(value):\n    return value\n",
-            start_line=1,
-            end_line=2,
-            symbol="release_allocator",
-        ),
-    )
-    state = _state(task_text="Change allocator", active_paths=("src/seed.py",))
-    links = (
-        StructuralLink(
-            source_path="src/seed.py",
-            target_path="src/allocator.py",
-            relation="calls",
-            certified=True,
-            target_symbol="release_allocator",
-            target_start_line=1,
-        ),
+    result = retrieval.dense_rank(
+        graph,
+        "empty",
+        3,
+        model_dir=model_dir,
+        index_path=tmp_path / "dense.sqlite",
     )
 
-    result = HybridRetriever(
-        documents, structural_links=links, dense_backend=None
-    ).retrieve(
-        state,
-        token_budget=200,
-        character_budget=16,
+    assert result.available is True
+    assert result.reason is None
+    # Only _clone's contract text contains "empty" (boundary_condition), so it
+    # is the only document on the query axis.
+    assert result[0].stable_id == _identity(3)
+    assert result.detail["pool_size"] == 5  # the five symbol-labelled nodes
+    assert result.detail["pool_bounded"] is False
+
+
+def test_dense_rank_honours_restrict_to(
+    graph: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_dir = _stub_model_dir(tmp_path)
+    _install_fake_embedder(monkeypatch, model_dir)
+
+    result = retrieval.dense_rank(
+        graph,
+        "empty",
+        3,
+        model_dir=model_dir,
+        index_path=tmp_path / "dense.sqlite",
+        restrict_to=[_identity(2), _identity(4)],
     )
 
-    assert result.selected_context == ()
-    assert result.selected_character_count == 0
-    assert result.character_budget == 16
-    assert "context_character_budget" in result.reason_codes
-    assert build_preemptive_frame(result, state, trigger="task_start") is None
-    # Candidate discovery was necessary to learn the exact complete-span size,
-    # but no evidence may be marked selected and discarded later by the host.
-    assert result.channel_receipts
+    assert result.detail["pool_size"] == 2
+    assert set(row.stable_id for row in result) <= {_identity(2), _identity(4)}
 
 
-def test_optional_dense_backend_failure_is_fail_open_and_receipted():
-    documents = (
-        RepositoryDocument("src/allocator.py", "cleanup allocator"),
-        RepositoryDocument("src/unrelated.py", "network transport"),
-    )
-    result = HybridRetriever(documents, dense_backend=BrokenDenseBackend()).retrieve(
-        _state(task_text="cleanup allocator"),
-        token_budget=200,
-    )
-
-    assert result.ranked_files[0].path == "src/allocator.py"
-    dense_receipt = next(
-        row for row in result.channel_receipts if row.channel is RetrievalChannel.DENSE
-    )
-    assert dense_receipt.failed is True
-    assert dense_receipt.available is False
-    assert dense_receipt.candidate_count == 0
-    assert "RuntimeError" in dense_receipt.reason
+def test_hybrid_dense_discovers_without_lexical_or_property_overlap(graph, tmp_path, monkeypatch):
+    model_dir = _stub_model_dir(tmp_path)
+    _install_fake_embedder(monkeypatch, model_dir)
+    monkeypatch.setattr(dense_runtime, "_embed", lambda _m, _t, texts: [
+        (1.0, 0.0) if text.startswith(dense_runtime.QUERY_PREFIX) or "empty" in text
+        else (0.0, 1.0) for text in texts
+    ])
+    query = "rejects vacant collections"
+    assert not retrieval.lexical_rank(graph, query)
+    assert not retrieval.property_rank(graph, query)
+    result = retrieval.hybrid_rank(graph, query, model_dir=model_dir,
+                                   index_path=tmp_path / "independent.sqlite")
+    assert result.fused
+    assert result.fused[0].stable_id == _identity(3)
 
 
-def test_absent_dense_backend_is_a_clean_abstaining_channel_not_an_error():
-    result = HybridRetriever(
-        (RepositoryDocument("src/allocator.py", "cleanup allocator"),),
-        dense_backend=None,
-    ).retrieve(_state(), token_budget=200)
-
-    dense_receipt = next(
-        row for row in result.channel_receipts if row.channel is RetrievalChannel.DENSE
-    )
-    assert dense_receipt.failed is False
-    assert dense_receipt.available is False
-    assert dense_receipt.reason == "backend_unavailable"
-
-
-def test_selection_requires_certified_or_multi_channel_support():
-    class WeakChannel:
-        channel = RetrievalChannel.LEXICAL
-
-        def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
-            del state, limit
-            return (_candidate("src/weak.py", RetrievalChannel.LEXICAL, 1),)
-
-    result = HybridRetriever((), channels=(WeakChannel(),)).retrieve(_state())
-
-    assert result.ranked_files[0].path == "src/weak.py"
-    assert result.selected_context == ()
-    assert result.abstained is True
-    assert "insufficient_independent_support" in result.reason_codes
-
-
-def test_lexical_and_bm25_are_one_sparse_family_for_abstention():
-    class SparseChannel:
-        def __init__(self, channel: RetrievalChannel) -> None:
-            self.channel = channel
-
-        def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
-            del state, limit
-            return (_candidate("src/sparse.py", self.channel, 1),)
-
-    result = HybridRetriever(
-        (),
-        channels=(
-            SparseChannel(RetrievalChannel.LEXICAL),
-            SparseChannel(RetrievalChannel.BM25),
-        ),
-    ).retrieve(_state())
-
-    assert result.ranked_files[0].support_count == 2
-    assert result.selected_context == ()
-    assert result.reason_codes == ("insufficient_independent_support",)
-
-
-def test_dense_rerank_of_sparse_candidates_is_not_independent_delivery_support():
-    class CandidateChannel:
-        def __init__(self, channel: RetrievalChannel) -> None:
-            self.channel = channel
-
-        def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
-            del state, limit
-            return (_candidate("src/candidate.py", self.channel, 1),)
-
-    result = HybridRetriever(
-        (),
-        channels=(
-            CandidateChannel(RetrievalChannel.BM25),
-            CandidateChannel(RetrievalChannel.DENSE),
-        ),
-    ).retrieve(_state())
-
-    assert result.ranked_files[0].path == "src/candidate.py"
-    assert result.selected_context == ()
-    assert result.abstained is True
-    assert result.reason_codes == ("insufficient_independent_support",)
-
-
-def test_validation_dense_rerank_can_deliver_honest_test_candidate_context():
-    class CandidateChannel:
-        def __init__(self, channel: RetrievalChannel) -> None:
-            self.channel = channel
-
-        def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
-            del state, limit
-            return (_candidate("tests/test_candidate.py", self.channel, 1),)
-
-    state = _state(intent=RetrievalIntent.VALIDATION_CONTEXT)
-    result = HybridRetriever(
-        (),
-        channels=(
-            CandidateChannel(RetrievalChannel.BM25),
-            CandidateChannel(RetrievalChannel.DENSE),
-        ),
-    ).retrieve(state)
-    frame = build_preemptive_frame(result, state, trigger="validation_context")
-
-    assert [row.path for row in result.selected_context] == ["tests/test_candidate.py"]
-    assert "validation_candidate" in result.selected_context[0].provenance
-    assert frame is not None
-    assert "Candidate repository context" in frame.rendered_text
-
-
-def test_diagnostic_delivery_rejects_certified_but_unrelated_structural_relation():
-    documents = (
-        RepositoryDocument("Makefile", "test:\n\tpytest -q", symbol="test"),
-    )
-    state = _state(
-        intent=RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE,
-        active_paths=("tests/test_worker.py",),
-        diagnostics=("tests/test_worker.py:1 failed",),
-    )
-    result = HybridRetriever(
-        documents,
-        structural_links=(
-            StructuralLink(
-                "tests/test_worker.py",
-                "Makefile",
-                "IMPORTS",
-                confidence=1.0,
-                certified=True,
-                source_symbol="test_worker",
-                source_start_line=1,
-                target_symbol="test",
-                target_start_line=1,
-            ),
-        ),
-        dense_backend=None,
-    ).retrieve(state, selection_limit=1)
-
-    assert result.selected_context == ()
-    assert "no_decision_relevant_evidence" in result.reason_codes
-
-
-def test_diagnostic_delivery_accepts_direct_certified_test_to_code_relation():
-    documents = (
-        RepositoryDocument("src/worker.py", "def work(): return 1", symbol="work"),
-        RepositoryDocument(
-            "tests/test_worker.py",
-            "def test_worker(): assert work() == 2",
-            symbol="test_worker",
-        ),
-    )
-    state = _state(
-        intent=RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE,
-        active_paths=("tests/test_worker.py",),
-        diagnostics=("tests/test_worker.py:1 AssertionError",),
-    )
-    result = HybridRetriever(
-        documents,
-        structural_links=(
-            StructuralLink(
-                "src/worker.py",
-                "tests/test_worker.py",
-                "ASSERTED_BY",
-                confidence=1.0,
-                certified=True,
-                source_symbol="work",
-                source_start_line=1,
-                target_symbol="test_worker",
-                target_start_line=1,
-            ),
-        ),
-        dense_backend=None,
-    ).retrieve(state, selection_limit=1)
-
-    assert [row.path for row in result.selected_context] == ["src/worker.py"]
-    assert "decision_relevance:diagnostic_direct_relation" in (
-        result.selected_context[0].provenance
-    )
-
-
-def test_validation_intent_prioritizes_mechanically_recognized_test_paths():
-    documents = (
-        RepositoryDocument(
-            "src/help.py",
-            "render help default value regression coverage help default value",
-        ),
-        RepositoryDocument("tests/test_help.py", "regression"),
-    )
-
-    implementation = HybridRetriever(documents, dense_backend=None).retrieve(
-        _state(
-            task_text="add help default value regression coverage",
-            intent=RetrievalIntent.IMPLEMENTATION_CONTEXT,
+def test_default_dense_pool_has_no_first_256_cutoff(graph):
+    with sqlite3.connect(graph) as con:
+        con.executemany(
+            "INSERT INTO nodes(id,label,name,qualified_name,file_path,language,start_line,end_line) "
+            "VALUES(?,'Function',?,?,'large.py','python',1,2)",
+            [(1000 + i, f"symbol_{i}", f"symbol_{i}") for i in range(300)],
         )
+        provenance = {}
+        documents = retrieval._dense_pool(con, limit=None, labels=retrieval.SYMBOL_LABELS,
+                                          restrict_to=None, provenance=provenance)
+    assert len(documents) >= 300
+    assert any(item.node_id == 1299 for item in provenance.values())
+
+
+# ---------------------------------------------------------------------------
+# 4. fusion
+# ---------------------------------------------------------------------------
+
+
+def _rows(*stable_ids: str) -> list[retrieval.RankedSymbol]:
+    return [
+        retrieval.RankedSymbol(stable_id, 0.0, f"snippet-{stable_id}")
+        for stable_id in stable_ids
+    ]
+
+
+def test_fuse_matches_a_hand_computed_rrf_example() -> None:
+    """score(d) = sum 1/(k + rank), k = 10, ranks 1-based.
+
+    A = [bbb, aaa, ccc], B = [aaa, bbb]
+
+        bbb = 1/(10+1) + 1/(10+2) = 1/11 + 1/12 = 0.174242424242...
+        aaa = 1/(10+2) + 1/(10+1) = 1/12 + 1/11 = 0.174242424242...
+        ccc = 1/(10+3)                          = 0.076923076923...
+
+    aaa and bbb tie exactly, so the tie-break decides: `aaa` must come first
+    even though `bbb` led the first ranking.
+    """
+    fused = retrieval.fuse([_rows("bbb", "aaa", "ccc"), _rows("aaa", "bbb")], 10)
+
+    assert [row.stable_id for row in fused] == ["aaa", "bbb", "ccc"]
+    assert fused[0].score == pytest.approx(1 / 11 + 1 / 12)
+    assert fused[1].score == pytest.approx(1 / 11 + 1 / 12)
+    assert fused[2].score == pytest.approx(1 / 13)
+
+
+def test_fuse_default_constant_is_sixty() -> None:
+    fused = retrieval.fuse([_rows("aaa", "bbb")])
+
+    assert fused[0].score == pytest.approx(1 / 61)
+    assert fused[1].score == pytest.approx(1 / 62)
+
+
+def test_fuse_takes_the_snippet_from_the_first_contributing_ranking() -> None:
+    first = [retrieval.RankedSymbol("aaa", 9.0, "from-first")]
+    second = [retrieval.RankedSymbol("aaa", 1.0, "from-second")]
+
+    assert retrieval.fuse([first, second])[0].snippet == "from-first"
+    assert retrieval.fuse([second, first])[0].snippet == "from-second"
+
+
+def test_fuse_ignores_an_unavailable_source() -> None:
+    lexical = retrieval.SourceRanking(
+        retrieval.RetrievalSource.LEXICAL, tuple(_rows("aaa", "bbb"))
     )
-    validation = HybridRetriever(documents, dense_backend=None).retrieve(
-        _state(
-            task_text="add help default value regression coverage",
-            intent=RetrievalIntent.VALIDATION_CONTEXT,
+    dense = retrieval.SourceRanking(
+        retrieval.RetrievalSource.DENSE, (), available=False, reason="absent"
+    )
+
+    with_dense = retrieval.fuse([lexical, dense])
+    without_dense = retrieval.fuse([lexical])
+
+    assert with_dense == without_dense
+
+
+def test_fuse_honours_limit_and_rejects_a_negative_constant() -> None:
+    assert len(retrieval.fuse([_rows("aaa", "bbb", "ccc")], limit=2)) == 2
+    with pytest.raises(ValueError, match="rrf_k_must_be_non_negative"):
+        retrieval.fuse([_rows("aaa")], -1)
+
+
+# ---------------------------------------------------------------------------
+# 5. hybrid, determinism, and the trust invariant
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_rank_records_inputs_and_availability(graph: Path) -> None:
+    result = retrieval.hybrid_rank(graph, "validates empty input", 5, use_dense=False)
+
+    assert [str(s.source) for s in result.sources] == ["lexical", "property", "dense"]
+    assert result.available_sources == ("lexical", "property")
+    assert result.degraded_sources == {"dense": "dense_disabled_by_caller"}
+    assert result.fused
+    assert _identity(3) in [row.stable_id for row in result.fused]
+    # _clone is reached by both surfaces here: its signature mentions `input`
+    # and its guard clause mentions "empty input".
+    assert result.contributing_sources(_identity(3)) == ("lexical", "property")
+
+
+def test_hybrid_rank_surfaces_a_symbol_only_the_property_index_can_reach(
+    graph: Path,
+) -> None:
+    """The delta this item buys: a hit no identifier index could produce."""
+    result = retrieval.hybrid_rank(graph, "UnitTypeParser", 5, use_dense=False)
+
+    lexical = next(s for s in result.sources if s.source == "lexical")
+    assert list(lexical) == []
+    assert result.contributing_sources(_identity(5)) == ("property",)
+    assert result.fused[0].stable_id == _identity(5)
+
+
+def test_hybrid_fusion_is_a_subset_of_the_union_of_its_inputs(graph: Path) -> None:
+    result = retrieval.hybrid_rank(graph, "input pattern clone", 10, use_dense=False)
+
+    union = {row.stable_id for source in result.sources for row in source}
+    assert {row.stable_id for row in result.fused} <= union
+
+
+def test_hybrid_rank_is_deterministic(graph: Path) -> None:
+    first = retrieval.hybrid_rank(graph, "validates empty input", 5, use_dense=False)
+    second = retrieval.hybrid_rank(graph, "validates empty input", 5, use_dense=False)
+
+    assert first.fused == second.fused
+    assert [s.as_dict() for s in first.sources] == [s.as_dict() for s in second.sources]
+    assert first.attribution_record() == second.attribution_record()
+
+
+def test_hybrid_rank_accepts_an_open_connection_without_closing_it(
+    graph: Path,
+) -> None:
+    connection = sqlite3.connect(f"file:{graph}?mode=ro", uri=True)
+    try:
+        result = retrieval.hybrid_rank(connection, "clone", 5, use_dense=False)
+        assert result.fused
+        # Still usable: hybrid_rank must not close a caller's connection.
+        assert connection.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 6
+    finally:
+        connection.close()
+
+
+def test_retrieval_never_writes_to_the_graph(graph: Path) -> None:
+    """Ranking is not evidence: no tier, no edge, not one byte."""
+    before = hashlib.sha256(graph.read_bytes()).hexdigest()
+
+    retrieval.hybrid_rank(graph, "validates empty input", 5, use_dense=False)
+    retrieval.lexical_rank(graph, "clone", 5)
+    retrieval.property_rank(graph, "input", 5)
+
+    assert hashlib.sha256(graph.read_bytes()).hexdigest() == before
+    assert not os.path.exists(str(graph) + "-wal")
+
+
+def test_attribution_record_is_content_safe_and_names_the_source(
+    graph: Path,
+) -> None:
+    result = retrieval.hybrid_rank(graph, "validates empty input", 3, use_dense=False)
+    record = result.attribution_record()
+
+    assert record["schema"] == "gt.hybrid_retrieval.v1"
+    assert record["promotes_trust"] is False
+    assert record["query_sha256"] == hashlib.sha256(
+        b"validates empty input"
+    ).hexdigest()
+    assert record["query_chars"] == len("validates empty input")
+    assert record["degraded_sources"]["dense"] == "dense_disabled_by_caller"
+    serialized = repr(record)
+    # No snippet text anywhere in the record.
+    assert "guard_clause: return:" not in serialized
+    top = record["fused"][0]
+    assert top["rank"] == 1
+    assert top["contributing_sources"]
+    assert top["provenance"]["identity_origin"] == "derived:gt.symbol.identity.v1"
+
+
+def test_symbol_identity_is_derived_when_the_graph_stores_none(graph: Path) -> None:
+    result = retrieval.lexical_rank(graph, "deepClone", 5)
+    provenance: dict[str, retrieval.SymbolProvenance] = {}
+    retrieval.lexical_rank(graph, "deepClone", 5, provenance=provenance)
+
+    entry = provenance[result[0].stable_id]
+    assert entry.identity_origin == "derived:gt.symbol.identity.v1"
+    assert entry.file_path == "ark/util/clone.ts"
+    assert entry.node_id == 2
+
+
+def test_lexical_only_and_dense_only_remain_runnable_standalone(
+    graph: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lexical_only = retrieval.lexical_rank(graph, "empty input", 5)
+    model_dir = _stub_model_dir(tmp_path)
+    _install_fake_embedder(monkeypatch, model_dir)
+    dense_only = retrieval.dense_rank(
+        graph, "empty input", 5, model_dir=model_dir,
+        index_path=tmp_path / "dense.sqlite",
+    )
+
+    assert lexical_only.available is True
+    assert dense_only.available is True
+    # They disagree, which is the whole reason for fusing them.
+    assert [row.stable_id for row in lexical_only] != [
+        row.stable_id for row in dense_only
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 6. integration against the real graph
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not REAL_GRAPH.is_file(), reason="real arktype graph absent")
+@pytest.mark.parametrize("query", ["validates empty input", "parse regex pattern"])
+def test_real_graph_hybrid_rank(query: str) -> None:
+    result = retrieval.hybrid_rank(REAL_GRAPH, query, 5)
+
+    lexical = next(s for s in result.sources if s.source == "lexical")
+    assert lexical.available is True
+    assert len(lexical) > 0, "the populated nodes_fts must return lexical hits"
+
+    union = {row.stable_id for source in result.sources for row in source}
+    assert {row.stable_id for row in result.fused} <= union
+    assert result.fused
+
+    for row in result.fused:
+        provenance = result.provenance[row.stable_id]
+        assert provenance.label in retrieval.SYMBOL_LABELS
+        assert provenance.file_path
+        assert result.contributing_sources(row.stable_id)
+
+    # Determinism on the real graph, not only on the fixture.
+    assert retrieval.hybrid_rank(REAL_GRAPH, query, 5).fused == result.fused
+
+
+# ---------------------------------------------------------------------------
+# 7. localization ranking at scale
+# ---------------------------------------------------------------------------
+
+_SCALE_NODES = 6_000
+
+# Same env-var convention as REAL_GRAPH: the leg that needs the pinned ONNX
+# asset runs only where the asset is present, and skips without pretending.
+_SCALE_DENSE_MODEL_RAW = os.environ.get("GT_RETRIEVAL_DENSE_MODEL", "")
+_SCALE_DENSE_MODEL = Path(_SCALE_DENSE_MODEL_RAW) if _SCALE_DENSE_MODEL_RAW else None
+
+
+def _scale_stable_id(node: tuple) -> str:
+    from gt_engine.resolution_provenance import stable_symbol_id
+
+    (_id, label, _name, qualified_name, file_path, language, start, end, _sig) = node
+    return stable_symbol_id(
+        language=language,
+        path=file_path,
+        qualified_name=qualified_name,
+        native_kind=label,
+        start_line=start,
+        end_line=end,
+    )
+
+
+def _build_scale_graph(path: Path) -> tuple[Path, dict[str, set[str]]]:
+    """A ~6k-node graph on the real schema with planted signal.
+
+    Noise nodes repeat common tokens. Two planted classes carry rare terms:
+    identifier-level (``defrobnicate``/``checksum`` in ``nodes_fts`` columns)
+    and behavioural (``quiescent``/``backpressure`` in ``properties`` only).
+    The FTS index is populated by the same external-content rebuild the
+    producer runs, so BM25 statistics at this scale are the real ones.
+    """
+    nodes: list[tuple] = []
+    properties: list[tuple] = []
+    pid = 0
+
+    def add_property(node_id: int, kind: str, value: str, confidence: float) -> None:
+        nonlocal pid
+        pid += 1
+        properties.append((pid, node_id, kind, value, confidence))
+
+    for i in range(1, _SCALE_NODES + 1):
+        nodes.append((
+            i, "Function", f"fn_{i}", f"pkg{i % 40}.fn_{i}",
+            f"pkg{i % 40}/mod{i % 97}.py", "python", 1, 5,
+            f"(value_{i % 31}: int) -> int",
+        ))
+        add_property(i, "param", f"value_{i % 31}:: int [required]", 1.0)
+        if i <= 200:
+            # Partial-match noise: one query term, one fact, high confidence.
+            add_property(i, "side_effect", "leaves the quiescent flag set", 0.9)
+
+    strong: list[tuple] = []
+    for j in range(5):
+        node_id = 6_001 + j
+        strong.append((
+            node_id, "Function", "defrobnicate",
+            f"pipeline.stage{j}.defrobnicate",
+            f"pipeline/stage{j}/defrobnicate.py", "python", 1, 9,
+            "defrobnicate checksum(frame) -> frame",
+        ))
+    weak: list[tuple] = []
+    for j in range(40):
+        node_id = 6_010 + j
+        weak.append((
+            node_id, "Function", f"util_{j}", f"pkg{j % 40}.util_{j}",
+            f"defrobnicate/util_{j}.py", "python", 1, 4,
+            "(frame) -> frame",
+        ))
+    prop_nodes: list[tuple] = []
+    for j in range(4):
+        node_id = 6_050 + j
+        prop_nodes.append((
+            node_id, "Function", f"settle_{j}", f"pkg{j % 40}.settle_{j}",
+            f"pkg{j % 40}/settle_{j}.py", "python", 1, 8, "(queue) -> None",
+        ))
+        add_property(
+            node_id, "guard_clause",
+            "opens the quiescent backpressure valve when the queue saturates",
+            1.0,
         )
+
+    nodes.extend(strong)
+    nodes.extend(weak)
+    nodes.extend(prop_nodes)
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY,
+                label TEXT NOT NULL,
+                name TEXT NOT NULL,
+                qualified_name TEXT,
+                file_path TEXT NOT NULL,
+                signature TEXT,
+                language TEXT NOT NULL,
+                start_line INTEGER,
+                end_line INTEGER,
+                stable_id TEXT,
+                source_revision TEXT
+            );
+            CREATE TABLE properties (
+                id INTEGER PRIMARY KEY,
+                node_id INTEGER NOT NULL REFERENCES nodes(id),
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                line INTEGER,
+                confidence REAL DEFAULT 1.0
+            );
+            CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                name, qualified_name, signature, file_path,
+                content='nodes', content_rowid='id'
+            );
+            """
+        )
+        connection.executemany(
+            "INSERT INTO nodes (id,label,name,qualified_name,file_path,language,"
+            "start_line,end_line,signature,stable_id,source_revision) "
+            "VALUES (?,?,?,?,?,?,?,?,?,NULL,'rev-1')",
+            nodes,
+        )
+        connection.executemany(
+            "INSERT INTO properties (id,node_id,kind,value,line,confidence) "
+            "VALUES (?,?,?,?,NULL,?)",
+            properties,
+        )
+        connection.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
+        connection.commit()
+    finally:
+        connection.close()
+    return path, {
+        "strong": {_scale_stable_id(n) for n in strong},
+        "weak": {_scale_stable_id(n) for n in weak},
+        "property": {_scale_stable_id(n) for n in prop_nodes},
+    }
+
+
+@pytest.fixture(scope="module")
+def scale_graph(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, dict[str, set[str]]]:
+    return _build_scale_graph(tmp_path_factory.mktemp("scale_graph") / "scale.db")
+
+
+def test_lexical_rank_at_scale_ranks_planted_signal_above_noise(
+    scale_graph: tuple[Path, dict[str, set[str]]],
+) -> None:
+    path, planted = scale_graph
+
+    result = retrieval.lexical_rank(path, "defrobnicate checksum", 10)
+
+    assert result.available is True
+    # The k*4 over-fetch cut is part of the contract: 45 rows match, 40 land.
+    assert result.detail["matched_rows"] == 40
+    top = [row.stable_id for row in result]
+    assert set(top[: len(planted["strong"])]) == planted["strong"]
+    assert set(top[len(planted["strong"]):]) <= planted["weak"]
+
+    full = retrieval.lexical_rank(path, "defrobnicate", 50)
+    assert full.available is True
+    assert full.detail["matched_rows"] == len(planted["strong"]) + len(planted["weak"])
+    assert len(full) == 45
+    assert {row.stable_id for row in full[:5]} == planted["strong"]
+
+
+def test_property_rank_at_scale_scores_coverage_above_partial_noise(
+    scale_graph: tuple[Path, dict[str, set[str]]],
+) -> None:
+    path, planted = scale_graph
+
+    result = retrieval.property_rank(path, "quiescent backpressure", 10)
+
+    assert result.available is True
+    assert len(result) == 10
+    head = result[: len(planted["property"])]
+    assert {row.stable_id for row in head} == planted["property"]
+    # coverage 2 at confidence 1.0: 2 + (1 - 1/3); the 200 one-term rows sit
+    # strictly below at 1 + (1 - 1/1.9) no matter how confidently they match.
+    for row in head:
+        assert row.score == pytest.approx(2 + 2 / 3)
+    for row in result[len(planted["property"]):]:
+        assert row.score == pytest.approx(1 + (1 - 1 / 1.9))
+
+
+def test_hybrid_rank_at_scale_is_deterministic_and_signal_led(
+    scale_graph: tuple[Path, dict[str, set[str]]],
+) -> None:
+    path, planted = scale_graph
+    query = "defrobnicate checksum quiescent backpressure"
+
+    first = retrieval.hybrid_rank(path, query, 10, use_dense=False)
+    second = retrieval.hybrid_rank(path, query, 10, use_dense=False)
+
+    assert first.fused == second.fused
+    assert [s.as_dict() for s in first.sources] == [
+        s.as_dict() for s in second.sources
+    ]
+    assert first.attribution_record() == second.attribution_record()
+
+    fused_ids = [row.stable_id for row in first.fused]
+    planted_all = planted["strong"] | planted["property"]
+    # RRF over the source rankings: the strong identifier rows hold lexical
+    # ranks 1-5 and the planted fact rows hold property ranks 1-4. The eight
+    # rows strictly above 1/(60+5) are all planted; positions 9-10 tie the
+    # fifth strong row against the best partial-coverage noise row, so the
+    # nine planted ids are complete within the fused top-10 either way.
+    assert len(fused_ids) == 10
+    assert len(set(fused_ids[:8])) == 8
+    assert set(fused_ids[:8]) <= planted_all
+    assert planted_all <= set(fused_ids[:10])
+    for stable_id in planted["strong"]:
+        assert first.contributing_sources(stable_id) == ("lexical",)
+    for stable_id in planted["property"]:
+        assert first.contributing_sources(stable_id) == ("property",)
+
+
+def test_dense_pool_bound_bookkeeping_at_scale(
+    scale_graph: tuple[Path, dict[str, set[str]]],
+) -> None:
+    path, planted = scale_graph
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        provenance: dict[str, retrieval.SymbolProvenance] = {}
+        bounded = retrieval._dense_pool(
+            connection,
+            limit=retrieval.DENSE_POOL_LIMIT,
+            labels=retrieval.SYMBOL_LABELS,
+            restrict_to=None,
+            provenance=provenance,
+        )
+        assert len(bounded) == retrieval.DENSE_POOL_LIMIT
+        # The bounded pool is the first N symbol nodes in n.id order.
+        assert {provenance[sid].node_id for sid in bounded} == set(
+            range(1, retrieval.DENSE_POOL_LIMIT + 1)
+        )
+        assert all(text.startswith("Function ") for text in bounded.values())
+
+        unbounded = retrieval._dense_pool(
+            connection,
+            limit=None,
+            labels=retrieval.SYMBOL_LABELS,
+            restrict_to=None,
+            provenance={},
+        )
+        assert len(unbounded) == _SCALE_NODES + 5 + 40 + 4
+
+        wanted = sorted(planted["strong"])[:2]
+        restricted = retrieval._dense_pool(
+            connection,
+            limit=None,
+            labels=retrieval.SYMBOL_LABELS,
+            restrict_to=wanted,
+            provenance={},
+        )
+        assert set(restricted) == set(wanted)
+    finally:
+        connection.close()
+
+
+@pytest.mark.skipif(
+    _SCALE_DENSE_MODEL is None or not _SCALE_DENSE_MODEL.is_dir(),
+    reason="real ONNX model absent (set GT_RETRIEVAL_DENSE_MODEL)",
+)
+def test_dense_rank_at_scale_uses_the_bounded_pool(
+    scale_graph: tuple[Path, dict[str, set[str]]], tmp_path: Path
+) -> None:
+    """The dense leg with the pinned model asset, where it exists.
+
+    ``pool_limit`` is exercised through ``dense_rank`` itself so the
+    bookkeeping in ``detail`` is observed on the real path, not reconstructed.
+    """
+    path, _planted = scale_graph
+
+    result = retrieval.dense_rank(
+        path,
+        "quiescent backpressure",
+        10,
+        model_dir=_SCALE_DENSE_MODEL,
+        index_path=tmp_path / "dense.sqlite",
+        pool_limit=128,
     )
 
-    assert implementation.ranked_files[0].path == "src/help.py"
-    assert validation.ranked_files[0].path == "tests/test_help.py"
-
-
-def test_retrieval_query_terms_preserve_literal_workflow_vocabulary():
-    state = RetrievalState(
-        task_text=(
-            "Quote empty default values in help output and add a regression test "
-            "for default_value_t"
-        ),
-        intent=RetrievalIntent.VALIDATION_CONTEXT,
-        source_revision="source-1",
+    assert result.available is True, result.reason
+    assert result.detail["pool_size"] == 128
+    assert result.detail["pool_bounded"] is True
+    repeat = retrieval.dense_rank(
+        path,
+        "quiescent backpressure",
+        10,
+        model_dir=_SCALE_DENSE_MODEL,
+        index_path=tmp_path / "dense.sqlite",
+        pool_limit=128,
     )
-
-    terms = retrieval_query_terms(state)
-
-    assert "empty" in terms
-    assert "default" in terms
-    assert "help" in terms
-    assert "default_value_t" in terms
-    assert "validation_context" not in terms
-
-
-def test_sparse_query_terms_do_not_leak_active_path_scaffolding():
-    state = RetrievalState(
-        task_text="find allocator regression tests",
-        intent=RetrievalIntent.VALIDATION_CONTEXT,
-        active_paths=("src/allocator.py",),
-        changed_paths=("tests/test_allocator.py",),
-        source_revision="source-1",
-    )
-
-    terms = retrieval_query_terms(state)
-
-    assert "allocator" in terms
-    assert "regression" in terms
-    assert "src" not in terms
-    assert "py" not in terms
-
-
-def test_stale_revision_candidates_are_rejected_before_fusion():
-    class StaleChannel:
-        channel = RetrievalChannel.EXACT
-
-        def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
-            del state, limit
-            return (
-                RetrievalCandidate(
-                    path="src/stale.py",
-                    start_line=1,
-                    end_line=2,
-                    symbol="stale",
-                    text="stale evidence",
-                    channel=self.channel,
-                    channel_rank=1,
-                    relation=None,
-                    provenance=("exact_symbol",),
-                    source_revision="source-0",
-                ),
-            )
-
-    result = HybridRetriever((), channels=(StaleChannel(),)).retrieve(_state())
-
-    assert result.ranked_files == ()
-    assert result.abstained is True
-    assert "stale_candidates_rejected" in result.reason_codes
-
-
-def test_selection_keeps_complete_evidence_and_never_truncates_to_fit_budget():
-    class SupportedChannel:
-        channel = RetrievalChannel.STRUCTURAL
-
-        def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
-            del state, limit
-            return (
-                RetrievalCandidate(
-                    path="src/large.py",
-                    start_line=1,
-                    end_line=2,
-                    symbol=None,
-                    text=" ".join(f"token{i}" for i in range(80)),
-                    channel=self.channel,
-                    channel_rank=1,
-                    relation="calls",
-                    provenance=("structural_certified", "edge_endpoint_start:1"),
-                    source_revision="source-1",
-                    channel_score=1.0,
-                ),
-            )
-
-    result = HybridRetriever(
-        (),
-        channels=(SupportedChannel(),),
-    ).retrieve(_state(), token_budget=10)
-
-    assert result.selected_context == ()
-    assert result.abstained is True
-    assert "context_budget" in result.reason_codes
-
-
-def test_preemptive_frame_is_bounded_revision_bound_and_replayable():
-    documents = (
-        RepositoryDocument("src/allocator.py", "cleanup allocator implementation"),
-        RepositoryDocument("tests/test_allocator.py", "cleanup allocator regression"),
-    )
-    state = _state(
-        task_text="inspect tests/test_allocator.py for cleanup allocator",
-        active_paths=("src/allocator.py",),
-    )
-    result = HybridRetriever(
-        documents,
-        structural_links=(
-            StructuralLink(
-                source_path="src/allocator.py",
-                target_path="tests/test_allocator.py",
-                relation="calls",
-                certified=True,
-                target_start_line=1,
-            ),
-        ),
-    ).retrieve(state, token_budget=200)
-
-    frame = build_preemptive_frame(result, state, trigger="diagnostic_changed")
-
-    assert frame is not None
-    assert frame.source_revision == "source-1"
-    assert frame.trigger == "diagnostic_changed"
-    assert frame.token_count <= 200
-    assert frame.claim_hashes == tuple(row.claim_hash for row in result.selected_context)
-    assert frame.query_hash
-
-
-def test_preemptive_frame_is_none_when_retriever_abstains():
-    result = HybridRetriever(()).retrieve(_state())
-
-    assert result.abstained is True
-    assert build_preemptive_frame(result, _state(), trigger="task_start") is None
+    assert [row.stable_id for row in repeat] == [row.stable_id for row in result]

@@ -1,0 +1,37 @@
+/.gitattributes text eol=lf
+scripts/linear_control_record.py text eol=lf
+scripts/validate_failure_ids.py text eol=lf
+config/failure_id_ledger_snapshot.json text eol=lf
+.github/workflows/failure-id-validation.yml text eol=lf
+scripts/generate_gt_finalstand.py text eol=lf
+gt_finalstand/role_inventory_source.json text eol=lf
+gt_finalstand/language_operation_compatibility.json text eol=lf
+gt_finalstand/role_audit.csv text eol=lf
+gt_finalstand/language_operation_certification.csv text eol=lf
+gt_engine/generated_typed_capabilities.py text eol=lf
+gt_finalstand/receipts/** text eol=lf
+tests/red_artifacts/groundtruth_fixture.tar binary
+tests/test_failure_id_validator.py text eol=lf
+tests/test_failure_id_validator_boundaries.py text eol=lf
+scripts/red_evidence.py text eol=lf
+scripts/red_evidence_go.py text eol=lf
+scripts/check_red_evidence_producers.py text eol=lf
+scripts/compare_red_evidence.py text eol=lf
+tests/test_red_evidence.py text eol=lf
+tests/test_red_evidence_review_red.py text eol=lf
+tests/test_red_evidence_integration.py text eol=lf
+tests/fixtures/red_evidence_go/go.mod text eol=lf
+tests/fixtures/red_evidence_go/proof_red_test.go text eol=lf
+config/red_evidence_producers.json text eol=lf
+.github/workflows/red-evidence-integrity.yml text eol=lf
+tests/fixtures/har81_attestation/**/*.json text eol=lf
+tests/fixtures/har81_attestation/**/*.jsonl text eol=lf
+tests/fixtures/har81_attestation/**/*.gz binary
+tests/fixtures/har81_attestation/**/renderer_sources/** -text
+vendor/gt-index-linux-amd64.build-info.json -text
+artifacts/har81_producer_acceptance_cffca1fd2.json text eol=lf
+
+# Byte-exact trees: producer source fingerprint and recorded fixture blobs are
+# content-hashed verbatim; autocrlf checkouts must not rewrite them.
+vendor/gt-index-src/** -text
+tests/fixtures/smoke20_recorded/** -text

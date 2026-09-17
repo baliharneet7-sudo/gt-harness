@@ -1,0 +1,364 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from gt_engine.run_diagnostics import (
+    CapabilityState,
+    DiagnosticCode,
+    DiagnosticEvent,
+    DiagnosticJournal,
+    classify_provider_failure,
+    diagnose_artifact_root,
+)
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_diagnostic_event_is_stable_secret_free_and_aggregated(tmp_path: Path):
+    journal = DiagnosticJournal(tmp_path, task_id="task-1")
+    for sequence in (2, 5):
+        journal.record(
+            DiagnosticEvent.create(
+                code=DiagnosticCode.GT_DENSE_MODEL_UNAVAILABLE,
+                severity="ERROR", phase="startup", subsystem="retrieval",
+                capability="dense_retrieval", task_id="task-1",
+                classification="primary", cause="model asset not mounted",
+                impact="hybrid required disabled",
+                recovery="stage verified model in task bundle",
+                retryable=False, event_sequence=sequence,
+                identities={"bundle": "a" * 64}, evidence_refs=(),
+            )
+        )
+    journal.capability("dense_retrieval", CapabilityState.FAILED, "model digest absent")
+    paths = journal.seal()
+
+    payload = json.loads(paths.json.read_text(encoding="utf-8"))
+    row = payload["diagnostics"][0]
+    assert row["occurrence_count"] == 2
+    assert row["first_event_sequence"] == 2
+    assert row["last_event_sequence"] == 5
+    expected = b"gt.incident.v1\0GT_DENSE_MODEL_UNAVAILABLE\0startup\0retrieval\0"
+    expected += b"model_asset_not_mounted\0task-1\0" + (b"a" * 64)
+    assert row["fingerprint"] == hashlib.sha256(expected).hexdigest()
+    assert "model asset" not in paths.text.read_text(encoding="utf-8")
+    assert "GT_DENSE_MODEL_UNAVAILABLE" in paths.text.read_text(encoding="utf-8")
+
+
+def test_diagnostic_event_rejects_unknown_codes_and_secret_material():
+    common = dict(
+        severity="ERROR", phase="provider", subsystem="transport",
+        capability="provider_transport", task_id="x", classification="primary",
+        cause="request too large", impact="request refused", recovery="refine query",
+        retryable=False, event_sequence=1,
+    )
+    with pytest.raises(ValueError, match="closed diagnostic code"):
+        DiagnosticEvent.create(code="MADE_UP", **common)
+    with pytest.raises(ValueError, match="secret-like"):
+        DiagnosticEvent.create(
+            code=DiagnosticCode.GT_PROVIDER_REQUEST_TOO_LARGE,
+            evidence_refs=({"path": "events.json", "api_key": "sk-secret"},),
+            **common,
+        )
+
+
+def test_hyphenated_task_ids_embedding_key_shaped_words_are_not_secrets():
+    # Run 34715686102: the provider_failure receipt for
+    # "aiomonitor-task-snapshots-diff" raised ValueError because the task id
+    # contains "sk-snapshots-diff", which matched the sk-... canary shape and
+    # converted a typed provider failure into a run-killing internal_error.
+    # Key-shaped material requires a standalone word boundary.
+    task_ids = {"aiomonitor-task-snapshots-diff", "task-snapshot-diff",
+                "x-sketchy-behavior"}
+    # Every declared cohort task id must survive diagnostics: any eval/*.json
+    # carrying a task list is part of the sweep, not just the smoke20 set.
+    for eval_spec in Path(__file__).resolve().parent.parent.glob("eval/*.json"):
+        try:
+            payload = json.loads(eval_spec.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        ids = payload.get("task_ids") if isinstance(payload, dict) else None
+        if isinstance(ids, list):
+            task_ids.update(str(item) for item in ids)
+    for task_id in sorted(task_ids):
+        event = DiagnosticEvent.create(
+            code=DiagnosticCode.GT_PROVIDER_MALFORMED_RESPONSE,
+            severity="ERROR", phase="provider_transport", subsystem="provider",
+            capability="provider_transport", task_id=task_id,
+            classification="primary", cause="FormatError",
+            impact="provider_response_unavailable",
+            recovery="refine_request_before_retry",
+            retryable=False, event_sequence=1,
+        )
+        assert event.task_id == task_id
+    for secret in ("sk-or-v1-abcdef1234567890", "sk-abcdefgh1234", "Bearer abc.def"):
+        with pytest.raises(ValueError, match="secret-like"):
+            DiagnosticEvent.create(
+                code=DiagnosticCode.GT_PROVIDER_MALFORMED_RESPONSE,
+                severity="ERROR", phase="provider_transport", subsystem="provider",
+                capability="provider_transport", task_id="task",
+                classification="primary", cause=f"provider said {secret}",
+                impact="provider_response_unavailable",
+                recovery="refine_request_before_retry",
+                retryable=False, event_sequence=1,
+            )
+
+
+@pytest.mark.parametrize(
+    ("exc", "code", "retryable"),
+    [
+        (type("BillingError", (Exception,), {"status_code": 402})("payment"),
+         DiagnosticCode.GT_PROVIDER_BILLING, False),
+        (type("RateLimitError", (Exception,), {"status_code": 429})("slow"),
+         DiagnosticCode.GT_PROVIDER_RATE_LIMIT, True),
+        (type("BadRequestError", (Exception,), {"status_code": 400})("bad"),
+         DiagnosticCode.GT_PROVIDER_BAD_REQUEST, False),
+        (TimeoutError("timed out"), DiagnosticCode.GT_PROVIDER_TIMEOUT, True),
+        (ConnectionError("disconnect"), DiagnosticCode.GT_PROVIDER_DISCONNECT, True),
+        (ValueError("malformed"), DiagnosticCode.GT_PROVIDER_MALFORMED_RESPONSE, False),
+    ],
+)
+def test_provider_failures_are_classified_independently(exc, code, retryable):
+    assert classify_provider_failure(exc) == (code, retryable)
+
+
+def test_diagnose_root_validates_evidence_hashes_and_plan_conservation(tmp_path: Path):
+    evidence = tmp_path / "nested" / "event.json"
+    evidence.parent.mkdir()
+    evidence.write_text('{"event":"dense_missing"}\n', encoding="utf-8")
+    journal = DiagnosticJournal(evidence.parent, task_id="a")
+    journal.record(
+        DiagnosticEvent.create(
+            code=DiagnosticCode.GT_DENSE_MODEL_UNAVAILABLE,
+            severity="ERROR", phase="startup", subsystem="retrieval",
+            capability="dense_retrieval", task_id="a", classification="primary",
+            cause="model_asset_not_mounted", impact="hybrid_required_disabled",
+            recovery="stage_verified_model_in_task_bundle", retryable=False,
+            event_sequence=1,
+            evidence_refs=({"path": "event.json", "sha256": _sha(evidence)},),
+        )
+    )
+    journal.capability("dense_retrieval", CapabilityState.FAILED, "asset absent")
+    journal.seal()
+    (tmp_path / "task-plan.json").write_text(
+        json.dumps({"tasks": ["a"]}), encoding="utf-8"
+    )
+
+    report = diagnose_artifact_root(tmp_path, strict=True)
+    assert report.exit_code == 1
+    assert report.primary_by_task["a"].code == DiagnosticCode.GT_DENSE_MODEL_UNAVAILABLE
+
+    evidence.write_text("tampered\n", encoding="utf-8")
+    malformed = diagnose_artifact_root(tmp_path, strict=True)
+    assert malformed.exit_code == 2
+    assert any("digest mismatch" in issue for issue in malformed.artifact_issues)
+
+
+def test_strict_diagnosis_rejects_missing_task_diagnostics(tmp_path: Path):
+    (tmp_path / "task-plan.json").write_text(
+        json.dumps({"tasks": ["planned-a", "planned-b"]}), encoding="utf-8"
+    )
+    journal = DiagnosticJournal(tmp_path / "one", task_id="planned-a")
+    journal.capability("dense_retrieval", CapabilityState.WORKING, "verified output")
+    journal.seal()
+
+    report = diagnose_artifact_root(tmp_path, strict=True)
+    assert report.exit_code == 2
+    assert "planned-b" in " ".join(report.artifact_issues)
+
+
+def test_strict_diagnosis_discovers_task_ids_plan(tmp_path: Path):
+    journal = DiagnosticJournal(tmp_path / "trial", task_id="planned")
+    journal.capability("receipt_writer", CapabilityState.WORKING, "verified journal")
+    journal.seal()
+    (tmp_path / "deepswe20-plan.json").write_text(
+        json.dumps({"task_ids": ["planned"]}), encoding="utf-8"
+    )
+    report = diagnose_artifact_root(tmp_path, strict=True)
+    assert report.exit_code == 0
+
+
+def test_a_recovered_warning_is_evidence_not_a_failed_run(tmp_path: Path):
+    """Severity is the fatal axis: WARNING means handled, not healthy-clean.
+
+    Run 34849119441 recorded one consequential WARNING - a paced 429 that
+    recovered inside the provider's own retry budget - beside the real
+    errors. The unhealthy check counted every event row, so a single
+    handled warning would have failed the gate even with every capability
+    WORKING: the consequential channel existed only to be fatal. ERROR
+    remains fatal, as does any required capability below WORKING.
+    """
+    journal = DiagnosticJournal(tmp_path / "trial", task_id="paced")
+    journal.record(
+        DiagnosticEvent.create(
+            code=DiagnosticCode.GT_PROVIDER_RATE_LIMIT, severity="WARNING",
+            phase="provider_retry_pacing", subsystem="provider",
+            capability="provider_transport", task_id="paced",
+            classification="consequential", cause="RateLimitError",
+            impact="provider_attempt_deferred",
+            recovery="paced_retry_within_provider_budget",
+            retryable=True, event_sequence=1,
+        )
+    )
+    journal.capability("receipt_writer", CapabilityState.WORKING, "verified journal")
+    journal.seal()
+    (tmp_path / "task-plan.json").write_text(
+        json.dumps({"tasks": ["paced"]}), encoding="utf-8"
+    )
+
+    report = diagnose_artifact_root(tmp_path, strict=True)
+    assert report.exit_code == 0
+    # The warning still shows as the task's noteworthy event - evidence,
+    # not silence - while the verdict stays healthy.
+    assert report.primary_by_task["paced"].code == DiagnosticCode.GT_PROVIDER_RATE_LIMIT
+
+
+def test_an_error_or_degraded_capability_still_fails_the_run(tmp_path: Path):
+    journal = DiagnosticJournal(tmp_path / "trial", task_id="paced")
+    journal.record(
+        DiagnosticEvent.create(
+            code=DiagnosticCode.GT_PROVIDER_RATE_LIMIT, severity="WARNING",
+            phase="provider_retry_pacing", subsystem="provider",
+            capability="provider_transport", task_id="paced",
+            classification="consequential", cause="RateLimitError",
+            impact="provider_attempt_deferred",
+            recovery="paced_retry_within_provider_budget",
+            retryable=True, event_sequence=1,
+        )
+    )
+    journal.record(
+        DiagnosticEvent.create(
+            code=DiagnosticCode.GT_GRAPH_REFRESH_FAILED, severity="ERROR",
+            phase="native_action", subsystem="graph",
+            capability="graph_freshness", task_id="paced",
+            classification="primary", cause="amend_refused:amend_failed:x",
+            impact="verified_claims_prohibited",
+            recovery="rebuild_graph_for_current_workspace_revision",
+            retryable=False, event_sequence=2,
+        )
+    )
+    journal.capability("dense_retrieval", CapabilityState.DEGRADED, "stale")
+    journal.seal()
+    (tmp_path / "task-plan.json").write_text(
+        json.dumps({"tasks": ["paced"]}), encoding="utf-8"
+    )
+
+    report = diagnose_artifact_root(tmp_path, strict=True)
+    assert report.exit_code == 1
+
+
+def test_strict_diagnosis_rejects_missing_plan_empty_capabilities_and_replay_tamper(
+    tmp_path: Path,
+):
+    journal = DiagnosticJournal(tmp_path / "trial", task_id="task")
+    paths = journal.seal()
+
+    no_plan = diagnose_artifact_root(tmp_path, strict=True)
+    assert no_plan.exit_code == 2
+    assert any("task plan" in issue for issue in no_plan.artifact_issues)
+    assert any("capability" in issue for issue in no_plan.artifact_issues)
+
+    (tmp_path / "task-plan.json").write_text(
+        json.dumps({"tasks": ["task"]}), encoding="utf-8"
+    )
+    replay = json.loads(paths.replay.read_text(encoding="utf-8"))
+    replay["diagnostics_sha256"] = "0" * 64
+    paths.replay.write_text(json.dumps(replay), encoding="utf-8")
+    tampered = diagnose_artifact_root(tmp_path, strict=True)
+    assert tampered.exit_code == 2
+    assert any("replay diagnostics digest mismatch" in issue for issue in tampered.artifact_issues)
+
+
+def test_packaged_cli_discovers_nested_healthy_artifact(tmp_path: Path):
+    journal = DiagnosticJournal(tmp_path / "deep" / "trial", task_id="healthy")
+    journal.capability("receipt_writer", CapabilityState.WORKING, "verified journal")
+    journal.seal()
+    (tmp_path / "task-plan.json").write_text(
+        json.dumps({"tasks": ["healthy"]}), encoding="utf-8"
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable, "-m", "scripts.diagnose_benchmark_run",
+            "--root", str(tmp_path), "--strict", "--write-summary",
+        ],
+        cwd=Path(__file__).parents[1], capture_output=True, text=True, timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["exit_code"] == 0
+    assert payload["tasks"] == [
+        {
+            "fingerprint": "",
+            "primary_diagnostic": "HEALTHY",
+            "recovery": "none",
+            "task_id": "healthy",
+        }
+    ]
+    assert (tmp_path / "diagnostic-summary.json").is_file()
+
+
+def test_failed_capabilities_are_named_at_the_end_of_the_task(tmp_path, monkeypatch, capsys):
+    """A capability that did not work must be visible when the task ends.
+
+    Refusing the run inside a receipt is not the same as telling the person
+    reading the result. Without this, a run whose language servers never came
+    up finishes looking normal and the reader has to reconstruct that GT ran
+    with less than GT has.
+    """
+    import scripts.diagnose_benchmark_run as diagnose
+
+    payload = {
+        "tasks": [{"task_id": "t", "primary_diagnostic": "none", "fingerprint": "a" * 40}],
+        "capabilities": [
+            # refused/degraded are what capability() derives and what the
+            # renderer keys on, so the fixture carries them rather than
+            # standing in for them with verified alone - UNEXERCISED also has
+            # verified False and must not render as a failure.
+            {"capability": "dense_retrieval", "state": "WORKING", "required": True,
+             "verified": True, "refused": False, "degraded": False,
+             "triggered": True, "evidence": "dense_index_ready_query_ready"},
+            {"capability": "lsp_promotion", "state": "FAILED", "required": True,
+             "verified": False, "refused": True, "degraded": False,
+             "triggered": True, "evidence": "promotion_no_servers:servers=0"},
+            # A capability asked to be off: not triggered, and not required.
+            {"capability": "gt_engine_enabled", "state": "UNEXERCISED",
+             "required": False, "verified": False, "refused": False,
+             "degraded": False, "triggered": False,
+             "evidence": "gt_disabled_by_configuration:off"},
+        ],
+    }
+
+    class _Report:
+        diagnostics: list = []
+        exit_code = 0
+
+        def to_mapping(self):
+            return payload
+
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setattr(diagnose, "diagnose_artifact_root", lambda *a, **k: _Report())
+    diagnose.main(["--root", str(tmp_path)])
+
+    stderr = capsys.readouterr().err
+    assert "[GT][CAPABILITY][FAILED] lsp_promotion" in stderr
+    assert "dense_retrieval" not in stderr  # working capabilities are not noise
+
+    rendered = summary.read_text(encoding="utf-8")
+    assert "### Capabilities" in rendered
+    assert "| lsp_promotion | FAILED | yes | **NO** |" in rendered
+    assert "**These did not work: lsp_promotion**" in rendered
+    # A capability deliberately switched off is shown in the table but is not
+    # named as a failure and raises no CI error.
+    assert "gt_engine_enabled" not in stderr
+    # Worked is tri-valued: never asked to run is not a failure to run.
+    assert "| gt_engine_enabled | UNEXERCISED | no | n/a |" in rendered

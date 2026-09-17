@@ -26,10 +26,32 @@ from typing import Any, Callable
 
 # Add src to path for shared config imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
-from groundtruth.config.evidence_markers import has_gt_evidence, L3_MARKERS
-from groundtruth.config.evidence_markers import passes_relevance_gate, identifier_tokens
+try:
+    from groundtruth.config.evidence_markers import has_gt_evidence, L3_MARKERS
+    from groundtruth.config.evidence_markers import passes_relevance_gate, identifier_tokens
+except ImportError:
+    if os.environ.get("GT_BASELINE", "0") != "1":
+        raise
 
-import cost_tracking  # noqa: F401
+    # The control arm deliberately excludes the GroundTruth package. Keep the
+    # wrapper importable so it can delegate to unmodified OpenHands without
+    # accidentally activating any evidence path.
+    L3_MARKERS: tuple[str, ...] = ()
+
+    def has_gt_evidence(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    def passes_relevance_gate(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    def identifier_tokens(_value: str) -> set[str]:
+        return set()
+
+try:
+    import cost_tracking  # noqa: F401
+except ImportError:
+    if os.environ.get("GT_BASELINE", "0") != "1":
+        raise
 
 # Process-start epoch captured at import. Used as the legitimacy job-start
 # fallback when GT_JOB_STARTED is not exported by the harness: any GT artifact

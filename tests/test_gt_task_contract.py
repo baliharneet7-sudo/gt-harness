@@ -4,8 +4,6 @@ import os
 
 import pytest
 
-from gt_engine.task_contract import TaskResourceRole, extract_task_resources
-
 try:
     import groundtruth  # noqa: F401
 
@@ -15,38 +13,6 @@ except ImportError:
 
 
 requires_gt = pytest.mark.skipif(not HAVE_GT, reason="groundtruth not installed")
-
-
-def test_task_resources_use_clause_local_roles_for_artifact_task():
-    resources = {
-        item.path: item
-        for item in extract_task_resources(
-            "I have a decompressor in /app/decomp.c. It reads compressed data "
-            "from stdin. I also have /app/data.txt. Write me /app/data.comp so "
-            "that cat data.comp | /app/decomp gives exactly data.txt."
-        )
-    }
-
-    assert resources["decomp.c"].role is TaskResourceRole.REFERENCE
-    assert resources["decomp.c"].mutable is False
-    assert resources["data.txt"].role is TaskResourceRole.INPUT
-    assert resources["data.comp"].role is TaskResourceRole.OUTPUT
-    assert resources["decomp"].role is TaskResourceRole.EXECUTABLE
-
-
-def test_task_resources_recognize_greenfield_source_and_large_inputs():
-    resources = {
-        item.path: item
-        for item in extract_task_resources(
-            "Write /app/gpt2.c. Compile it to /app/a.out. It must read "
-            "/app/gpt2-124M.ckpt and /app/vocab.bpe."
-        )
-    }
-
-    assert resources["gpt2.c"].role is TaskResourceRole.OUTPUT
-    assert resources["a.out"].role is TaskResourceRole.EXECUTABLE
-    assert resources["gpt2-124M.ckpt"].role is TaskResourceRole.INPUT
-    assert resources["vocab.bpe"].role is TaskResourceRole.INPUT
 
 
 SANITIZE_TASK = """\
@@ -79,6 +45,53 @@ Make sure it supports the following functionality.
 Call your implementation `HeadlessTerminal(BaseTerminal)` and put it in
 `/app/headless_terminal.py`. Install dependencies into the system python.
 """
+
+
+_DYNACONF_ISSUE = """Please solve this issue: [bug] using `@merge` with comma separated values, does not infer type
+
+```py
+settings = Dynaconf(
+    data=[1,2,3]
+)
+```
+
+```bash
+APP_DATA="@merge 4,5,6" dynaconf list -k DATA
+```
+
+Result
+
+```
+DATA<list>: [1, 2, 3, "4", "5", "6"]
+```
+
+Expected
+
+```
+DATA<list>: [1, 2, 3, 4, 5, 6]
+```
+
+You are working in the `dynaconf/dynaconf` repository, checked out at `/testbed`. Investigate the issue described above and modify the code under `/testbed` to resolve it.
+"""
+
+
+@requires_gt
+def test_contract_never_mints_a_section_marker_obligation():
+    """Run 34925475946 (dynaconf-1241): extract_spec_v2 classified the bare
+    "Expected" line as normative and the contract minted obl-cea23dd4b87e from
+    it - a behavior predicate with no expected_relation, so no observation
+    could ever satisfy it. It stayed unmet for all 99 iterations and the run
+    attested product_unmet_predicates on a solved task. The ledger's marker
+    table moved here so the contract and the plan share one definition."""
+    from gt_engine.task_contract import extract_task_contract
+
+    contract = extract_task_contract(_DYNACONF_ISSUE)
+    texts = {item.text.strip().lower().rstrip(":.") for item in contract.obligations}
+    assert "expected" not in texts
+    assert "result" not in texts
+    assert not any(
+        "working in" in t or "investigate the issue" in t for t in texts
+    )
 
 
 @requires_gt
@@ -373,8 +386,13 @@ def test_graph_receipt_names_all_trustworthy_surfaces(tmp_path):
         "assertions",
         "cochanges",
         "cochange_sets",
+        "communities",
+        "community_members",
+        "processes",
+        "process_steps",
         "file_hashes",
         "project_meta",
+        "routes",
     }
     assert receipt["available"] is False
 
@@ -588,7 +606,7 @@ def test_unmapped_exit_zero_does_not_verify_contract(tmp_path, monkeypatch):
 
 
 @requires_gt
-def test_full_repository_test_run_verifies_complete_contract(tmp_path, monkeypatch):
+def test_unbound_full_repository_run_does_not_verify_complete_contract(tmp_path, monkeypatch):
     from gt_engine.bridge import GTBridge
 
     monkeypatch.setenv("GT_GATEWAY", "1")
@@ -621,8 +639,8 @@ def test_full_repository_test_run_verifies_complete_contract(tmp_path, monkeypat
         False,
     )
 
-    assert bridge.submit_probe() is None
-    assert bridge._obligation_coverage()["unmet"] == []
+    assert bridge.submit_probe() is not None
+    assert bridge._obligation_coverage()["unmet"]
 
 
 @requires_gt
@@ -679,7 +697,7 @@ def test_later_edit_invalidates_prior_predicate_receipts(tmp_path, monkeypatch):
     bridge = GTBridge(
         repo_root=str(tmp_path),
         graph_db=None,
-        issue_text="Implement helper and keep its callers compatible.",
+        issue_text="Implement helper: the value must start with `urn:gt:`.",
     )
     assert bridge.task_start()
     bridge.enrich(
@@ -693,7 +711,8 @@ def test_later_edit_invalidates_prior_predicate_receipts(tmp_path, monkeypatch):
     bridge.enrich(
         "bash",
         {"command": "python -m pytest -q"},
-        "3 passed in 0.08s",
+        "GT_SEMANTIC_ASSERT relation=starts_with literal_sha256="
+        + __import__("hashlib").sha256(b"urn:gt:").hexdigest() + " result=pass",
         False,
     )
     assert not bridge._obligation_coverage()["unmet"]
@@ -1001,7 +1020,7 @@ def test_render_obligation_delta_repairs_unshipped_contract():
     delta, delta_ids = render_obligation_delta(contract, shipped, max_chars=500)
     assert delta_ids
     assert set(delta_ids).isdisjoint(shipped)
-    assert "Remaining task requirements" in delta
+    assert "remaining contract" in delta
 
 
 @requires_gt
@@ -1040,3 +1059,35 @@ def test_bridge_credits_repository_wide_negative_content_search(
     )
 
     assert bridge._predicate_receipts
+
+
+def test_semantic_relation_distinguishes_startswith_from_contains():
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.verification_contract import (
+        compile_obligation_predicates,
+        evaluate_passing_observation,
+    )
+
+    contract = TaskContract(
+        "code_behavior",
+        (Obligation("prefix", "The value starts with `urn:gt:`.", "task"),),
+    )
+    predicates = compile_obligation_predicates(contract)
+    predicate = predicates["prefix"]
+    assert (predicate.operator, predicate.literal, predicate.expected_relation) == (
+        "startsWith", "urn:gt:", "starts_with"
+    )
+
+    wrong = evaluate_passing_observation(
+        contract, predicates, "pytest -q", "assert contains('urn:gt:') PASSED",
+        action_index=1,
+    )
+    literal_sha = __import__("hashlib").sha256(b"urn:gt:").hexdigest()
+    right = evaluate_passing_observation(
+        contract, predicates, "pytest -q",
+        f"GT_SEMANTIC_ASSERT relation=starts_with literal_sha256={literal_sha} result=pass",
+        action_index=2,
+    )
+    assert wrong == ()
+    assert len(right) == 1
+    assert right[0].coverage_basis == "exact_operator_literal_assertion"

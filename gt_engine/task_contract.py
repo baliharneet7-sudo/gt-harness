@@ -15,49 +15,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from gt_engine.language_registry import is_validation_source
-
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?P<text>.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*```")
 _DIRECTIVE_RE = re.compile(
-    r"(?i)\b(?:must|should|required|ensure|implement|create|write|install|support|"
+    r"(?i)\b(?:must|should|required|ensure|implement|create|install|support|"
     r"supports|has support|keep|do not|don't|never|be careful|has to|need to|"
     r"make sure|call your|put it in|produce|generate|replace|remove|reconstruct|"
     r"source the|mimics?)\b"
 )
-
-_HARNESS_SCAFFOLD_HEADINGS = frozenset(
-    {
-        "recommended workflow",
-        "command execution rules",
-        "useful command examples",
-    }
-)
-_HARNESS_SCAFFOLD_START_RE = re.compile(
-    r"(?i)^you can execute bash commands and edit files to implement the necessary changes\.?$"
-)
-
-
-def _task_issue_core(issue_text: str) -> str:
-    """Remove host-supplied agent instructions from the task's normative text.
-
-    Terminal-Bench appends a generic workflow, tool protocol, submit marker,
-    and command examples to the actual task.  Those rows govern the host loop;
-    they are not task completion predicates.  The boundary is structural and
-    deterministic rather than benchmark-task-specific.
-    """
-
-    kept: list[str] = []
-    for raw in (issue_text or "").splitlines():
-        stripped = raw.strip()
-        if _HARNESS_SCAFFOLD_START_RE.fullmatch(stripped):
-            break
-        if stripped.startswith("#"):
-            heading = stripped.lstrip("#").strip().lower()
-            if heading in _HARNESS_SCAFFOLD_HEADINGS:
-                break
-        kept.append(raw)
-    return "\n".join(kept).strip()
 _CONTENT_SCAN_RE = re.compile(
     r"(?i)\b(?:saniti[sz]e|api keys?|credentials?|secrets?|sensitive values?|"
     r"remove all|replace the actual value|repository after)\b"
@@ -117,25 +82,6 @@ class Obligation:
     subjects: tuple[str, ...] = ()
 
 
-class TaskResourceRole(StrEnum):
-    """The mechanically supported relationship between a task and one path."""
-
-    INPUT = "input"
-    OUTPUT = "output"
-    REFERENCE = "reference"
-    EXECUTABLE = "executable"
-    UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True)
-class TaskResource:
-    path: str
-    role: TaskResourceRole
-    mutable: bool
-    source_span: str
-    confidence: float
-
-
 class TaskMode(StrEnum):
     PATCH = "PATCH"
     BUILD_INSTALL = "BUILD_INSTALL"
@@ -161,260 +107,6 @@ class TaskContract:
     obligations: tuple[Obligation, ...]
     task_mode: TaskMode = TaskMode.PATCH
     predicates: tuple[TypedPredicate, ...] = ()
-    resources: tuple[TaskResource, ...] = ()
-
-
-_RESOURCE_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:/app/)?(?:[A-Za-z0-9_.-]+/)*"
-    r"[A-Za-z0-9_.-]+\.(?:jsonl?|csv|txt|md|out|comp|py|c|cc|cpp|h|hpp|"
-    r"js|jsx|ts|tsx|java|rs|go|rb|php|sh|scm|toml|ya?ml|cbl|cob|cpy|"
-    r"dat|ckpt|bpe)\b"
-)
-_ABSOLUTE_RESOURCE_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])/app/[A-Za-z0-9_./-]+"
-)
-_EXTERNAL_RESOURCE_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])/(?:(?:etc/nginx)|(?:var/log/nginx))/"
-    r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*"
-)
-_SHEBANG_RESOURCE_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:(?:/app/)|(?:[A-Za-z0-9_.-]+/))+"
-    r"[A-Za-z0-9_-]+(?!\.[A-Za-z0-9_-]+)"
-)
-_OUTPUT_CUE_RE = re.compile(
-    r"(?i)\b(?:write|create|produce|generate|save|emit|deliver|output)\b"
-)
-_INPUT_CUE_RE = re.compile(
-    r"(?i)\b(?:read|input|incoming|source|provided|existing|unchanged)\b"
-)
-
-
-def _resource_path(raw: str) -> str:
-    path = str(raw or "").strip("`'\".,:;()[]{} ").replace("\\", "/")
-    if path.startswith("/app/"):
-        return path[5:]
-    if path.startswith("./"):
-        return path[2:]
-    return path
-
-
-def _resource_occurrences(line: str) -> list[tuple[int, str]]:
-    found: dict[tuple[int, str], None] = {}
-    for pattern in (_RESOURCE_PATH_RE, _ABSOLUTE_RESOURCE_RE, _EXTERNAL_RESOURCE_RE):
-        for match in pattern.finditer(line or ""):
-            cleaned = _resource_path(match.group(0))
-            if cleaned and " " not in cleaned:
-                found[(match.start(), cleaned)] = None
-    return sorted(found, key=lambda item: item[0])
-
-
-def task_external_paths(issue_text: str) -> tuple[str, ...]:
-    """Return explicitly named, allowlisted paths outside ``/app``.
-
-    Only the known service roots are eligible.  A missing or malformed path
-    remains absent rather than turning the sensor into a broad filesystem
-    crawler.
-    """
-
-    core = _task_issue_core(issue_text)
-    paths: list[str] = []
-    seen: set[str] = set()
-    for match in _EXTERNAL_RESOURCE_RE.finditer(core):
-        path = match.group(0).rstrip(".,:;()[]{}'\"")
-        if path and path not in seen:
-            seen.add(path)
-            paths.append(path)
-    return tuple(paths)
-
-
-def task_shebang_paths(issue_text: str) -> tuple[str, ...]:
-    """Return explicitly described extensionless script paths only."""
-
-    paths: list[str] = []
-    seen: set[str] = set()
-    for line in _task_issue_core(issue_text).splitlines():
-        if not re.search(r"(?i)\b(?:script|shebang|interpreter|python|ruby|bash)\b", line):
-            continue
-        for match in _SHEBANG_RESOURCE_RE.finditer(line):
-            path = _resource_path(match.group(0))
-            if path and path not in seen and "." not in path.rsplit("/", 1)[-1]:
-                seen.add(path)
-                paths.append(path)
-    return tuple(paths)
-
-
-def _direct_output_score(prefix: str, path: str) -> int:
-    escaped = re.escape(path.rsplit("/", 1)[-1])
-    if re.search(
-        rf"(?is)\b(?:write|create|produce|generate|save|emit|deliver)\b"
-        rf"(?:\s+\S+){{0,8}}\s+(?:/app/)?(?:[\w.-]+/)*{escaped}\b",
-        prefix[-220:],
-    ):
-        return 90
-    tail = prefix[-180:]
-    cue = list(_OUTPUT_CUE_RE.finditer(tail))
-    if cue and not re.search(r"[.!?]\s", tail[cue[-1].end() :]):
-        return 90
-    return 0
-
-
-def _resource_clause(line: str, offset: int) -> tuple[str, int]:
-    """Return the punctuation-bounded clause containing one path occurrence."""
-
-    boundaries = [
-        match.end()
-        for match in re.finditer(r"[.!?;](?:\s+|$)", line or "")
-    ]
-    start = max((boundary for boundary in boundaries if boundary <= offset), default=0)
-    end = min((boundary for boundary in boundaries if boundary > offset), default=len(line))
-    return line[start:end].strip(), max(0, offset - start)
-
-
-def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
-    """Extract typed path roles without guessing across ambiguous task prose.
-
-    Markdown frequently wraps the verb and its paths onto separate lines.  A
-    small flow state carries an explicit input/output cue across that block;
-    structural ``input_data``/``output_data`` paths and direct verbs override
-    the flow.  Conflicting low-confidence evidence abstains to UNKNOWN.
-    """
-
-    core = _task_issue_core(issue_text)
-    scores: dict[str, dict[TaskResourceRole, int]] = {}
-    spans: dict[str, str] = {}
-    order: list[str] = []
-    section_role = TaskResourceRole.UNKNOWN
-    flow_role = TaskResourceRole.UNKNOWN
-
-    for raw in core.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            flow_role = TaskResourceRole.UNKNOWN
-            continue
-        heading = re.match(r"^#{1,6}\s+(?P<name>.+?)\s*$", stripped)
-        if heading:
-            name = heading.group("name").strip().lower()
-            section_role = (
-                TaskResourceRole.OUTPUT
-                if any(word in name for word in ("deliverable", "output", "result"))
-                else TaskResourceRole.INPUT
-                if any(word in name for word in ("input", "source data"))
-                else TaskResourceRole.UNKNOWN
-            )
-            flow_role = section_role
-            continue
-
-        output_cue = bool(_OUTPUT_CUE_RE.search(stripped))
-        input_cue = bool(_INPUT_CUE_RE.search(stripped))
-        if output_cue:
-            flow_role = TaskResourceRole.OUTPUT
-        elif input_cue:
-            flow_role = TaskResourceRole.INPUT
-
-        for offset, path in _resource_occurrences(raw):
-            if path not in scores:
-                scores[path] = {}
-                spans[path] = stripped[:500]
-                order.append(path)
-            row = scores[path]
-            normalized = path.lower()
-            clause, clause_offset = _resource_clause(raw, offset)
-            prefix = clause[: clause_offset + len(path)]
-            basename = re.escape(path.rsplit("/", 1)[-1])
-            clause_output = bool(_OUTPUT_CUE_RE.search(clause))
-            clause_input = bool(_INPUT_CUE_RE.search(clause))
-
-            def add(
-                role: TaskResourceRole,
-                score: int,
-                target: dict[TaskResourceRole, int] = row,
-            ) -> None:
-                target[role] = max(score, target.get(role, 0))
-
-            if "/input_data/" in f"/{normalized}" or normalized.startswith("input_data/"):
-                add(TaskResourceRole.INPUT, 100)
-            if "/output_data/" in f"/{normalized}" or normalized.startswith("output_data/"):
-                add(TaskResourceRole.OUTPUT, 100)
-            if re.search(rf"(?i)\bgives\s+exactly\s+(?:/app/)?(?:[\w.-]+/)*{basename}\b", clause):
-                add(TaskResourceRole.INPUT, 95)
-            if re.search(
-                rf"(?i)\bkeep\b[^.\n]{{0,100}}{basename}"
-                rf"[^.\n]{{0,60}}\bunchanged\b",
-                clause,
-            ):
-                add(TaskResourceRole.INPUT, 100)
-            direct_output = _direct_output_score(prefix, path)
-            if direct_output:
-                add(TaskResourceRole.OUTPUT, direct_output)
-            if re.search(
-                rf"(?i)\b(?:read|have|provided|existing)\b(?:\s+\S+){{0,8}}\s+"
-                rf"(?:/app/)?(?:[\w.-]+/)*{basename}\b",
-                prefix[-220:],
-            ):
-                add(TaskResourceRole.INPUT, 80)
-            if is_validation_source(path) and re.search(
-                rf"(?i)\b(?:have|given|provided|existing|located)\b[^.\n]{{0,100}}"
-                rf"(?:/app/)?(?:[\w.-]+/)*{basename}\b",
-                clause,
-            ):
-                add(TaskResourceRole.REFERENCE, 90)
-            if re.search(
-                rf"(?i)\bcompile\b[^.\n]{{0,80}}\b(?:to|as)\s+"
-                rf"(?:/app/)?(?:[\w.-]+/)*{basename}\b",
-                clause,
-            ):
-                add(TaskResourceRole.EXECUTABLE, 95)
-            if re.search(
-                rf"(?i)\b(?:executable|decompressor|compiler|interpreter)\b"
-                rf"(?:\s+\S+){{0,8}}\s+(?:/app/)?(?:[\w.-]+/)*{basename}\b",
-                prefix[-220:],
-            ):
-                add(
-                    TaskResourceRole.REFERENCE
-                    if is_validation_source(path)
-                    else TaskResourceRole.EXECUTABLE,
-                    85,
-                )
-            if not re.search(r"\.[A-Za-z0-9]+$", path) and re.search(
-                rf"(?i)(?:\brun(?:ning)?\b|\|)\s+(?:/app/)?(?:[\w.-]+/)*{basename}\b",
-                clause,
-            ):
-                # Shell position is mechanically stronger than a prose cue
-                # earlier in the same clause (for example ``Write data.comp
-                # ... | /app/decomp``).  It must win instead of tying the
-                # output score and degrading to UNKNOWN.
-                add(TaskResourceRole.EXECUTABLE, 100)
-            if section_role is not TaskResourceRole.UNKNOWN:
-                add(section_role, 60)
-            local_flow = (
-                TaskResourceRole.OUTPUT
-                if clause_output
-                else TaskResourceRole.INPUT
-                if clause_input
-                else flow_role
-            )
-            if local_flow is not TaskResourceRole.UNKNOWN:
-                add(local_flow, 50)
-            if not row:
-                add(TaskResourceRole.UNKNOWN, 1)
-
-    resources: list[TaskResource] = []
-    for path in order:
-        ranked = sorted(scores[path].items(), key=lambda item: (-item[1], item[0].value))
-        role, score = ranked[0]
-        if len(ranked) > 1 and ranked[1][1] == score and ranked[1][0] is not role:
-            role = TaskResourceRole.UNKNOWN
-            score = 0
-        resources.append(
-            TaskResource(
-                path=path,
-                role=role,
-                mutable=role is TaskResourceRole.OUTPUT,
-                source_span=spans[path],
-                confidence=min(1.0, score / 100.0),
-            )
-        )
-    return tuple(resources)
 
 
 def _clean(text: str) -> str:
@@ -460,6 +152,47 @@ _WORKFLOW_STEP_RE = re.compile(
     r"^\s*\d+[.)]\s*(?:read|learn|recall|identify|fix|create|run|verify|"
     r"check|learn or recall|find|locate|search|use|install|setup)\b"
 )
+# Harness boilerplate: the benchmark wrapper's own instructions about where the
+# checkout lives and what to do in it. These minted plan rows on dynaconf-1241
+# (run 34919574013) - "You are working in the `dynaconf/dynaconf` repository,
+# checked out at `/testbed`." and "Investigate the issue described above and
+# modify the code under `/testbed` to resolve it." both became requirements
+# bound to checks, and a process instruction can never be proven by a test.
+_HARNESS_PREAMBLE_RE = re.compile(
+    r"(?i)(?:^you are working (?:in|on|inside)\b.*\brepositor|"
+    r"^investigate the issue\b|"
+    r"^please investigate\b|"
+    r"\bchecked out at\b|"
+    r"^modify the code under\b|"
+    r"^resolve the issue\b)"
+)
+# Markers of an agent-process directive: instructions about the working and
+# submission workflow (where to work, when to commit, what to open) rather than
+# behaviour the code must have. One marker inside a longer technical sentence is
+# not enough -- "the CLI must open a pull request" is a real requirement -- but
+# a line built from two or more of them is never normative content. Measured:
+# every DeepSWE task text ends with "IMPORTANT: Please work on this in a new
+# branch from main and commit everything when you are done." (4 markers), which
+# landed as an unprovable plan row and made `verified` unreachable on all 20.
+_PROCESS_MARKERS = (
+    r"\bwork on this\b",
+    r"\bnew branch\b",
+    r"\bwhen you are done\b",
+    r"\bcommit everything\b",
+    r"\bopen a pull request\b",
+    r"\bsubmit (?:your|the)\s+(?:work|changes|patch|solution|assignment)\b",
+    r"\bpush (?:your|the)\s+(?:work|changes|branch|commits?)\b",
+)
+
+
+def _is_process_directive(text: str) -> bool:
+    low = text or ""
+    markers = sum(
+        1 for pattern in _PROCESS_MARKERS if re.search(pattern, low, re.IGNORECASE)
+    )
+    return markers >= 2 or bool(
+        re.search(r"\bwork on this in a\b", low, re.IGNORECASE)
+    )
 
 
 def _is_workflow_noise(text: str) -> bool:
@@ -475,7 +208,51 @@ def _is_workflow_noise(text: str) -> bool:
         return True
     if _CATALOG_NOISE_RE.search(low):
         return True
+    if _HARNESS_PREAMBLE_RE.search(low):
+        return True
     return bool(_WORKFLOW_STEP_RE.match(low))
+
+
+# A line that is only a section marker in issue prose. The heading patterns
+# catch "## Expected" and "Expected:"; they do NOT catch a bare "Expected" or
+# "Result" line, which then minted rows and obligations bound to unprovable
+# checks. Measured twice on dynaconf-1241: run 34919574013 put "Expected" and
+# "Result" into the persistent plan (bound to the whole suite and to three
+# same-named app_test.py files); run 34925475946 then put "Expected" into the
+# task CONTRACT via extract_spec_v2's normative region, where it compiled to
+# a behavior predicate with no expected_relation - structurally
+# undischargable, unmet on every tree, verified unreachable. The two
+# extractors must share one definition of "not a requirement" or a line one
+# rejects becomes an orphan predicate the other can never link.
+_SECTION_MARKER_WORDS = frozenset({
+    "expected", "actual", "result", "results", "output", "outcome",
+    "reproduction", "repro", "reproducer", "description", "summary",
+    "context", "problem", "issue", "solution", "note", "notes",
+    "environment", "version", "versions", "log", "logs", "traceback",
+    "error", "errors", "example", "examples", "motivation", "related",
+    "references", "screenshot", "screenshots", "demo", "demonstration",
+    "question", "answer", "goal", "setup", "dependency", "dependencies",
+    "evidence", "observation", "impact", "severity", "workaround",
+    "background", "details", "proposed", "rationale",
+})
+_SECTION_MARKER_PHRASE_RE = re.compile(
+    r"(?i)^(?:expected|actual|current|desired|intended|observed)\s+"
+    r"(?:behaviou?r|results?|output|response|error|issue|value)\.?$"
+    r"|^(?:steps? to reproduce|how to reproduce|to reproduce|"
+    r"minimal (?:reproducible )?example|"
+    r"additional (?:context|information)|related issues?|"
+    r"what (?:should|was expected to|actually)\s+\w+.*)\.?$"
+)
+
+
+def _section_marker_name(text: str) -> str | None:
+    """The marker label when a cleaned line is only a section marker, else None."""
+    low = text.strip().lower().rstrip(":.")
+    if low in _SECTION_MARKER_WORDS:
+        return low
+    if _SECTION_MARKER_PHRASE_RE.match(low):
+        return low
+    return None
 
 
 def _markdown_candidates(issue_text: str) -> list[tuple[str, str]]:
@@ -652,8 +429,7 @@ def _typed_predicates(
 
 def extract_task_contract(issue_text: str) -> TaskContract:
     """Extract the complete bounded task contract without requiring graph.db."""
-    normative_text = _task_issue_core(issue_text)
-    combined = _engine_candidates(normative_text) + _markdown_candidates(normative_text)
+    combined = _engine_candidates(issue_text) + _markdown_candidates(issue_text)
     seen: set[str] = set()
     obligations: list[Obligation] = []
     for source, raw in combined:
@@ -670,6 +446,7 @@ def extract_task_contract(issue_text: str) -> TaskContract:
             or low.endswith("replace it with placeholder values as follows")
             or _leaks_test_identity(text)
             or _is_workflow_noise(text)
+            or _section_marker_name(text) is not None
         ):
             continue
         # Do not add nested copies of a row already retained.
@@ -680,19 +457,18 @@ def extract_task_contract(issue_text: str) -> TaskContract:
         obligations.append(
             Obligation(
                 obligation_id=f"obl-{digest}",
-                text=text[:500],
+                text=text,
                 source=source,
                 subjects=_subjects(text),
             )
         )
     frozen = tuple(obligations)
-    mode = _task_mode(normative_text)
+    mode = _task_mode(issue_text)
     return TaskContract(
-        role=_role(normative_text),
+        role=_role(issue_text),
         obligations=frozen,
         task_mode=mode,
         predicates=_typed_predicates(frozen, mode),
-        resources=extract_task_resources(normative_text),
     )
 
 
@@ -712,9 +488,17 @@ def render_task_contract(
             break
         lines.append(row)
         shipped.append(item.obligation_id)
-    if not shipped:
-        return "", ()
     remaining = len(contract.obligations) - len(shipped)
+    if not shipped:
+        # Even a contract whose rows all exceed the surface is a fact the
+        # model should see: requirements exist and gate submit.
+        note = (
+            f"- GT retained {remaining} requirement(s) for submit "
+            "verification; none fit the byte surface."
+        )
+        if remaining and len("\n".join([*lines, note])) <= max_chars:
+            return "\n".join([*lines, note]), ()
+        return "", ()
     if remaining:
         note = f"- GT retained {remaining} additional requirement(s) for submit verification."
         if len("\n".join([*lines, note])) <= max_chars:
@@ -736,7 +520,7 @@ def render_obligation_delta(
     shipped = set(shipped_ids)
     remaining = [item for item in contract.obligations
                  if item.obligation_id not in shipped]
-    header = "Remaining task requirements:"
+    header = "GT remaining contract obligations:"
     lines = [header]
     selected: list[str] = []
     for item in remaining:
@@ -749,6 +533,39 @@ def render_obligation_delta(
     if not selected:
         return "", ()
     lines.append("Check these obligations before submit; do not assume omitted rows are satisfied.")
+    return "\n".join(lines)[:max_chars], tuple(selected)
+
+
+def render_obligation_transitions(
+    contract: TaskContract,
+    transitions: Iterable[tuple[str, str]],
+    *,
+    max_chars: int,
+) -> tuple[str, tuple[str, ...]]:
+    """Render only obligation status changes since the last delivered delta.
+
+    The full unmet checklist is delivered with the contract itself; a delta
+    that re-lists every unmet row on each invalidation cycle re-sends the
+    identical bytes the model already has. `transitions` is an iterable of
+    ``(obligation_id, annotation)`` pairs in the order they should surface.
+    """
+    by_id = {item.obligation_id: item for item in contract.obligations}
+    lines = ["GT contract obligation changes:"]
+    selected: list[str] = []
+    for obligation_id, annotation in transitions:
+        item = by_id.get(obligation_id)
+        if item is None:
+            continue
+        box = "[x]" if annotation == "satisfied" else "[ ]"
+        row = f"- {box} {item.text} ({annotation})"
+        candidate = "\n".join([*lines, row])
+        if len(candidate) > max_chars:
+            break
+        lines.append(row)
+        selected.append(obligation_id)
+    if not selected:
+        return "", ()
+    lines.append("Unchanged obligations keep their last reported state.")
     return "\n".join(lines)[:max_chars], tuple(selected)
 
 

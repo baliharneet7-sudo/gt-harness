@@ -21,6 +21,7 @@ def test_direct_feature_registry_is_exact_and_complete():
 
     assert facts == {
         "caller_contract",
+        "cochange_prior",
         "covering_red",
         "def_partition",
         "localization",
@@ -39,8 +40,11 @@ def test_direct_feature_registry_is_exact_and_complete():
         "GT_LOC_RESLOT",
         "GT_PATCH_DELTA",
         "GT_SS_SUBMIT_RED",
+        "persistent_plan",
+        "plan_gate",
+        "select_catalog",
     }
-    assert len(DIRECT_FEATURES) == 17
+    assert len(DIRECT_FEATURES) == 21
     assert all(spec["boundaries"] for spec in DIRECT_FEATURES.values())
     assert all(spec["trigger"] for spec in DIRECT_FEATURES.values())
     assert all(spec["intended_action"] for spec in DIRECT_FEATURES.values())
@@ -53,6 +57,10 @@ def test_direct_feature_registry_is_exact_and_complete():
         "GT_HYPOTHESIS": "recovery",
         "GT_CERT_DELIVERY": "submit_refusal",
     }
+
+
+def test_cochange_evidence_binds_to_dark_trigger_identity():
+    assert feature_for_evidence("cochange_partner") == "cochange_prior"
 
 
 def test_attribution_trace_is_append_only_hash_chained(tmp_path):
@@ -100,6 +108,7 @@ def test_groundtruth_registry_aliases_map_to_the_same_17_identities():
     assert feature_for_evidence("caller_contract_search") == "caller_contract"
     assert feature_for_evidence("coherence_collapse") == "recovery"
     assert feature_for_evidence("obligation_unexercised") == "obligations"
+    assert feature_for_evidence("select_catalog") == "select_catalog"
 
 
 def test_trace_integrity_rejects_mutated_payload(tmp_path):

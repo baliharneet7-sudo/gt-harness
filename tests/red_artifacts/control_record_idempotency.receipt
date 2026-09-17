@@ -1,0 +1,10 @@
+format=gt.fixture-red.v1
+unit=minimal-existing-record-id-idempotency
+base_sha=97af65c0a8de6f1d48609f897718e8eeffbc464e
+fixture_path=tests/red_artifacts/run_control_record_red.py
+fixture_sha256=cf68b2bf5715f489868203dfc4bdc1a9a1fd7e9a71cbe94bac90d828c139c381
+command=python tests/red_artifacts/run_control_record_red.py
+exit_code=1
+output_path=tests/red_artifacts/control_record_idempotency.out
+output_sha256=11bcb037ea676c07d820529af16c4f1dc0ecd9c4f8285543c0593ed8e55d77b8
+failure=ModuleNotFoundError: No module named scripts.linear_control_record

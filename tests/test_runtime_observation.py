@@ -2,14 +2,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
+
+import pytest
 
 from gt_engine.runtime_observation import (
     capture_workspace,
+    classify_execution_outcome,
     certify_observation_equivalence,
     compile_execution_evidence,
     compile_transaction_artifacts,
     diff_workspace,
 )
+
+
+def test_pipeline_retains_observed_failure_without_certifying_segment_exit():
+    evidence = compile_execution_evidence(
+        command="pytest -q | tee test.log", output="1 failed\n", returncode=0,
+        action_id=1, repository_revision="source-revision",
+    )
+    assert evidence is not None
+    assert evidence.outcome == "unknown"
+    assert evidence.observed_test_outcome == "fail"
+    assert json.loads(evidence.canonical_bytes())["observed_test_outcome"] == "fail"
 
 
 def test_workspace_revision_changes_and_multifile_transaction_is_canonical(tmp_path):
@@ -32,6 +48,107 @@ def test_workspace_revision_changes_and_multifile_transaction_is_canonical(tmp_p
     assert transaction.transaction_sha256 == hashlib.sha256(
         transaction.canonical_bytes(include_transaction_hash=False)
     ).hexdigest()
+
+
+def test_workspace_snapshot_excludes_gitignored_generated_output(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("generated-out/\n", encoding="utf-8")
+    (tmp_path / "source.py").write_text("value = 1\n", encoding="utf-8")
+    generated = tmp_path / "generated-out"
+    generated.mkdir()
+    (generated / "source.js").write_text("compiled\n", encoding="utf-8")
+
+    snapshot = capture_workspace(tmp_path)
+
+    paths = {item.path for item in snapshot.files}
+    assert ".gitignore" in paths
+    assert "source.py" in paths
+    assert "generated-out/source.js" not in paths
+
+
+def test_git_snapshot_excludes_untracked_runtime_cache_but_keeps_sources(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    source = tmp_path / "module.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    neighboring = tmp_path / "new_module.py"
+    neighboring.write_text("neighbor = 2\n", encoding="utf-8")
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    tracked_cache_source = cache / "tracked.py"
+    tracked_cache_source.write_text("tracked = True\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "module.py", "__pycache__/tracked.py"],
+        cwd=tmp_path,
+        check=True,
+    )
+    before = capture_workspace(tmp_path)
+
+    subprocess.run(
+        [sys.executable, "-c", "import module; assert module.value == 1"],
+        cwd=tmp_path,
+        check=True,
+    )
+    generated = tuple(cache.glob("module.*.pyc"))
+    assert generated, "real Python import did not create the cache regression fixture"
+    after = capture_workspace(tmp_path)
+
+    paths = {item.path for item in after.files}
+    assert "module.py" in paths
+    assert "new_module.py" in paths
+    assert "__pycache__/tracked.py" in paths
+    assert all(path.relative_to(tmp_path).as_posix() not in paths for path in generated)
+    assert after.revision == before.revision
+    assert diff_workspace(before, after, action_id=1, command="python import").changes == ()
+
+
+def test_workspace_revision_uses_repository_text_bytes(tmp_path):
+    source = tmp_path / "module.py"
+    source.write_bytes(b"first\nsecond\n")
+    lf = capture_workspace(tmp_path)
+
+    source.write_bytes(b"first\r\nsecond\r\n")
+    crlf = capture_workspace(tmp_path)
+    assert crlf.revision == lf.revision
+    assert [item.mapping() for item in crlf.files] == [
+        item.mapping() for item in lf.files
+    ]
+
+    source.write_bytes(b"first\r\nchanged\r\n")
+    changed = capture_workspace(tmp_path)
+    assert changed.revision != lf.revision
+
+
+def test_workspace_revision_keeps_binary_crlf_byte_exact(tmp_path):
+    source = tmp_path / "payload.bin"
+    source.write_bytes(b"\x00first\r\n")
+    crlf = capture_workspace(tmp_path)
+
+    source.write_bytes(b"\x00first\n")
+    lf = capture_workspace(tmp_path)
+    assert crlf.revision != lf.revision
+
+
+@pytest.mark.parametrize("command", [
+    "python3 -m unittest -v", "python3 -B -m unittest -v",
+    "python3.12 -IB -m unittest -v",
+])
+def test_canonical_python_test_protocol_reaches_execution_evidence(command):
+    evidence = compile_execution_evidence(
+        command=command, output="Ran 1 test in 0.001s\n\nOK\n",
+        returncode=0, action_id=1, repository_revision="a" * 64,
+    )
+    assert evidence is not None
+    assert (evidence.kind, evidence.protocol, evidence.outcome) == ("test", "unittest", "pass")
+
+
+def test_native_test_protocol_reaches_execution_evidence():
+    evidence = compile_execution_evidence(
+        command="./target/debug/deps/actual-check",
+        output="running 1 test\ntest result: FAILED. 0 passed; 1 failed\n",
+        returncode=1, action_id=1, repository_revision="a" * 64,
+    )
+    assert evidence is not None
+    assert (evidence.kind, evidence.protocol, evidence.outcome) == ("test", "native", "fail")
 
 
 def test_execution_evidence_preserves_exact_raw_bytes_and_structure():
@@ -60,6 +177,27 @@ def test_non_build_or_test_command_is_not_structured():
         action_id=1,
         repository_revision="b" * 64,
     ) is None
+
+
+@pytest.mark.parametrize(("command", "output", "returncode", "expected"), [
+    ("pytest -q | tee test.log", "1 failed", 0, "unknown"),
+    ("npm test; echo done", "Tests: 1 failed", 0, "unknown"),
+    ("pytest -q", "no tests ran", 0, "executed_no_tests"),
+    ("pytest -q", "", 0, "unknown"),
+    ("pytest -q", "1 passed", None, "unknown"),
+    ("pytest -q", "1 passed", 0, "pass"),
+    ("pytest -q", "1 failed", 1, "fail"),
+    ("pytest -q", "ModuleNotFoundError: no module named missing", 1, "env_fail"),
+    ("cargo test", "running 0 tests\ntest result: ok. 0 passed", 0, "executed_no_tests"),
+    ("go test ./...", "ok example.com/test 0.013s", 0, "pass"),
+    ("pytest -q", "", 124, "timeout"),
+    ("pytest -q", "", -9, "interrupted"),
+])
+def test_execution_result_does_not_invent_test_success(command, output, returncode, expected):
+    evidence = compile_execution_evidence(command=command, output=output,
+        returncode=returncode, action_id=1, repository_revision="r1")
+    assert evidence is not None
+    assert evidence.outcome == expected
 
 
 def test_transaction_artifacts_bind_patch_syntax_and_recorded_callers(tmp_path):
@@ -119,7 +257,17 @@ def test_observation_equivalence_rejects_raw_sentinel_leak():
 
 def test_every_changed_file_gets_revision_bound_syntax_status_and_exact_postimage(
     tmp_path,
+    monkeypatch,
 ):
+    # This test covers the deterministic fallback path, independent of whether
+    # the host can execute the vendored Linux parser. Exact parser integration
+    # and identity binding have dedicated real-binary tests.
+    def unavailable_parser(*_args, **_kwargs):
+        raise RuntimeError("parser unavailable in fallback-path test")
+
+    monkeypatch.setattr(
+        "gt_engine.parser_inspection.inspect_sources", unavailable_parser
+    )
     (tmp_path / "valid.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "asset.bin").write_bytes(b"\x00old")
     before = capture_workspace(tmp_path)
@@ -176,3 +324,196 @@ def test_python_signature_delta_distinguishes_body_and_signature_edits(tmp_path)
         diff_workspace(body_after, signature_after, action_id=2, command="signature edit")
     )
     assert signature_artifact["signatures"][0]["changed"] == ["compute"]
+
+
+def test_parser_signature_delta_handles_create_and_delete(tmp_path, monkeypatch):
+    removed = tmp_path / "removed.go"
+    removed.write_text("package p\nfunc Removed() {}\n", encoding="utf-8")
+    before = capture_workspace(tmp_path)
+    removed.unlink()
+    (tmp_path / "added.go").write_text(
+        "package p\nfunc Added(value int) {}\n", encoding="utf-8"
+    )
+    after = capture_workspace(tmp_path)
+
+    def inspect(requests):
+        rows = []
+        for request in requests:
+            name = "Added" if b"Added" in request.content else "Removed"
+            rows.append({
+                "schema": "gt.parser_inspection.v1",
+                "request_id": request.request_id,
+                "content_sha256": hashlib.sha256(request.content).hexdigest(),
+                "language": "go",
+                "parser_identity": "fixture/parser",
+                "complete": True,
+                "diagnostics": [],
+                "declarations": [{
+                    "name": name,
+                    "qualified_name": name,
+                    "signature": name,
+                }],
+            })
+        return tuple(rows)
+
+    monkeypatch.setattr("gt_engine.parser_inspection.inspect_sources", inspect)
+    artifact = compile_transaction_artifacts(
+        diff_workspace(before, after, action_id=3, command="replace API")
+    )
+    signatures = {row["path"]: row for row in artifact["signatures"]}
+    assert signatures["added.go"]["added"] == ["Added"]
+    assert signatures["added.go"]["removed"] == []
+    assert signatures["removed.go"]["added"] == []
+    assert signatures["removed.go"]["removed"] == ["Removed"]
+
+
+def test_parser_signature_delta_rejects_duplicate_qualified_names(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "api.ts"
+    target.write_text("function f(value: string): void {}\n", encoding="utf-8")
+    before = capture_workspace(tmp_path)
+    target.write_text("function f(value: number): void {}\n", encoding="utf-8")
+    after = capture_workspace(tmp_path)
+
+    def inspect(requests):
+        return tuple({
+            "schema": "gt.parser_inspection.v1",
+            "request_id": request.request_id,
+            "content_sha256": hashlib.sha256(request.content).hexdigest(),
+            "language": "typescript",
+            "parser_identity": "fixture/parser",
+            "complete": True,
+            "diagnostics": [],
+            "declarations": [
+                {"qualified_name": "f", "signature": "first"},
+                {"qualified_name": "f", "signature": "second"},
+            ],
+        } for request in requests)
+
+    monkeypatch.setattr("gt_engine.parser_inspection.inspect_sources", inspect)
+    artifact = compile_transaction_artifacts(
+        diff_workspace(before, after, action_id=4, command="edit overload")
+    )
+    assert artifact["signatures"][0]["status"] == (
+        "unavailable_ambiguous_declaration_identity"
+    )
+
+
+# A missing certified classifier is not a non-test command. Before the split
+# below, the non-streamed ImportError branch returned ("", ""), which made
+# compile_execution_evidence return None - so a run against a stale producer
+# recorded NO execution evidence and read as an agent that never ran a test.
+# Evidence compilation must refuse; outcome classification keeps its
+# documented conservatism. Both halves, one fixture.
+
+
+_UNITTEST_PASS = "Ran 1 test in 0.001s\n\nOK\n"
+
+
+@pytest.fixture
+def absent_canonical_classifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `from groundtruth.runtime.patterns import ...` raise ImportError."""
+    monkeypatch.setitem(sys.modules, "groundtruth.runtime.patterns", None)
+
+
+def test_absent_classifier_refuses_to_compile_evidence(absent_canonical_classifier):
+    with pytest.raises(RuntimeError, match="canonical_classifier_unavailable"):
+        compile_execution_evidence(
+            command="python3 -m unittest -v",
+            output=_UNITTEST_PASS,
+            returncode=0, action_id=1, repository_revision="a" * 64,
+        )
+
+
+def test_absent_classifier_leaves_outcome_unknown_not_absent(
+    absent_canonical_classifier,
+):
+    """An unknown outcome is a recorded fact; no evidence is an absence."""
+    assert classify_execution_outcome(
+        "python3 -m unittest -v", _UNITTEST_PASS, 0
+    ) == "unknown"
+
+
+def test_absent_classifier_does_not_mask_a_guarded_outcome(
+    absent_canonical_classifier,
+):
+    """The returncode guard answers before the classifier is consulted."""
+    assert classify_execution_outcome("pytest -q", "", 124) == "timeout"
+
+
+def test_snapshot_records_gitlink_as_typed_identity_not_unreadable(tmp_path):
+    """git ls-files lists submodule entries (mode 160000) but they are
+    directories: read_bytes raises and the omission poisons complete=False
+    forever, which uncertified every semantic localization on smoke-20
+    adaptix (unreadable:release_data). The gitlink's pinned commit is the
+    honest identity."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "source.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / "release_data").mkdir()
+    pinned = "1" * 40
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo",
+         f"160000,{pinned},release_data"],
+        cwd=tmp_path, check=True,
+    )
+    subprocess.run(["git", "add", "source.py"], cwd=tmp_path, check=True)
+
+    snapshot = capture_workspace(tmp_path)
+
+    assert snapshot.complete is True
+    assert "unreadable:release_data" not in snapshot.omissions
+    entry = next(item for item in snapshot.files if item.path == "release_data")
+    assert entry.kind == "gitlink"
+    assert entry.sha256 == hashlib.sha256(pinned.encode("ascii")).hexdigest()
+
+
+def test_wrapped_runner_yields_a_test_evidence_row():
+    """E2: a wrapper must not hide the test boundary from the kind decision.
+
+    The pinned wheel's runner detection never learned `uvx`, and
+    `_ADDITIONAL_TEST_RE` (which covers the runners the wheel does not)
+    anchors on a shell segment boundary - so `uvx nox -s tests` matched
+    NEITHER and produced no evidence row at all, leaving covering_red,
+    recovery and submit_refusal dead on that action. The wheel is certified
+    and pinned and is never edited; the wrapper is peeled on the gt_engine
+    side and both deciders are handed the invocation the shell parsed.
+    """
+    output = "nox > Session tests was successful.\n3 passed in 0.42s\n"
+    for command in (
+        "uvx pytest tests/test_outputs.py -q",
+        "uv run --project /app pytest -q",
+        "cd /app && uv run pytest tests/ -x",
+        "poetry run pytest",
+        "npx jest --no-coverage 2>&1 | tail -30",
+        "pnpm exec vitest run",
+        "uvx nox -s tests",
+        "uv run -- dotnet test",
+    ):
+        evidence = compile_execution_evidence(
+            command=command, output=output, returncode=0,
+            action_id=1, repository_revision="rev",
+        )
+        assert evidence is not None, f"no evidence row for {command!r}"
+        assert evidence.kind == "test", f"{command!r} -> {evidence.kind}"
+
+
+def test_wrapper_peeling_does_not_turn_a_build_into_a_test():
+    """Peeling the wrapper feeds the KIND decision, not the build decision.
+
+    `wrapper_stripped_command` returns the command unchanged when no test
+    runner is located, so a build stays a build. (`uv run -- npm run build`
+    reads as neither: `_BUILD_RE` anchors on a shell boundary and `--` is not
+    one. That is unchanged from before this wave and is a separate gap in
+    build-kind detection, not a test misread.)
+    """
+    build = compile_execution_evidence(
+        command="npm run build", output="built in 3s\n", returncode=0,
+        action_id=1, repository_revision="rev",
+    )
+    assert build is not None and build.kind == "build"
+    wrapped = compile_execution_evidence(
+        command="uv run -- npm run build", output="built in 3s\n", returncode=0,
+        action_id=1, repository_revision="rev",
+    )
+    assert wrapped is None or wrapped.kind != "test"

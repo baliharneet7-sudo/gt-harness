@@ -37,8 +37,8 @@ def test_edit_invalidates_receipt_and_refuses_stale_submit():
     c.note_edit(["out.txt"])
     c.begin_verify()
     c.begin_submit()
-    assert c.submit_decision() is True
-    # the wipe reset the predicate to UNKNOWN, which is not a failure
+    assert c.submit_decision() is False
+    # The wipe reset the predicate to UNKNOWN; incomplete work fails closed.
     assert c.predicate_status("artifact") is PredicateStatus.UNKNOWN
 
 
@@ -59,6 +59,73 @@ def test_before_action_survives_unbalanced_quotes():
     c.before_action("bash", 'echo "unclosed')
     c.before_action("bash", 'echo "unclosed')
     c.after_observation("output")
+
+
+def test_provably_inert_edit_survives_a_declared_scope_receipt():
+    """F7 (run 34766499875): a towncrier fragment discarded eleven proofs.
+
+    ``changes/460.enhancement`` is a non-code name outside every declared
+    test-source scope: it has no import channel into the bound check, so the
+    receipt's declared footprint survives the edit.
+    """
+    from gt_engine.verification_contract import (
+        DependencyFootprint,
+        DependencyIdentity,
+    )
+    c = GroundtruthController([Predicate("p1", "row proof")])
+    c.start_task()
+    c.begin_verify()
+    c.record_receipt("p1", "pytest tests/test_snapshots.py", 0, "ok",
+                     epoch=c.workspace_epoch, semantic=True,
+                     dependency_footprint=DependencyFootprint(
+                         identities=(DependencyIdentity(
+                             "path", "tests/test_snapshots.py"),),
+                         complete=False,
+                         basis="bound_check_declared_test_sources"))
+    c.begin_implement()
+    discarded = c.note_edit(["changes/460.enhancement"], invalidate=())
+    assert "p1" not in discarded
+    assert c.predicate_status("p1") is PredicateStatus.GREEN
+
+
+def test_code_or_in_scope_edit_still_invalidates_declared_scope_receipt():
+    """The narrowing only covers provably disjoint edits: source code, config,
+    and paths inside the declared scope root still discard the proof."""
+    from gt_engine.verification_contract import (
+        DependencyFootprint,
+        DependencyIdentity,
+    )
+    scope = DependencyFootprint(
+        identities=(DependencyIdentity("path", "tests/test_snapshots.py"),),
+        complete=False,
+        basis="bound_check_declared_test_sources",
+    )
+    for paths in (["src/mod.py"], ["tests/README.md"], ["pyproject.toml"],
+                  ["tests/fixtures/expected.txt"]):
+        c = GroundtruthController([Predicate("p1", "row proof")])
+        c.start_task()
+        c.begin_verify()
+        c.record_receipt("p1", "pytest tests/test_snapshots.py", 0, "ok",
+                         epoch=c.workspace_epoch, semantic=True,
+                         dependency_footprint=scope)
+        c.begin_implement()
+        discarded = c.note_edit(paths, invalidate=())
+        assert "p1" in discarded, paths
+        assert c.predicate_status("p1") is PredicateStatus.UNKNOWN
+
+
+def test_inert_edit_still_invalidates_an_unscoped_receipt():
+    """Without declared path identities the conservative envelope stands: an
+    inert-looking edit still discards a proof whose inputs were never bound."""
+    c = GroundtruthController([Predicate("p1", "row proof")])
+    c.start_task()
+    c.begin_verify()
+    c.record_receipt("p1", "probe", 0, "ok", epoch=c.workspace_epoch,
+                     semantic=True)
+    c.begin_implement()
+    discarded = c.note_edit(["changes/460.enhancement"], invalidate=())
+    assert "p1" in discarded
+    assert c.predicate_status("p1") is PredicateStatus.UNKNOWN
 
 
 def test_repeat_telemetry_resets_after_an_edit_without_ever_blocking():
@@ -92,12 +159,10 @@ def test_unknown_receipt_is_not_green():
     c.record_receipt("p", "check", 0, "unknown", epoch=c.workspace_epoch)
     c.begin_submit()
     assert c.predicate_status("p") is PredicateStatus.UNKNOWN
-    # D3-G: UNKNOWN (no evidence either way) does not block submission. Only a
-    # real RED receipt blocks.
-    assert c.submit_decision() is True
+    assert c.submit_decision() is False
 
 
-def test_unevaluated_verification_plan_is_unknown_and_nonblocking():
+def test_unevaluated_verification_plan_is_unknown_and_blocking():
     c = GroundtruthController(
         [Predicate("artifact", "artifact is semantically valid")],
         verification_plan=VerificationPlan("plan-1", ("artifact",)),
@@ -107,8 +172,8 @@ def test_unevaluated_verification_plan_is_unknown_and_nonblocking():
     c.record_receipt("artifact", "check", 0, "valid artifact", epoch=0,
                      status=PredicateStatus.GREEN, semantic=True)
     c.begin_submit()
-    assert c.submit_decision() is True
-    assert c.phase == "FINISHED"
+    assert c.submit_decision() is False
+    assert c.phase == "IMPLEMENT"
     assert any("verification_plan" in reason for reason in c.unmet_reasons)
 
 
@@ -133,8 +198,9 @@ def test_nonsemantic_zero_exit_cannot_be_green():
     c.record_receipt("p", "grep", 0, "matched", epoch=0)
     assert c.predicate_status("p") is PredicateStatus.UNKNOWN
     assert "semantic evidence" in c.unmet_reasons[0]
-    # non-semantic receipts never certify GREEN, but UNKNOWN is not RED
-    assert c.blocking_predicates == ()
+    # Non-semantic receipts never certify GREEN; UNKNOWN therefore blocks a
+    # verified completion claim.
+    assert c.blocking_predicates == ("p",)
 
 
 def test_red_receipt_blocks_submission():

@@ -25,32 +25,153 @@ import hashlib
 import json
 import os
 import re
+import shlex
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from types import MethodType
 from typing import Any
 
 from minisweagent.exceptions import Submitted
 
-from .gt_session import GTMode, GTSession, GTSessionConfig
+from .gt_session import GTDecisionCandidate, GTMode, GTSession, GTSessionConfig
 from .miniswe_evidence import (
-    cap_evidence,
     classify_event,
     is_submit_command,
     run_evidence_pipeline,
 )
 from .miniswe_integration import MiniSweAdapter, ProviderModelMismatch
+from .provider_limits import (
+    ProviderContextWindowUnavailable,
+    ProviderRequestTooLarge,
+    build_provider_request_envelope,
+    provider_request_tokens,
+    render_and_admit_provider_request,
+)
+from .provider_pacing import PacingPolicy
+from .run_diagnostics import (
+    DiagnosticCode,
+    DiagnosticEvent,
+    classify_provider_failure,
+    redact_secret_text,
+)
 from .runtime_observation import (
     EditTransaction,
+    _unquoted_command_surface,
     capture_workspace,
     compile_execution_evidence,
     compile_transaction_artifacts,
     diff_workspace,
 )
 
+# The marker that makes the plan block idempotent in the durable task
+# message: appended once, never twice, even if the bootstrap were re-entered.
+PLAN_BLOCK_TAG = "[GT_PERSISTENT_PLAN]"
+
+
+def _plan_block_pointer(adapter: Any) -> str:
+    """The stable wire pointer that replaces the plan block after first send.
+
+    The plan is a record, not a message: it lives in the journal, the
+    plan/current.json state file and the checkpoint blob, and the agent follows
+    it through [GT_PLAN_CURSOR] steering and `gt-plan show`. Paying the full
+    rendering on every request is the +956% uncached-token regime's real mass;
+    the durable task message keeps the full text for the record while the wire
+    carries this pointer. The text is immutable per rendering so it stays
+    prefix-stable under caching regimes exactly as the block did.
+    """
+    receipt = getattr(adapter, "plan_rendering_receipt", None) or {}
+    sha8 = str(receipt.get("rendered_sha256") or "")[:8] or "unknown"
+    return (
+        f"{PLAN_BLOCK_TAG} sha256:{sha8} contract delivered once; live row "
+        "state follows via [GT_PLAN_CURSOR]; re-read the record with "
+        "`gt-plan show` (all rows) or `gt-plan show <row_id>`."
+    )
+
+
+def _compact_plan_block_for_wire(
+    messages: list[dict], adapter: Any
+) -> list[dict]:
+    """Swap the durable plan block for its pointer in the outgoing view only.
+
+    ``messages`` may share dict objects with the agent's durable history, so
+    the rewritten message is a copy -- the record keeps the full text. The
+    rewrite is confined to the exact block string GT injected, the same
+    discipline ``collapse_superseded_context_units`` uses; anything appended
+    after the block is preserved verbatim.
+    """
+    block = getattr(adapter, "_plan_block_text", None)
+    if not block:
+        receipt = getattr(adapter, "plan_rendering_receipt", None) or {}
+        sha = str(receipt.get("rendered_sha256") or "")
+        if len(sha) == 64:
+            blob = Path(adapter.store.root) / "plan_renderings" / f"{sha}.json"
+            try:
+                block = blob.read_bytes().decode("utf-8", "surrogatepass")
+            except OSError:
+                block = ""
+        if not block:
+            return messages
+        adapter._plan_block_text = block
+    pointer = _plan_block_pointer(adapter)
+    out: list[dict] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str) and block in content:
+            out.append({**message, "content": content.replace(block, pointer)})
+        else:
+            out.append(message)
+    return out
+
+
+# Fallback when the run declares no output reservation of its own.
+# Measured on the first production run, on every task: the planning call spent
+# its entire 16,384-token output budget on reasoning (14,832 of it on the task
+# with 52 requirements, 15,903 on the one with 41) and returned finish_reason
+# =length with no tool call, so the plan that shipped was the deterministic
+# skeleton with no design and no acceptance criteria. Both tasks stopped
+# exactly AT the ceiling, which is what a binding limit looks like. The ask is
+# smaller now; this is the headroom that lets a converging chain finish.
+PLAN_MAX_OUTPUT_TOKENS = 32768
+# Model-visible bound on one tool observation inside the provider view.
+# Sized for the provider window, not for prompt-economy: the 2026-09-11 paid
+# smoke (run 34656860834) showed a 4KB cap plus a hard 8-turn tail bound left
+# the agent with ~43K visible chars out of ~6M of history — an 8-turn memory
+# on a 769-turn task — and it spent its budget dereferencing GT artifacts
+# instead of implementing. The provider window is the honest limit; whole
+# turn-groups are still the elision unit, so the byte budget decides how much
+# history survives, not an arbitrary turn count.
+PROVIDER_VIEW_TOOL_OUTPUT_CHARS = 65_536
+
 _SUBMIT_REFUSED_OUTPUT = "submission withheld by the Groundtruth contract gate"
 
-_VIEW_CMD_RE = re.compile(r"(?:^|\s)(?:cat|sed|less|head|tail|nl|bat)\s+['\"]?([^\s'\"|;>&]+)")
+# GT-internal provider calls (catalog offer, persistent plan) are real wire
+# attempts: they flow through the admitted transport and commit a delivery like
+# any other request. Their request identity is a stable task-scoped tag rather
+# than the payload digest, so the response/failure row, the delivery row and
+# the terminal census all join on the same readable id.
+_SELECT_CATALOG_REQUEST_TAG = "gt-internal-select-catalog"
+_PERSISTENT_PLAN_REQUEST_TAG = "gt-internal-persistent-plan"
+
+_VIEW_COMMANDS = frozenset({"cat", "sed", "less", "head", "tail", "nl", "bat"})
+
+# These typed queries require a certified graph. Native action snapshots
+# independently schedule nonblocking refresh through the same coordinator.
+_GRAPH_DEPENDENT_TYPED_KINDS = frozenset({
+    "definition", "references", "callers", "patch_impact", "why_this_edge",
+})
+
+
+@dataclass(frozen=True)
+class _EvidenceCandidate:
+    priority: int
+    kind: str
+    rendered: str
+    metadata: dict[str, str]
+    chain_head: str = ""
+    dedup_key: str = ""
+    previous_chain_head: str = ""
+    artifact_reference: dict | None = None
 
 
 def _created_files_excluding_exact_renames(
@@ -80,6 +201,7 @@ class RuntimeHookHandle:
     native_query: Any | None = None
     native_transport: Any | None = None
     native_add_messages: Any | None = None
+    native_exact_provider_payload: Any | None = None
 
     def restore(self) -> None:
         """Restore Mini-SWE's original methods exactly (transparent bypass)."""
@@ -92,6 +214,11 @@ class RuntimeHookHandle:
                 self.model.query = self.native_query
             if self.native_transport is not None:
                 self.model._query = self.native_transport
+            if self.native_exact_provider_payload is None:
+                if hasattr(self.model, "_gt_exact_provider_payload"):
+                    delattr(self.model, "_gt_exact_provider_payload")
+            else:
+                self.model._gt_exact_provider_payload = self.native_exact_provider_payload
         if self.agent is not None and self.native_add_messages is not None:
             self.agent.add_messages = self.native_add_messages
         if self.agent is not None and self.original_execute is not None:
@@ -107,10 +234,49 @@ def _command(action: Any) -> str:
     return str(getattr(action, "cmd", "") or getattr(action, "command", "") or "")
 
 
-def _observation_output(result: Any) -> str:
+def _executed_command_surface(action: Any) -> str:
+    """Every field an environment may execute, joined for submit detection.
+
+    ``_command`` prefers the legacy ``cmd`` key while the shipped
+    environments execute ``command`` -- and ``argv`` verbatim when it is
+    present (``CredentialIsolatedLocalEnvironment`` execs it directly; GT's
+    own bound checks pass it through the same seam). Detecting the submit
+    marker on only the preferred field lets a cover string in one field
+    hide a marker-bearing command the environment would still run.
+    Over-matching is safe: ``is_submit_command`` only decides whether the
+    plan gate is consulted, and a refused submit never executes.
+    """
+    if isinstance(action, dict):
+        fields = (action.get("cmd"), action.get("command"))
+        argv = action.get("argv")
+    else:
+        fields = (getattr(action, "cmd", None), getattr(action, "command", None))
+        argv = getattr(action, "argv", None)
+    parts = [str(field) for field in fields if field]
+    if isinstance(argv, (list, tuple)):
+        parts.extend(str(item) for item in argv if item is not None)
+    return "\n".join(parts)
+
+
+def _observation_bytes(result: Any) -> bytes:
     if isinstance(result, dict):
-        return str(result.get("output") or result.get("message") or "")
-    return str(result or "")
+        extra = result.get("extra") or {}
+        if isinstance(extra, dict) and "output_artifact" in extra:
+            from gt_engine.output_evidence import EvidenceStore
+
+            ref = extra["output_artifact"]
+            # Canonical producers currently accept complete text. A transport
+            # preview must not silently downgrade their supported semantics.
+            # Streaming analyzer migration remains a separate open requirement.
+            return EvidenceStore(ref["root"]).bytes(ref["sha256"])
+        if isinstance(extra, dict) and "raw_output" in extra:
+            return str(extra.get("raw_output") or "").encode("utf-8")
+        return str(result.get("output") or result.get("message") or "").encode("utf-8")
+    return str(result or "").encode("utf-8")
+
+
+def _observation_output(result: Any) -> str:
+    return _observation_bytes(result).decode("utf-8", "replace")
 
 
 def _returncode(result: Any) -> int | None:
@@ -129,92 +295,270 @@ _NOT_EXECUTED = {
 }
 
 
-def _refusal_directive(adapter: MiniSweAdapter) -> dict:
-    """Visible proof-backed refusal that preserves continued exploration.
+def _print_plan_summary(plan: Any, finish_reason: str) -> None:
+    """Print the plan to the runner's stdout so it lands in the job log.
 
-    NEUTRAL wording (Deep-audit D2): the prior text named "the harness", an
-    "advisory mode" and a "Transparent bypass" — a literal instruction set for
-    a frontier model to reverse-engineer and disable GT (round-8 evidence: the
-    model spent 27-35 actions reading gt_engine/ source after reading this).
-    The refusal must only say the submission was not executed because failing
-    checks remain, and name those checks by TASK meaning (never internal IDs).
+    The journal is the record of truth, but it lives inside a multi-gigabyte
+    task artifact. A bounded summary on stdout makes "what plan was built"
+    answerable from the job log alone, which is the difference between a
+    diagnosis that takes a minute and one that takes an hour.
     """
+    try:
+        counts = plan.counts()
+        lines = [
+            "[GT_PLAN_SUMMARY] "
+            f"status={counts.get('status')} "
+            f"rows={counts.get('plan_rows', 0)} "
+            f"derived={counts.get('derived_rows', 0)} "
+            f"interactions={counts.get('interaction_cells', 0)} "
+            f"applies={counts.get('applies_true', 0)} "
+            f"anchored={counts.get('anchored_rows', 0)}/{counts.get('ledger_rows', 0)} "
+            f"modes={counts.get('mode_candidates', 0)} "
+            f"baseline={counts.get('baseline_status')} "
+            f"finish_reason={finish_reason or '-'}"
+        ]
+        for row in list(getattr(plan, "rows", ()))[:40]:
+            proof = row.verification_command or row.verification_kind or "-"
+            lines.append(
+                f"[GT_PLAN_ROW] {row.row_id} anchors={len(row.anchors)} "
+                f"proof={proof[:60]} :: {row.text[:110]}"
+            )
+        for cell in list(getattr(plan, "applicable_cells", ()))[:20]:
+            lines.append(
+                f"[GT_PLAN_CELL] {cell.row_id} under {cell.mode_symbol}.{cell.member}"
+            )
+        for target, reason in list(getattr(plan, "abstentions", ()))[:20]:
+            lines.append(f"[GT_PLAN_GAP] {target}: {reason}")
+        print("\n".join(lines), flush=True)
+    except Exception:  # noqa: BLE001 - a summary must never break the run
+        pass
+
+
+def _refusal_directive(adapter: MiniSweAdapter) -> dict:
+    """Visible proof-backed refusal that preserves continued exploration."""
     adapter.store.append(
         "submit_refusal",
         command_sha256=None,
         iteration=adapter.iteration,
-        # task-meaningful obligation texts, never pred-<sha> (the journal is a
-        # readable file in the container; round-9 the model cat's it)
-        reasons=list(adapter.blocking_obligation_texts()),
+        reasons=list(adapter.blocking_reasons),
+        action_index=adapter.global_action,
+        executed=False,
     )
     unmet = adapter.blocking_obligation_texts()
     delta = adapter.next_contract_delta(max_chars=1000)
     lines = [
-        "Submission not executed: the current workspace still has failing "
-        "verification checks. Fix the failing checks before submitting again; "
-        "you may continue searching, editing, and testing.",
+        "GT ENFORCED SUBMIT GATE: submission was not executed because current, "
+        "workspace-bound RED evidence remains. You may continue with any "
+        "search, edit, test, or alternate hypothesis before retrying.",
+        "Transparent bypass: run this harness in advisory mode to restore stock "
+        "Mini-SWE submission behavior.",
+        "Active RED:",
     ]
-    if unmet:
-        lines.append("Failing:")
-        lines += [f"- {reason}" for reason in unmet]
+    lines += [f"- {reason}" for reason in (unmet or ("active failure",))]
     if delta:
         lines.append(delta)
     return {"role": "user", "content": "\n".join(lines)}
 
 
-def _run_submit_gate(session: GTSession, command: str) -> bool:
+def _run_submit_gate(session: GTSession, command: str, *, pre_execution: bool = False) -> bool:
     """Run the submit gate; True = accepted (let the submission through)."""
     adapter = session.engine
     if adapter is None or session.disabled:
         return True
-    if adapter.phase in {"IMPLEMENT", "VERIFY"}:
+    if not pre_execution and adapter.phase in {"IMPLEMENT", "VERIFY"}:
         if adapter.phase == "IMPLEMENT":
             adapter.begin_verify()
         adapter.begin_submit()
-    if session.can_enforce:
+    if pre_execution and session.can_enforce:
         receipt = adapter.authorize_submit_suppression(command)
         if receipt is not None:
             adapter.begin_implement()
             return False
+    if pre_execution:
+        # The plan gate is a PRE-EXECUTION decision by necessity: after the
+        # command runs, Submitted is a native terminal this seam refuses to
+        # suppress. Refusing here suppresses nothing that has happened -- the
+        # action simply does not run, and the agent gets a directive saying so.
+        try:
+            if not session.plan_submit_gate():
+                if adapter.phase not in {"IMPLEMENT", "FINISHED", "STUCK"}:
+                    adapter.begin_implement()
+                return False
+        except Exception as exc:  # noqa: BLE001 - GT policy is fail-open
+            session.degrade("submit_gate", exc)
+        return True
     accepted, _batch = session.request_submit()
     if accepted or not session.can_enforce:
         return accepted
     # A policy decision alone cannot suppress native Mini-SWE. Suppression is
     # authorized only by the canonical provider boundary's durable proof that
     # zero action/provider bytes were dispatched. Missing authority fails open.
+    session.degrade("terminal_refusal_authority", RuntimeError(
+        "pre-execution suppression authority cannot refuse an executed action"
+    ))
     return True
 
 
 def _refusal_text(adapter: MiniSweAdapter) -> str:
-    unmet = adapter.blocking_obligation_texts()
+    blocking = adapter.blocking_reasons
     delta = adapter.next_contract_delta(max_chars=1200)
-    lines = ["Submission not executed: verification checks are not all passing.",
-             "Failing:"]
-    lines += [f"- {reason}" for reason in (unmet or ("active failure",))]
+    lines = ["GT SUBMIT REFUSED: contract obligations are not fully proven.", "Unmet:"]
+    lines += [f"- {reason}" for reason in (blocking or ("active failure",))]
     if delta:
         lines.append(delta)
     return "\n".join(lines)
 
 
-def _viewed_files(command: str) -> tuple[str, ...]:
+_VIEW_NOISE = re.compile(r"[<>$]")
+
+
+def _viewed_files(command: str, repo_root: str = "") -> tuple[str, ...]:
     from groundtruth.runtime.gateway import KIND_VIEW, classify_command
 
     if classify_command(command or "") != KIND_VIEW:
         return ()
-    match = _VIEW_CMD_RE.search(command or "")
-    return (match.group(1),) if match else ()
-
-
-def _classify_test(command: str, output: str, returncode: int | None) -> str:
     try:
-        from groundtruth.runtime.patterns import classify_test_observation
-
-        outcome, _protocol = classify_test_observation(
-            command or "", output or "", returncode
+        lexer = shlex.shlex(
+            command or "", posix=True, punctuation_chars="|;&"
         )
-        return outcome or ""
-    except Exception:  # noqa: BLE001 - test classification is correct-or-quiet
-        return ""
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return ()
+
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token and all(char in "|;&" for char in token):
+            segments.append([])
+        else:
+            segments[-1].append(token)
+
+    found: list[str] = []
+    cwd = ""
+    for segment in segments:
+        if not segment:
+            continue
+        head = Path(segment[0]).name.lower()
+        if head == "cd" and repo_root:
+            if len(segment) > 1 and not segment[1].startswith("-"):
+                target = segment[1]
+                if not os.path.isabs(target):
+                    target = os.path.normpath(
+                        os.path.join(cwd or repo_root, target)
+                    )
+                cwd = target
+            continue
+        if head not in _VIEW_COMMANDS:
+            continue
+        args = segment[1:]
+        operands: list[str] = []
+        if head == "sed":
+            script_seen = False
+            index = 0
+            while index < len(args):
+                value = args[index]
+                if value == "--":
+                    operands.extend(args[index + 1:])
+                    break
+                if value in {"-e", "--expression", "-f", "--file"}:
+                    script_seen = True
+                    index += 2
+                    continue
+                if value.startswith(("--expression=", "--file=")):
+                    script_seen = True
+                elif value.startswith("-"):
+                    pass
+                elif not script_seen:
+                    script_seen = True
+                else:
+                    operands.append(value)
+                index += 1
+        else:
+            option_values = {
+                "head": {"-n", "--lines", "-c", "--bytes"},
+                "tail": {"-n", "--lines", "-c", "--bytes", "-s", "--sleep-interval"},
+                "nl": {"-b", "--body-numbering", "-d", "--section-delimiter", "-f",
+                       "--footer-numbering", "-h", "--header-numbering", "-i",
+                       "--line-increment", "-l", "--join-blank-lines", "-n",
+                       "--number-format", "-s", "--number-separator", "-v",
+                       "--starting-line-number", "-w", "--number-width"},
+            }.get(head, set())
+            index = 0
+            while index < len(args):
+                value = args[index]
+                if value == "--":
+                    operands.extend(args[index + 1:])
+                    break
+                if value in option_values:
+                    index += 2
+                    continue
+                if value.startswith("-") or value.startswith((">", "<")):
+                    index += 1
+                    continue
+                operands.append(value)
+                index += 1
+        for value in operands:
+            if not value or value == "-" or _VIEW_NOISE.search(value):
+                continue
+            resolved = value
+            if repo_root:
+                if os.path.isabs(value):
+                    if os.path.isfile(value):
+                        resolved = os.path.normpath(value)
+                    else:
+                        continue
+                else:
+                    resolved = next(
+                        (
+                            os.path.normpath(os.path.join(base, value))
+                            for base in (cwd, repo_root)
+                            if base and os.path.isfile(os.path.join(base, value))
+                        ),
+                        "",
+                    )
+                    if not resolved:
+                        continue
+            found.append(resolved)
+    return tuple(dict.fromkeys(found))
+
+
+def _classify_test(
+    command: str,
+    output: str,
+    returncode: int | None,
+    *,
+    output_artifact: dict | None = None,
+) -> str:
+    """The OBSERVED test outcome, parsed from the output itself.
+
+    ``classify_execution_outcome`` applies ``_execution_outcome_guard``, which
+    reads ``unknown`` for every compound or piped command - and `cd /testbed
+    && python -m pytest … 2>&1 | tail` is the shape benchmark agents actually
+    write. Run 35016130850: 23 observed pass/fail test outcomes produced ZERO
+    ``test_result`` semantic events, so the covering lane, failure
+    fingerprinting and the gateway's covering producer were never entered.
+    The guard exists for exit-code attribution; the boundary question "did a
+    test observation occur" is answered by the output text, so this feeds the
+    unguarded textual parse (the same parse ``observed_test_outcome`` stores).
+    """
+    from .runtime_observation import _classify_test_output
+
+    try:
+        outcome, _protocol = _classify_test_output(
+            command or "", output or "", returncode,
+            output_artifact=output_artifact,
+        )
+    except (RuntimeError, ValueError, OSError):
+        try:
+            outcome, _protocol = _classify_test_output(
+                command or "", output or "", returncode
+            )
+        except (RuntimeError, ValueError, OSError):
+            return ""
+    return outcome if outcome in {
+        "pass", "fail", "env_fail", "executed_no_tests",
+    } else ""
 
 
 def _workspace_fingerprint(repo_root: str) -> dict[str, tuple[int, int] | str]:
@@ -253,19 +597,68 @@ def _workspace_fingerprint(repo_root: str) -> dict[str, tuple[int, int] | str]:
     return fingerprint
 
 
-def _state_exclusion(adapter: MiniSweAdapter) -> Path:
-    """Exclude harness state without excluding a repo-root test fixture."""
-    repository = Path(adapter.repo_root).resolve()
-    state_parent = adapter.store.root.parent.resolve()
-    try:
-        state_parent.relative_to(repository)
-    except ValueError:
-        return adapter.store.root.resolve()
-    return (
-        adapter.store.root.resolve()
-        if state_parent == repository
-        else state_parent
-    )
+def _refresh_native_graph(adapter: MiniSweAdapter, session: GTSession) -> None:
+    if (session.capability_active("graph_refresh")
+            and session.capability_active("graph_queries")):
+        adapter.refresh_graph(phase="native_action")
+
+
+def collapse_superseded_context_units(
+    session: GTSession, adapter: MiniSweAdapter, messages: list[dict]
+) -> None:
+    """Rewrite superseded [GT_CONTEXT_UNIT] blocks to one-line pointers.
+
+    Admission already decided which unit owns each supersession lane; this
+    only replaces the loser's delivered bytes with a tagged pointer carrying
+    the archived-unit identity. The rewrite is confined to the exact strings
+    GT itself injected -- no agent turn is touched, and a unit that never
+    declared supersession can never be collapsed.
+    """
+    take = getattr(session, "take_superseded_context_units", None)
+    if not callable(take):
+        return
+    # The history-axis bound: when live unit bytes exceed the budget the
+    # session queues its oldest-admitted units onto this same drain, and the
+    # rewrite below turns them into pointers exactly like a supersession.
+    demote = getattr(session, "demote_overbudget_context_units", None)
+    if callable(demote):
+        try:
+            demote(current_iteration=int(getattr(adapter, "iteration", 0) or 0))
+        except Exception:  # noqa: BLE001 - a budget fault keeps full bytes
+            pass
+    for unit in take():
+        rendered = unit.get("rendered") or ""
+        if not rendered:
+            continue
+        artifact = unit.get("artifact_reference") or {}
+        pointer = "[GT_CONTEXT_UNIT] " + json.dumps(
+            {
+                "unit_id": unit.get("unit_id", ""),
+                "superseded": True,
+                "superseded_by": unit.get("superseded_by", ""),
+                "supersession_key": unit.get("supersession_key", ""),
+                "artifact_sha256": str(artifact.get("sha256") or ""),
+            },
+            ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+        )
+        collapsed = False
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, str) and rendered in content:
+                message["content"] = content.replace(rendered, pointer)
+                collapsed = True
+        if collapsed:
+            adapter.store.append(
+                "context_unit_collapsed",
+                unit_id=str(unit.get("unit_id") or ""),
+                superseded_by=str(unit.get("superseded_by") or ""),
+                supersession_key=str(unit.get("supersession_key") or ""),
+                reason=str(unit.get("reason") or "superseded"),
+            )
+
+
+def _state_exclusions(adapter: MiniSweAdapter) -> tuple[Path, ...]:
+    return adapter.engine_state.layout.excluded_roots
 
 
 def _capture_edit_preimage(
@@ -280,7 +673,12 @@ def _capture_edit_preimage(
     if not targets:
         return None
     path = targets[0]
-    abs_path = path if os.path.isabs(path) else os.path.join(adapter.repo_root, path)
+    repository = Path(adapter.repo_root).resolve()
+    abs_path = (repository / path).resolve()
+    try:
+        path = abs_path.relative_to(repository).as_posix()
+    except ValueError:
+        return None
     if not os.path.isfile(abs_path):
         return None
     try:
@@ -299,7 +697,12 @@ def _capture_edit_after(
     edit_before_after: dict[str, tuple[str | None, str]] = {}
     changed: list[str] = []
     for path, before in preimage.items():
-        abs_path = path if os.path.isabs(path) else os.path.join(adapter.repo_root, path)
+        repository = Path(adapter.repo_root).resolve()
+        abs_path = (repository / path).resolve()
+        try:
+            path = abs_path.relative_to(repository).as_posix()
+        except ValueError:
+            continue
         try:
             with open(abs_path, encoding="utf-8", errors="replace") as handle:
                 after = handle.read()
@@ -322,45 +725,64 @@ def _run_evidence(
     created_files: tuple[str, ...] = (),
     *,
     allow_live_probes: bool = False,
+    decision_session: GTSession | None = None,
+    additional_candidates: tuple[GTDecisionCandidate, ...] = (),
+    output_artifact: dict | None = None,
+    pre_edit_graph: str = "",
+    syntax_findings: tuple[dict, ...] = (),
 ) -> str:
-    """One-dose GT evidence for an executed action; returns rendered bytes."""
-    if adapter.contract is None:
-        return ""
-    if created_files:
-        from .miniswe_covering import run_newfile_precedent
+    """Collect eligible producers for the session-owned decision packet.
 
-        precedent = run_newfile_precedent(adapter, tuple(created_files))
-        if precedent:
-            adapter.store.append(
-                "evidence_delivery",
-                action_index=action_index,
-                iteration=adapter.iteration,
-                evidence_type="new_file_destination",
-                rendered_bytes=len(precedent),
-                semantics="advisory",
-                transaction_sha256=adapter._latest_transaction_sha256,
-            )
-            adapter.record_delivery_receipt(
-                evidence_type="new_file_destination",
-                dedup_key=f"newfile-{adapter._latest_transaction_sha256}",
-                target=created_files[0],
-                payload_hash=hashlib.sha256(precedent.encode("utf-8")).hexdigest(),
-                action_index=action_index,
-                iteration=adapter.iteration,
-            )
-            return f"[New file precedent]\n{cap_evidence(precedent, 600)}"
+    ``pre_edit_graph`` is the graph as it stood BEFORE the edit being reported,
+    when that graph was current. It exists because the edit producers need two
+    things at once -- the before/after text, and callers from the graph -- and
+    those were mutually exclusive by construction: an edit turn carries the
+    text but has just invalidated the graph, so ``gateway_state`` handed the
+    producer ``graph_db=None`` and it returned before reading a signature; a
+    non-edit turn may have a fresh graph but no edit to analyse. Measured on the
+    2026-09-08 run: signature_delta eligible on 15 signature entries across 19
+    edit transactions, delivered nothing, ever.
+
+    Passing the pre-edit graph is not a loosening. The callers of a function you
+    have just changed are by definition the callers that existed BEFORE you
+    changed it, which is what makes the evidence actionable, and it is already
+    the established contract for this boundary: compile_transaction_artifacts
+    hands the same pre-edit snapshot to the caller query and records those rows
+    as pre-edit facts.
+    """
+    session = decision_session or _coerce_session(adapter)
+    if adapter.contract is None:
+        if decision_session is not None:
+            session.queue_decision_candidates(additional_candidates)
+            return ""
+        return "\n".join(session.admit_decision_packet(
+            additional_candidates, iteration=adapter.iteration, action_index=action_index,
+        ).context_additions)
     covering = None
+    candidates: list[_EvidenceCandidate] = []
+    test_outcome = _classify_test(
+        command, output, returncode, output_artifact=output_artifact
+    )
     if changed_files and allow_live_probes:
         from .miniswe_covering import run_covering_lane
 
         covering = run_covering_lane(adapter, changed_files)
-    elif returncode and _classify_test(command, output, returncode) in ("fail", "env_fail"):
+    if test_outcome in ("fail", "env_fail"):
         # Attribute the model's OWN failing test to the edited surface without
         # executing any additional command. This is advisory provenance, not
         # independent proof and therefore never creates execution authority.
-        from .miniswe_covering import attribute_test_failure
+        # The observed outcome, not the shell's returncode: a piped
+        # `pytest … | tail` exits with tail's status on a failing suite.
+        # Runs whenever the probe lane produced nothing -- including when live
+        # probes are enabled but returned no covering result, where the old
+        # elif discarded the cheapest covering signal entirely.
+        if covering is None:
+            from .miniswe_covering import attribute_test_failure
 
-        covering = attribute_test_failure(adapter, command, output, returncode=returncode)
+            covering = attribute_test_failure(
+                adapter, command, output,
+                returncode=returncode, observed=test_outcome,
+            )
         # A4/GT_HYPOTHESIS: track the failure fingerprint; a recurrence after
         # an edit schedules a bounded, transient recovery steer.
         try:
@@ -373,16 +795,42 @@ def _run_evidence(
                 action_index=action_index,
                 cwd=adapter.repo_root or os.getcwd(),
                 changed_files=changed_files,
-                viewed_files=_viewed_files(command),
-                test_outcome="fail",
+                viewed_files=_viewed_files(command, adapter.repo_root or ""),
+                edit_before_after=edit_before_after,
+                test_outcome=test_outcome,
+                output_artifact=output_artifact,
             )
             fingerprint = canonical_test_failure_fingerprint(event_pre)
             if fingerprint:
-                adapter.note_failure_fingerprint(
+                due = adapter.note_failure_fingerprint(
                     fingerprint, epoch=adapter.workspace_epoch
+                )
+                # The evaluation decision itself is part of the record:
+                # without this row a run that tracked fingerprints and
+                # correctly never steered is indistinguishable from a lane
+                # that never ran (the gtbridge_owned_features_unwired gap).
+                adapter.store.append(
+                    "feature_evaluated",
+                    layout_schema="gt.feature_evaluation.v1",
+                    feature_id="recovery",
+                    boundary="test_result",
+                    eligible=True,
+                    outcome="steer_due" if due else "tracked_no_steer",
                 )
         except Exception:  # noqa: BLE001 - recovery tracking is correct-or-quiet
             pass
+        adapter.store.append(
+            "feature_evaluated",
+            layout_schema="gt.feature_evaluation.v1",
+            feature_id="covering_red",
+            boundary="test_result",
+            eligible=bool(adapter._edited_files),
+            outcome=(
+                "attributed" if covering is not None
+                else "no_edited_file_link" if adapter._edited_files
+                else "no_prior_edit"
+            ),
+        )
     event = classify_event(
         command,
         output,
@@ -390,16 +838,19 @@ def _run_evidence(
         action_index=action_index,
         cwd=adapter.repo_root or os.getcwd(),
         changed_files=changed_files,
-        viewed_files=_viewed_files(command),
-        edit_before_after=edit_before_after or None,
+        viewed_files=_viewed_files(command, adapter.repo_root or ""),
+        edit_before_after=edit_before_after,
         covering=covering,
-        test_outcome=_classify_test(command, output, returncode),
+        test_outcome=test_outcome,
+        output_artifact=output_artifact,
     )
+    syntax = ""
     if changed_files and allow_live_probes:
-        from .miniswe_covering import run_newfile_precedent, run_syntax_probe
+        from .miniswe_covering import run_syntax_probe
 
         syntax = run_syntax_probe(adapter, changed_files)
         if syntax:
+            syntax = "[GT_EVIDENCE:syntax_result]\n" + syntax
             # Explicit ASSISTIVE mode may run this bounded probe. Its result is
             # evidence for the model, never an automatic execution gate.
             fallback = changed_files[0] if changed_files else "the edited file"
@@ -408,57 +859,194 @@ def _run_evidence(
                  if ": syntax error" in line),
                 fallback,
             )
-            adapter.store.append(
-                "evidence_delivery",
-                action_index=action_index,
-                iteration=adapter.iteration,
-                evidence_type="syntax_result",
-                rendered_bytes=len(syntax),
+            candidates.append(_EvidenceCandidate(
+                90, "syntax_result", syntax,
+                {"kind": "syntax_result", "dedup_key": f"syntax-{adapter.iteration}",
+                 "target": first_file},
+            ))
+    # Reactive lane: the transaction-observation layer already computes a
+    # certified syntax verdict on every edit (compile_transaction_artifacts).
+    # The proactive probe above is ASSISTIVE+GT_ALLOW_LIVE_PROBES gated, so in
+    # advisory runs a syntactically broken edit journaled as a transaction
+    # artifact but never reached the model -- a dead gate on the shipping
+    # path. Emit the already-computed finding as evidence; files the probe
+    # covered are skipped so a probe-enabled run never double-delivers.
+    probe_covered = {
+        line.split(":")[0]
+        for line in (syntax or "").splitlines()
+        if ": syntax error" in line
+    }
+    for row in syntax_findings:
+        rel = str(row.get("path") or "")
+        if not rel or rel in probe_covered:
+            continue
+        if row.get("error"):
+            detail = (
+                f"line {int(row.get('line') or 0)} "
+                f"col {int(row.get('column') or 0)}: {row.get('error')}"
             )
-            adapter.record_delivery_receipt(
-                evidence_type="syntax_result",
-                dedup_key=f"syntax-{adapter.iteration}",
-                target=first_file,
-                payload_hash=hashlib.sha256(syntax.encode("utf-8")).hexdigest(),
-                action_index=action_index,
-                iteration=adapter.iteration,
+        else:
+            detail = "; ".join(
+                str(d) for d in (row.get("diagnostics") or ())[:8]
             )
-            return f"[Syntax check]\n{cap_evidence(syntax)}"
+        producer = str(row.get("producer") or "")
+        body = f"[GT_EVIDENCE:syntax_result]\n{rel}: syntax error\n{detail}"
+        if producer:
+            body += f"\nproducer={producer}"
+        candidates.append(_EvidenceCandidate(
+            90, "syntax_result", body,
+            {"kind": "syntax_result",
+             "dedup_key": (
+                 f"syntax-reactive-{rel}-{row.get('post_revision', '')}"
+             ),
+             "target": rel},
+        ))
+    proposed_dedup, proposed_head = adapter.pending_evidence_chain()
+    from .output_evidence import EvidenceStore
+    from .request_history import store_history_evidence
+
+    evidence_store = EvidenceStore(adapter.engine_state.layout.evidence_root)
+    gateway_state = adapter.gateway_state()
+    if pre_edit_graph and not gateway_state.graph_db:
+        # Per call, never cached: dataclasses.replace copies the facade but
+        # keeps the SAME episode object, so the ledger and delivered-key dedup
+        # chains stay single-owner exactly as GatewayState documents.
+        from dataclasses import replace as _replace
+
+        gateway_state = _replace(gateway_state, graph_db=pre_edit_graph)
     result = run_evidence_pipeline(
-        adapter.gateway_state(),
+        gateway_state,
         event,
-        dedup_chain=adapter._dedup_chain,
-        chain_head=adapter._chain_head,
+        dedup_chain=proposed_dedup,
+        chain_head=proposed_head,
         episode_id=adapter.task_id,
         event_id=f"{adapter.task_id}:{adapter.iteration}:{action_index}",
         native=os.environ.get("GT_GATEWAY_NATIVE") == "1",
+        model_prefix=True,
+        commit=False,
+        artifact_store=evidence_store,
     )
-    if result.chain_head:
-        adapter._chain_head = result.chain_head
-    if result.sealed and result.envelope is not None:
-        adapter.store.append(
-            "evidence_delivery",
-            action_index=action_index,
-            iteration=adapter.iteration,
-            evidence_type=str(result.envelope.evidence_type or ""),
-            dedup_key=str(result.envelope.dedup_key or ""),
-            target=str(getattr(result.envelope, "target", "") or ""),
-            rendered_bytes=len(result.rendered),
+    for dose in result.doses:
+        kind = str(dose.envelope.evidence_type or "")
+        candidates.append(_EvidenceCandidate(
+            100 if event.test_outcome in {"fail", "env_fail"} else 80,
+            kind, dose.rendered,
+            {"kind": kind, "dedup_key": str(dose.envelope.dedup_key or ""),
+             "target": str(getattr(dose.envelope, "target", "") or "")},
+            chain_head=dose.chain_head,
+            dedup_key=str(dose.envelope.dedup_key or ""),
+            previous_chain_head=dose.previous_chain_head or proposed_head,
+            artifact_reference=dose.artifact_reference,
+        ))
+    verification, verification_metadata = adapter.verification_candidate()
+    if verification or verification_metadata.get("recipe"):
+        candidates.append(
+            _EvidenceCandidate(
+                70,
+                "verification_plan",
+                verification,
+                verification_metadata,
+                dedup_key=verification_metadata.get("dedup_key", ""),
+            )
         )
-        adapter.record_delivery_receipt(
-            evidence_type=str(result.envelope.evidence_type or ""),
-            dedup_key=str(result.envelope.dedup_key or ""),
-            target=str(getattr(result.envelope, "target", "") or ""),
-            payload_hash=hashlib.sha256(
-                result.rendered.encode("utf-8")
-            ).hexdigest(),
-            action_index=action_index,
-            iteration=adapter.iteration,
+    # A nearby example must not suppress an executed failure or current graph
+    # evidence merely because this transaction also created a file.
+    if created_files:
+        from .miniswe_covering import run_newfile_precedent
+
+        precedent = run_newfile_precedent(adapter, tuple(created_files))
+        if precedent:
+            candidates.append(_EvidenceCandidate(
+                20, "new_file_destination",
+                "[GT_EVIDENCE:new_file_destination]\n" + precedent,
+                {"kind": "new_file_destination",
+                 "dedup_key": f"newfile-{adapter._latest_transaction_sha256}",
+                 "target": created_files[0], "semantics": "advisory"},
+            ))
+    # The co-change dose rides the queue as a delivery query: it re-runs at
+    # admission against the current graph rather than carrying bytes rendered
+    # here. Any metadata an earlier producer staged is stale by then, so the
+    # resolver re-stages at delivery; consume-and-drop keeps the slot clean.
+    adapter.consume_model_visible_delivery_metadata()
+    cochange_files = tuple(
+        dict.fromkeys(
+            (*changed_files, *_viewed_files(command, adapter.repo_root or ""))
         )
-        # Self-diagnosing splice: the trajectory tool messages carry the exact
-        # evidence type so a post-run census is exact, not heuristic.
-        return f"[Verified: {result.envelope.evidence_type}]\n{cap_evidence(result.rendered)}"
-    return cap_evidence(result.rendered)
+    )
+    # A confirmed-dead cochange lane (no history table in the graph - the
+    # depth-1 benchmark checkout case) stops queuing recipes entirely; the
+    # first resolve already journaled the lane's verdict.
+    if cochange_files and not getattr(adapter, "_cochange_history_dead", False):
+        candidates.append(_EvidenceCandidate(
+            10, "cochange_partner", "",
+            {"kind": "cochange_partner", "dedup_key": "cochange-unbound",
+             "recipe": {"kind": "cochange",
+                        "params": {"files": list(cochange_files)}}},
+        ))
+    packet = [*additional_candidates]
+    for ordinal, candidate in enumerate(candidates):
+        metadata = dict(candidate.metadata)
+        producer_artifact = metadata.pop("artifact_sha256", "")
+        try:
+            if candidate.artifact_reference:
+                reference = candidate.artifact_reference
+            elif candidate.rendered:
+                reference = store_history_evidence(
+                    evidence_store, candidate.rendered.encode(),
+                    kind="decision_evidence",
+                )
+            else:
+                # Recipe candidates have no bytes until admission; the CAS
+                # reference and unit identity bind to the resolved render there.
+                reference = {}
+            packet.append(GTDecisionCandidate(
+                rendered=candidate.rendered, **metadata,
+                artifact_sha256=producer_artifact or reference.get("sha256", ""),
+                artifact_reference=reference or None,
+                unit_id=reference.get("sha256", ""),
+                supersession_key=f"{candidate.kind}:{candidate.metadata.get('target') or candidate.metadata.get('dedup_key')}",
+                source_revision=adapter.repository_revision,
+                previous_chain_head=candidate.previous_chain_head,
+                next_chain_head=candidate.chain_head,
+                verification_candidate=(candidate.rendered
+                                        if candidate.kind == "verification_plan" else ""),
+                source_ordinal=ordinal,
+                action_index=action_index,
+                current_failure=(candidate.kind == "syntax_result"
+                                 or (candidate.priority == 100
+                                     and event.test_outcome in {"fail", "env_fail"})),
+            ))
+        except Exception as exc:  # noqa: BLE001 - one malformed fact skips itself
+            # A fault inside a single producer's metadata must not amputate
+            # the session: the rest of the packet is still honest evidence.
+            adapter.store.append(
+                "decision_candidate_fault",
+                kind=str(candidate.kind),
+                ordinal=ordinal,
+                error_type=type(exc).__name__,
+                error=str(exc)[:200],
+            )
+    if decision_session is not None:
+        session.queue_decision_candidates(packet)
+        return ""
+    return "\n".join(session.admit_decision_packet(
+        packet, iteration=adapter.iteration, action_index=action_index,
+    ).context_additions)
+
+
+def _cochange_prior(
+    adapter: MiniSweAdapter, command: str, changed_files: tuple[str, ...]
+) -> str:
+    """Advisory co-change dose for the files this action edited or viewed."""
+    from .cochange_evidence import cochange_prior_dose
+
+    files = tuple(dict.fromkeys((*changed_files, *_viewed_files(command, adapter.repo_root or ""))))
+    if not files:
+        return ""
+    try:
+        return cochange_prior_dose(adapter, files)
+    except Exception:  # noqa: BLE001 - a prior is correct-or-quiet, never fatal
+        return ""
 
 
 def _coerce_session(owner: GTSession | MiniSweAdapter) -> GTSession:
@@ -468,11 +1056,65 @@ def _coerce_session(owner: GTSession | MiniSweAdapter) -> GTSession:
         GTSessionConfig(
             task_id=owner.task_id,
             repo_root=owner.repo_root,
-            state_dir=str(owner.store.root.parent),
+            state_dir=str(owner.engine_state.layout.state_root),
             mode=GTMode.ADVISORY,
         ),
         engine=owner,
     )
+
+
+def _pace_provider_retry(
+    adapter: MiniSweAdapter,
+    exc: BaseException,
+    pacing: PacingPolicy,
+) -> None:
+    """Pace one retryable provider attempt before the retry loop sees it.
+
+    The cohort's jobs share one account ceiling and one exponential schedule;
+    without pacing, twenty trials retry in lockstep and keep colliding with
+    the limit until the budget ends the trial. The delay is applied here —
+    inside the per-attempt transport — so every attempt failure decorrelates
+    the next retry phase. The attempt is journaled and diagnosed as
+    consequential evidence, then the ORIGINAL exception re-raises unchanged:
+    pacing delays a retry, it never converts one. A pacing fault is journaled
+    on the non-disabling channel rather than masking the provider failure
+    beneath it.
+    """
+    try:
+        decision = pacing.decide(exc)
+        if not decision.retryable:
+            return
+        adapter.store.append(
+            "provider_retry_paced",
+            iteration=adapter.iteration,
+            error_type=type(exc).__name__,
+            error=redact_secret_text(str(exc))[:500],
+            code=decision.code.value,
+            delay_seconds=round(decision.delay_seconds, 3),
+            basis=decision.basis,
+        )
+        adapter.diagnostics.record(
+            DiagnosticEvent.create(
+                code=decision.code, severity="WARNING",
+                phase="provider_retry_pacing", subsystem="provider",
+                capability="provider_transport", task_id=adapter.task_id,
+                classification="consequential",
+                cause=type(exc).__name__,
+                impact="provider_attempt_deferred",
+                recovery="paced_retry_within_provider_budget",
+                retryable=True,
+                event_sequence=int(adapter.store.receipt()["event_count"]),
+            )
+        )
+        pacing.sleep(decision.delay_seconds)
+    except Exception as pacing_exc:  # noqa: BLE001 - pacing never masks the raise
+        # Pacing is scheduling, not observation: a bookkeeping fault here
+        # takes the same non-disabling fault channel as provider_wait, never
+        # session.degrade — a pacing fault must not silence the terminal
+        # provider_failure receipt the outer wrapper still owes.
+        adapter._append_observation(
+            "provider_retry_pacing_fault", error_type=type(pacing_exc).__name__
+        )
 
 
 def install_runtime_hooks(
@@ -491,17 +1133,72 @@ def install_runtime_hooks(
     if adapter is None:
         raise TypeError("GTSession requires an integration engine")
     model = getattr(agent, "model", None)
+    model._gt_session = session
+    # The plan gate reads the agent's own clock and step count so a refusal
+    # can never be issued too close to the deadline to act on.
+    session._plan_agent = agent
     native_prepare = getattr(model, "_prepare_messages_for_api", None)
     native_query = getattr(model, "query", None)
     native_transport = getattr(model, "_query", None)
     native_add_messages = getattr(agent, "add_messages", None)
+    native_exact_provider_payload = getattr(model, "_gt_exact_provider_payload", None)
+    try:
+        from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
+    except ImportError:
+        BASH_TOOL, LitellmModel = None, ()  # type: ignore[assignment,misc]
+    if isinstance(model, LitellmModel):
+        import litellm
+
+        def tool_configurable_transport(
+            _model: Any, messages: list[dict], **kwargs: Any
+        ) -> Any:
+            provider_tools = kwargs.pop("_gt_provider_tools", None) or [BASH_TOOL]
+            kwargs.pop("_gt_select_catalog", None)
+            # Same removal as the catalog marker above. Without it this GT-only
+            # routing flag reached litellm.completion as an unknown keyword and
+            # was forwarded to the provider in the request body.
+            kwargs.pop("_gt_persistent_plan", None)
+            try:
+                return litellm.completion(
+                    model=_model.config.model_name,
+                    messages=messages,
+                    tools=provider_tools,
+                    **(_model.config.model_kwargs | kwargs),
+                )
+            except litellm.exceptions.AuthenticationError as exc:
+                exc.message += (
+                    " You can permanently set your API key with "
+                    "`mini-extra config set KEY VALUE`."
+                )
+                raise
+
+        def exact_provider_payload(
+            messages: list[dict], kwargs: dict[str, Any]
+        ) -> dict[str, Any]:
+            call_kwargs = dict(kwargs)
+            provider_tools = call_kwargs.pop("_gt_provider_tools", None) or [BASH_TOOL]
+            call_kwargs.pop("_gt_select_catalog", None)
+            call_kwargs.pop("_gt_persistent_plan", None)
+            return {
+                "model": model.config.model_name,
+                "messages": messages,
+                "tools": provider_tools,
+                **(dict(model.config.model_kwargs) | call_kwargs),
+            }
+
+        model._query = MethodType(tool_configurable_transport, model)
+        model._gt_exact_provider_payload = exact_provider_payload
     if not session.disabled:
         adapter.attach_provider_boundary(model, agent)
     prepare = getattr(model, "_prepare_messages_for_api", None)
+    transport = getattr(model, "_query", None)
     execute = getattr(agent, "execute_actions", None)
     environment = getattr(agent, "env", None)
     if not callable(prepare) or not callable(execute) or environment is None:
         raise TypeError("Mini-SWE agent must expose model normalization and execute_actions")
+    # Resolved once at install: a malformed pacing env fails the run before
+    # any provider spend, not at the first rate-limit mid-trial.
+    pacing = PacingPolicy.from_env()
 
     if adapter.phase == "ORIENT" and not session.disabled:
         try:
@@ -509,36 +1206,664 @@ def install_runtime_hooks(
         except Exception as exc:  # noqa: BLE001 - GT startup is fail-open
             session.degrade("session_start", exc)
 
+    bootstrap_started = False
+    bootstrap_preparing = False
+    plan_started = False
+    plan_preparing = False
+    # Internal calls bind one stable request identity end to end. The model's
+    # tenacity loop re-enters query_transport per attempt, so the committed
+    # delivery for each internal request id is held here: a retry reuses the
+    # first attempt's row instead of appending a duplicate provider_delivery
+    # under the same id, which the attribution census reads as a second
+    # request with a colliding identity.
+    internal_request_deliveries: dict[str, Any] = {}
+    # The previous action's post-image, reused as the next action's pre-image.
+    #
+    # capture_workspace ran twice per action -- 601 times on arktype at 1.08s
+    # each, 652s of a 6,049s task, the largest single piece of GT's own
+    # bookkeeping. The two captures describe the same tree: nothing between an
+    # action's post-image and the next action's pre-image touches the worktree,
+    # because the agent is not running and GT's own writes go to state
+    # directories that capture_workspace already excludes.
+    #
+    # "Reasonably certain" is not good enough for a snapshot, though: a stale
+    # pre-image would attribute one action's edit to the next, or lose it, and
+    # a lost edit means a missed epoch bump and evidence that outlives the code
+    # it described. So the carry is dropped by _drop_carried_snapshot() at every
+    # point where GT itself may run a subprocess against the worktree, and the
+    # capture happens for real on the next action.
+    carried_snapshot: Any = None
+    snapshot_carry_disabled = False
+    carried_check_generation = 0
+
     def prepare_messages(_model: Any, messages: list[dict]) -> list[dict]:
-        prepared = prepare(messages)
         if session.disabled:
+            if native_add_messages is not None:
+                agent.add_messages = native_add_messages
+            return native_prepare(messages)
+        if not bootstrap_preparing and not plan_preparing:
+            try:
+                collapse_superseded_context_units(session, adapter, messages)
+            except Exception:  # noqa: BLE001 - a collapse failure keeps full bytes
+                pass
+        prepared = prepare(messages)
+        if bootstrap_preparing or plan_preparing:
             return prepared
+        baseline_prepared = prepared
         try:
+            # Edits invalidate graph-derived claims, but an ordinary provider
+            # turn does not consume the graph and must not synchronously rebuild
+            # the whole repository. Native action boundaries keep the graph
+            # current through the adapter's synchronous amend/recovery path.
             batch = session.before_model(messages, iteration=adapter.iteration)
             parts = batch.context_additions
             if parts and prepared and isinstance(prepared[-1], dict):
                 last = dict(prepared[-1])
                 content = last.get("content", "")
                 if isinstance(content, str):
-                    last["content"] = f"{content}\n\n" + "\n\n".join(parts)
-                    prepared = [*prepared[:-1], last]
-            adapter.bind_provider_payload({
-                "messages": prepared,
-                "model": str(getattr(_model, "model_name", "") or ""),
-                "model_kwargs": dict(getattr(_model, "model_kwargs", {}) or {}),
-                "tools": getattr(_model, "tools", None),
-            })
+                    joined = "\n\n".join(parts)
+                    if joined not in content:
+                        last["content"] = f"{content}\n\n" + joined
+                        prepared = [*prepared[:-1], last]
+                        # Persist into the agent's own history. Deliveries
+                        # used to ride only the outgoing copy, so the model
+                        # saw evidence for exactly one request and then had
+                        # to re-discover it - the smoke-20 retrieval loop.
+                        # `messages` is the live agent.messages list; the
+                        # identity check makes transport retries (same
+                        # pending batch re-prepared) idempotent.
+                        if messages and isinstance(messages[-1], dict):
+                            hist_content = messages[-1].get("content", "")
+                            if isinstance(hist_content, str) and joined not in hist_content:
+                                messages[-1] = {
+                                    **messages[-1],
+                                    "content": f"{hist_content}\n\n" + joined,
+                                }
         except Exception as exc:  # noqa: BLE001 - prompt augmentation is fail-open
+            adapter.discard_pending_provider_deliveries(
+                reason="prepare_messages_error"
+            )
             session.degrade("prepare_messages", exc)
+            prepared = baseline_prepared
         return prepared
 
-    def query(_model: Any, messages: list[dict], **kwargs: Any) -> dict:
+    def query_transport(_model: Any, messages: list[dict], **kwargs: Any) -> Any:
+        """Admit only the exact, already-prepared payload sent to transport."""
+        provider_tools = kwargs.pop("_gt_provider_tools", None)
+        bootstrap_request = bool(kwargs.pop("_gt_select_catalog", False))
+        plan_request = bool(kwargs.pop("_gt_persistent_plan", False))
+        internal_request = bootstrap_request or plan_request
+        # Internal calls evaluate only the kind they carry: the catalog
+        # bootstrap's own offer is model-visible inside ITS payload, so the
+        # catalog call binds it — leaving it queued would orphan it until the
+        # next agent request faults it as unmatched. The plan call carries no
+        # GT delivery of its own; every other queued delivery stays for the
+        # agent turn either way.
+        pending_kinds = (
+            ("select_catalog",) if bootstrap_request else ()
+        ) if internal_request else None
+        if session.disabled:
+            adapter.discard_pending_provider_deliveries(
+                reason="gt_disabled_before_transport"
+            )
+            return native_transport(messages, **kwargs)
+        # Agent-facing recovery and churn steers belong only on agent turns.
+        # A GT-internal call (catalog offer, persistent plan) is not the agent
+        # conversation: admitting them here would append agent text to an
+        # internal request and leave the carried delivery unanswerable — the
+        # internal response binds by its task-scoped tag, never by the
+        # delivery ids an agent response would echo.
+        if (
+            not internal_request
+            and session.capability_model_visible("evidence_delivery")
+        ):
+            recovery = adapter.prepare_recovery_delivery()
+            if recovery:
+                messages = [*messages, {"role": "user", "content": recovery}]
+            churn_steer = adapter.prepare_churn_steer_delivery()
+            if churn_steer:
+                messages = [*messages, {"role": "user", "content": churn_steer}]
+        if not internal_request and getattr(adapter, "_plan_block_wire_sent", None) is True:
+            messages = _compact_plan_block_for_wire(messages, adapter)
+        context_window = int(os.environ.get("GT_PROVIDER_CONTEXT_WINDOW_TOKENS", "0") or 0)
+        reserved_output = int(
+            os.environ.get("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "0") or 0
+        )
+        metadata_source = os.environ.get("GT_PROVIDER_CONTEXT_WINDOW_SOURCE", "")
+        config = getattr(_model, "config", None)
+        model_name = str(
+            getattr(config, "model_name", "")
+            or getattr(_model, "model_name", "")
+            or ""
+        )
+        model_kwargs = dict(
+            getattr(config, "model_kwargs", None)
+            or getattr(_model, "model_kwargs", None)
+            or {}
+        )
+        tools = provider_tools if provider_tools is not None else getattr(_model, "tools", None)
+        if tools is None:
+            try:
+                from minisweagent.models.litellm_model import BASH_TOOL
+
+                tools = [BASH_TOOL]
+            except ImportError:
+                tools = None
         try:
-            message = original_query(messages, **kwargs)
+            from .context import compact_provider_view, message_chars
+            from .output_evidence import EvidenceStore
+
+            input_budget_tokens = max(1, context_window - reserved_output)
+            # The char pass below only elides; the token-accurate admission
+            # pass still enforces the real window afterward. Derive the
+            # elision budget from THIS request's measured chars-per-token
+            # density: the flat 2-chars-per-token proxy elided history
+            # roughly twice as early as the provider window required (code
+            # text runs ~3.5-4 chars/token).
+            probe_tokens = provider_request_tokens(
+                build_provider_request_envelope(
+                    messages=messages,
+                    model=model_name,
+                    model_kwargs=model_kwargs,
+                    tools=tools,
+                    call_kwargs=kwargs,
+                )
+            )
+            char_budget = max(
+                1,
+                message_chars(messages)
+                * input_budget_tokens
+                // max(1, probe_tokens),
+            )
+            # This seam receives Mini-SWE's provider-rendered messages. Keep its
+            # complete current action batch and archive older complete turns.
+            messages, history_receipt = compact_provider_view(
+                messages, checkpoint="",
+                char_budget=char_budget,
+                # Keep the longest contiguous tail of complete turn-groups
+                # that fits the byte budget: elision stays structural (whole
+                # groups, oldest first) but the provider window — not an
+                # arbitrary turn count — decides how much history survives.
+                max_tail_turns=len(messages),
+                tool_output_chars=PROVIDER_VIEW_TOOL_OUTPUT_CHARS,
+                artifact_store=EvidenceStore(adapter.engine_state.layout.evidence_root),
+            )
+            adapter.store.append("context_assembly", **history_receipt)
+            messages, payload, admission = render_and_admit_provider_request(
+                messages=messages, render_messages=lambda prepared: prepared,
+                model=model_name, model_kwargs=model_kwargs, tools=tools,
+                call_kwargs=kwargs,
+                context_window_tokens=context_window,
+                reserved_output_tokens=reserved_output,
+                metadata_source=metadata_source,
+                token_counter=provider_request_tokens,
+            )
+        except (ProviderContextWindowUnavailable, ProviderRequestTooLarge) as exc:
+            details = (
+                exc.admission.to_dict()
+                if isinstance(exc, ProviderRequestTooLarge)
+                else exc.to_dict()
+            )
+            adapter.store.append(
+                "provider_admission",
+                status="refused",
+                reason=exc.code,
+                **details,
+            )
+            if not internal_request:
+                adapter.discard_pending_provider_deliveries(reason=exc.code)
+            raise
+        except Exception:
+            if not internal_request:
+                adapter.discard_pending_provider_deliveries(
+                    reason="provider_admission_error"
+                )
+            raise
+        adapter.store.append(
+            "provider_admission",
+            status="admitted",
+            reason="within_provider_window",
+            **admission.to_dict(),
+        )
+        admission_sequence = int(adapter.store.receipt()["event_count"])
+        # The request is fully validated before the wire, but the delivery
+        # ledger and the session's shipped latches commit only after the
+        # transport returns. A raised attempt therefore leaves every pending
+        # delivery, exposure and queued candidate intact for the tenacity
+        # retry instead of claiming a delivery that was never sent.
+        try:
+            adapter.bind_provider_payload(
+                payload, commit=False, carry_pending=not internal_request,
+                pending_kinds=pending_kinds,
+            )
+        except Exception:
+            if not internal_request:
+                adapter.discard_pending_provider_deliveries(
+                    reason="request_receipt_error"
+                )
+            raise
+        # Internal calls bind one stable request identity end to end: the
+        # response/failure row carries the same tag, so the delivery's own id
+        # reaches the terminal census instead of being orphaned by a
+        # namespaced row it could never match. Their request row may commit
+        # before the wire — pending_kinds confines the commit to the kind the
+        # call itself carries — so a transport failure closes as a typed
+        # request+failure pair rather than a namespaced failure with no
+        # request.
+        internal_request_id = (
+            f"{adapter.task_id}-{_SELECT_CATALOG_REQUEST_TAG}"
+            if bootstrap_request
+            else f"{adapter.task_id}-{_PERSISTENT_PLAN_REQUEST_TAG}"
+            if plan_request
+            else ""
+        )
+        delivery = None
+        if internal_request:
+            delivery = internal_request_deliveries.get(internal_request_id)
+            if delivery is None:
+                delivery = adapter.bind_provider_payload(
+                    payload, request_id=internal_request_id, carry_pending=False,
+                    pending_kinds=pending_kinds,
+                )
+                internal_request_deliveries[internal_request_id] = delivery
+                # The call is spent the moment it is bound to the wire: counting
+                # here keeps a transport failure reconciled against the namespaced
+                # failure's terminal row, where counting after the return would
+                # lose the attempt entirely.
+                if bootstrap_request:
+                    adapter.note_select_catalog_bootstrap()
+                else:
+                    adapter.note_persistent_plan_bootstrap()
+        try:
+            response = transport(
+                messages,
+                **kwargs,
+                # The wire must carry the exact tool set the admitted envelope
+                # recorded. Forwarding only a caller-supplied override left
+                # ordinary turns shipping [BASH_TOOL] while the request manifest
+                # claimed the model's whole advertised set.
+                _gt_provider_tools=list(tools) if tools is not None else None,
+                **({"_gt_select_catalog": True} if bootstrap_request else {}),
+                **({"_gt_persistent_plan": True} if plan_request else {}),
+            )
+        except Exception as exc:
+            # This runs inside Mini-SWE's retry loop, per attempt. A retryable
+            # failure is paced here - journaled, diagnosed as consequential,
+            # delayed by the provider's own Retry-After or a jittered draw -
+            # then re-raised unchanged so the loop keeps its attempt budget.
+            # The admission row above has no delivery/response counterpart when
+            # the wire dies: journal the attempt's terminal row so admissions
+            # reconcile inside THIS journal too, not only in provider_events.
+            # A bookkeeping fault on this row must not mask the provider error.
+            try:
+                adapter.store.append(
+                    "provider_attempt_failed",
+                    iteration=adapter.iteration,
+                    admission_sequence=admission_sequence,
+                    error_type=type(exc).__name__,
+                    error=redact_secret_text(str(exc))[:500],
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            _pace_provider_retry(adapter, exc, pacing)
+            raise
+        if (
+            not internal_request
+            and getattr(adapter, "_plan_block_wire_sent", None) is False
+        ):
+            # The wire provably carried the full block once. From here the
+            # provider view carries the stable pointer; the durable task
+            # message keeps the contract text for the record.
+            adapter._plan_block_wire_sent = True
+            adapter.store.append(
+                "persistent_plan_wire_compacted",
+                rendered_sha256=str(
+                    (getattr(adapter, "plan_rendering_receipt", None) or {})
+                    .get("rendered_sha256") or ""
+                ),
+            )
+        if delivery is None:
+            try:
+                delivery = adapter.bind_provider_payload(payload)
+            except Exception:
+                adapter.discard_pending_provider_deliveries(
+                    reason="request_receipt_error"
+                )
+                raise
+        if bootstrap_request:
+            session.certify_select_catalog_offer(
+                request_bytes=json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), default=str,
+                ).encode("utf-8"),
+                tool_schema_bytes=json.dumps(
+                    tools, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), default=str,
+                ).encode("utf-8"),
+                provider_request_id=delivery.request_id,
+                delivery_ids=delivery.delivery_ids,
+            )
+        else:
+            # A persistent-plan bootstrap is a GT-internal call, not an agent
+            # decision: it cannot carry queued action evidence, so it must not
+            # drain that queue any more than the catalog offer may.
+            session.provider_request_admitted(
+                delivery.delivery_ids, drain_action_queue=not plan_request
+            )
+        return response
+
+    def bootstrap_select_catalog() -> None:
+        """Run one explicit catalog request without creating Mini-SWE actions."""
+
+        nonlocal bootstrap_started, bootstrap_preparing
+        if bootstrap_started:
+            return
+        offer = session.prepare_select_catalog()
+        if offer is None:
+            # Nothing offered this call. When the graph is not ready yet the
+            # catalog may exist later, so the latch stays unset and the next
+            # request retries; a decision the session actually made has already
+            # latched inside prepare_select_catalog and returns None forever.
+            return
+        bootstrap_started = True
+        captured: dict[str, Any] = {"arguments": None}
+        original_parser = getattr(model, "_parse_actions", None)
+
+        def parse_selection(_model: Any, response: Any) -> list[dict]:
+            choices = (
+                list(response.get("choices") or ())
+                if isinstance(response, dict)
+                else list(getattr(response, "choices", ()) or ())
+            )
+            message = None
+            if choices:
+                first = choices[0]
+                message = first.get("message") if isinstance(first, dict) else getattr(first, "message", None)
+            calls = (
+                list(message.get("tool_calls") or ())
+                if isinstance(message, dict)
+                else list(getattr(message, "tool_calls", ()) or ())
+            )
+            if len(calls) != 1:
+                return []
+            call = calls[0]
+            function = call.get("function") if isinstance(call, dict) else getattr(call, "function", None)
+            name = function.get("name") if isinstance(function, dict) else getattr(function, "name", "")
+            raw = function.get("arguments") if isinstance(function, dict) else getattr(function, "arguments", "")
+            if name != "select_catalog":
+                return []
+            try:
+                captured["arguments"] = json.loads(str(raw or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                captured["arguments"] = None
+            return []
+
+        try:
+            if callable(original_parser):
+                model._parse_actions = MethodType(parse_selection, model)
+            bootstrap_preparing = True
+            adapter.provider_wait_begin()
+            try:
+                message = native_query(
+                    list(offer.messages),
+                    _gt_provider_tools=[dict(offer.tool)],
+                    _gt_select_catalog=True,
+                    temperature=0.0,
+                    max_tokens=256,
+                    num_retries=0,
+                )
+            finally:
+                adapter.provider_wait_end()
+            # The call was counted inside query_transport at the wire boundary,
+            # so success AND transport failure both reconcile: anything still
+            # failing below degrades the catalog, never the call census.
+            extra = dict(message.get("extra") or {})
+            if captured["arguments"] is None:
+                captured["arguments"] = extra.get("select_catalog_args")
+            response = extra.get("response")
+            usage = response.get("usage") if isinstance(response, dict) else None
+            model_id = response.get("model", "") if isinstance(response, dict) else ""
+            adapter.bind_provider_response(
+                response, usage=usage, model=model_id, next_actions=(),
+                request_id=f"{adapter.task_id}-{_SELECT_CATALOG_REQUEST_TAG}",
+            )
+            session.accept_select_catalog(captured["arguments"])
+        except Exception as exc:  # noqa: BLE001 - selection is advisory
+            adapter.bind_provider_failure(
+                exc,
+                request_id=f"{adapter.task_id}-{_SELECT_CATALOG_REQUEST_TAG}",
+            )
+            session.fail_select_catalog(f"provider_error:{type(exc).__name__}")
+        finally:
+            bootstrap_preparing = False
+            if callable(original_parser):
+                model._parse_actions = original_parser
+
+    def bootstrap_persistent_plan() -> None:
+        """One planning call before the first edit; advisory throughout.
+
+        Sibling of ``bootstrap_select_catalog`` and deliberately identical in
+        shape: it creates no Mini-SWE action, it is counted at the transport the
+        moment the call is spent (a failure below must not lose a call and fail
+        receipt reconciliation), and any exception degrades the plan rather than
+        the run.
+
+        The rendered block is appended ONCE to the durable task message. That
+        message is the only large surface on this path nothing rewrites, so the
+        plan is paid for once and read on every later turn.
+        """
+        nonlocal plan_started, plan_preparing
+        if plan_started:
+            return
+        inputs = getattr(adapter, "plan_inputs", None)
+        if inputs is None:
+            # Plan inputs arrive after the index lands, and the index can be
+            # still building when the first request goes out. Latching here
+            # would mean the plan never exists; leave it unset and retry.
+            return
+        plan_started = True
+        from .persistent_plan import STATUS_ABSTAINED
+        from .persistent_plan.bootstrap import (
+            build_plan,
+            build_planning_messages,
+            parse_tool_arguments,
+            plan_tool_schema,
+            response_finish_reason,
+        )
+        from .persistent_plan.recovery import checkpoint_plan, restore_plan
+        from .persistent_plan.render import render_plan_block
+
+        plan = getattr(adapter, "_restored_initial_plan", None) or restore_plan(adapter.store, adapter.issue_text)
+        restored = plan is not None
+        finish_reason = "restored" if restored else ""
+        payload = None
+        original_parser = getattr(model, "_parse_actions", None)
+
+        def parse_nothing(_model: Any, _response: Any) -> list[dict]:
+            return []
+
+        try:
+            if not restored:
+                if callable(original_parser):
+                    model._parse_actions = MethodType(parse_nothing, model)
+                plan_preparing = True
+                adapter.provider_wait_begin()
+                try:
+                    message = native_query(
+                        list(build_planning_messages(inputs, adapter.issue_text)),
+                        _gt_provider_tools=[plan_tool_schema(inputs)],
+                        _gt_persistent_plan=True,
+                        temperature=0.0,
+                        # The reservation may raise the planning floor, never lower it.
+                        max_tokens=max(
+                            PLAN_MAX_OUTPUT_TOKENS,
+                            int(os.environ.get("GT_PROVIDER_RESERVED_OUTPUT_TOKENS") or 0),
+                        ),
+                        num_retries=0,
+                    )
+                finally:
+                    adapter.provider_wait_end()
+                # Counted inside query_transport at the wire boundary, same as
+                # the catalog offer — success and transport failure reconcile.
+                extra = dict(message.get("extra") or {})
+                response = extra.get("response")
+                usage = response.get("usage") if isinstance(response, dict) else None
+                model_id = response.get("model", "") if isinstance(response, dict) else ""
+                adapter.bind_provider_response(
+                    response, usage=usage, model=model_id, next_actions=(),
+                    request_id=f"{adapter.task_id}-{_PERSISTENT_PLAN_REQUEST_TAG}",
+                )
+                finish_reason = response_finish_reason(response)
+                payload = parse_tool_arguments(response)
+                note = ""
+                if payload is None:
+                    note = (
+                        "plan_call_truncated"
+                        if finish_reason == "length"
+                        else f"plan_call_returned_no_tool_call:{finish_reason or 'unknown'}"
+                    )
+                plan = build_plan(payload, inputs, note=note,
+                                  repo_root=getattr(adapter, "repo_root", ""))
+        except Exception as exc:  # noqa: BLE001 - planning is advisory
+            try:
+                adapter.bind_provider_failure(
+                    exc,
+                    request_id=f"{adapter.task_id}-{_PERSISTENT_PLAN_REQUEST_TAG}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            # The call failed; the inputs did not. Ledger rows, anchors, and
+            # covering checks were all computed before the call and stay
+            # true, so the deterministic floor still gives the submit gate a
+            # substrate. Run 35168421439 shipped over 3 live RED predicates
+            # because transport failure left persistent_plan unset entirely.
+            adapter.store.append(
+                "persistent_plan_unavailable",
+                error=f"{type(exc).__name__}: {exc}"[:300],
+                fallback="deterministic_floor",
+            )
+            try:
+                plan = build_plan(
+                    None, inputs,
+                    note=f"plan_call_transport_failed:{type(exc).__name__}",
+                    repo_root=getattr(adapter, "repo_root", ""),
+                )
+                finish_reason = "transport_failed"
+            except Exception:  # noqa: BLE001 - even the floor is advisory
+                return
+        finally:
+            plan_preparing = False
+            if callable(original_parser):
+                model._parse_actions = original_parser
+
+        try:
+            adapter.persistent_plan = plan
+            adapter.plan_inputs = plan.inputs
+            if not restored:
+                try:
+                    checkpoint_plan(adapter.store, plan, adapter.issue_text)
+                except Exception as exc:  # noqa: BLE001 - checkpointing is advisory
+                    adapter.store.append("persistent_plan_checkpoint_unavailable", error_type=type(exc).__name__)
+            # Store the plan document itself, not only its counts. Diagnosing
+            # the first production run meant downloading a gigabyte of artifacts
+            # to answer "what plan was built"; the answer should be a small file
+            # next to the journal that names it.
+            plan_blob = ""
+            try:
+                encoded = plan.canonical_json().encode("utf-8", "surrogatepass")
+                digest = hashlib.sha256(encoded).hexdigest()
+                adapter.store.put_blob("persistent_plans", digest, encoded)
+                plan_blob = f"persistent_plans/{digest}.json"
+            except Exception:  # noqa: BLE001 - storing the plan is advisory
+                plan_blob = ""
+            adapter.store.append(
+                "persistent_plan_loaded" if restored else "persistent_plan_built",
+                finish_reason=finish_reason,
+                tool_call_returned=payload is not None,
+                plan_blob=plan_blob,
+                **plan.counts(),
+            )
+            _print_plan_summary(plan, finish_reason)
+            if plan.status != STATUS_ABSTAINED:
+                adapter.register_plan_predicates(plan)
+                adapter.bind_initial_plan_checks()
+                adapter.publish_plan_state()
+                if hasattr(environment, "config") and hasattr(environment.config, "env"):
+                    environment.config.env["GT_PLAN_ROOT"] = str(adapter.store.root / "plan")
+                rendering_receipt = {}
+                block = render_plan_block(adapter.persistent_plan, receipt=rendering_receipt)
+                # Held so the accounting can say which rows were actually
+                # delivered rather than merely listed as retrievable.
+                adapter.plan_rendering_receipt = dict(rendering_receipt)
+                messages = getattr(agent, "messages", None)
+                if block and isinstance(messages, list) and len(messages) > 1:
+                    task_message = messages[1]
+                    content = task_message.get("content")
+                    if isinstance(content, str) and PLAN_BLOCK_TAG not in content:
+                        rendered_sha = rendering_receipt["rendered_sha256"]
+                        adapter.store.put_blob("plan_renderings", rendered_sha, block.encode("utf-8"))
+                        task_message["content"] = f"{content}\n\n{block}"
+                        adapter._plan_block_text = block
+                        adapter._plan_block_wire_sent = False
+                        adapter.store.append(
+                            "persistent_plan_delivered",
+                            rendered_blob=f"plan_renderings/{rendered_sha}.json",
+                            rendered_bytes=len(block.encode("utf-8")),
+                            plan_rows=len(plan.rows),
+                            process_id=plan.process_id,
+                            **rendering_receipt,
+                        )
+        except Exception as exc:  # noqa: BLE001 - delivery is advisory
+            session.degrade("persistent_plan_delivery", exc)
+
+    def query(_model: Any, messages: list[dict], **kwargs: Any) -> dict:
+        if session.disabled:
+            return native_query(messages, **kwargs)
+        try:
+            # The initial index may have landed while the provider was
+            # thinking. Poll here - not only at tool actions - so adoption
+            # is not stranded until the next command runs.
+            adapter._poll_startup_index()
+            bootstrap_select_catalog()
+            bootstrap_persistent_plan()
+            # The provider wait is the scheduling window for whole-graph
+            # work; begin/end are fail-open and never reach the call.
+            adapter.provider_wait_begin()
+            try:
+                message = original_query(messages, **kwargs)
+            finally:
+                adapter.provider_wait_end()
         except Exception as exc:
             if not session.disabled:
                 try:
                     adapter.bind_provider_failure(exc)
+                    if isinstance(exc, ProviderRequestTooLarge):
+                        code, retryable = (
+                            DiagnosticCode.GT_PROVIDER_REQUEST_TOO_LARGE,
+                            False,
+                        )
+                    elif isinstance(exc, ProviderContextWindowUnavailable):
+                        code, retryable = (
+                            DiagnosticCode.GT_PROVIDER_CONTEXT_WINDOW_UNAVAILABLE,
+                            False,
+                        )
+                    else:
+                        code, retryable = classify_provider_failure(exc)
+                    adapter.diagnostics.record(
+                        DiagnosticEvent.create(
+                            code=code, severity="ERROR", phase="provider_transport",
+                            subsystem="provider", capability="provider_transport",
+                            task_id=adapter.task_id, classification="primary",
+                            cause=type(exc).__name__, impact="provider_response_unavailable",
+                            recovery=(
+                                "refine_request_before_retry"
+                                if not retryable
+                                else "retry_transient_transport_failure"
+                            ),
+                            retryable=retryable,
+                            event_sequence=int(adapter.store.receipt()["event_count"]),
+                        )
+                    )
                 except Exception as receipt_exc:  # noqa: BLE001
                     session.degrade("provider_failure_receipt", receipt_exc)
             raise
@@ -565,29 +1890,7 @@ def install_runtime_hooks(
         return message
 
     def execute_actions(_agent: Any, message: dict) -> list[dict]:
-        from .engine.runner import engine_execute_actions
-        from .gt_session import GTMode
-
-        if session.mode == GTMode.ENGINE and not session.disabled:
-            try:
-                return engine_execute_actions(
-                    _agent,
-                    message,
-                    session=session,
-                    adapter=adapter,
-                    model=model,
-                    environment=environment,
-                    original_execute=execute,
-                )
-            except Submitted:
-                # Legitimate end-of-run signal from environment.execute; not an
-                # engine failure. Let Mini-SWE terminate normally.
-                raise
-            except Exception as exc:  # noqa: BLE001 - engine failure must fail open
-                # Degrade the session so every later step is stock execution;
-                # the current batch still runs literally via the fall-through.
-                session.degrade("engine_execute_actions", exc)
-
+        nonlocal carried_snapshot, snapshot_carry_disabled, carried_check_generation
         from .miniswe_typed_actions import (
             execute_typed_action_fail_open,
             is_typed_action,
@@ -595,26 +1898,64 @@ def install_runtime_hooks(
 
         actions = tuple((message.get("extra") or {}).get("actions") or ())
         outputs: list[dict] = []
+        repository_wide_queries = 0
+        typed_turn_bytes = 0
         rendered_by_index: dict[int, str] = {}
         typed_by_index: dict[int, dict[str, Any]] = {}
         directives: list[dict] = []
-        def submit_allowed() -> bool:
+        def submit_allowed(*, pre_execution: bool = False) -> bool:
             if session.disabled:
                 return True
             try:
-                return _run_submit_gate(session, command)
+                return _run_submit_gate(session, command, pre_execution=pre_execution)
             except Exception as exc:  # noqa: BLE001 - GT policy is fail-open
                 session.degrade("submit_gate", exc)
                 return True
 
         for action_index, action in enumerate(actions, start=1):
+            adapter.global_action += 1
             if is_typed_action(action):
                 # The planner explicitly selected this typed action. It never
                 # reaches the shell environment, and it is never inferred from
                 # Bash text. A router/analyzer fault produces an INCOMPLETE
                 # observation so Mini-SWE can select Bash on its next turn.
-                adapter.global_action += 1
                 typed_kind = str((action.get("gt_action") or {}).get("kind") or "")
+                typed_arguments = (action.get("gt_action") or {}).get("arguments") or {}
+                scopes = typed_arguments.get("paths", ["."])
+                repository_wide = bool(
+                    typed_kind == "exact_literal_search"
+                    and isinstance(scopes, list)
+                    and "." in scopes
+                )
+                if repository_wide and repository_wide_queries >= 1:
+                    output = json.dumps(
+                        {
+                            "schema": "gt.compiled_observation.v1",
+                            "direct_answer": None,
+                            "evidence": {
+                                "schema": "gt.evidence_artifact.v1",
+                                "semantics": "incomplete",
+                                "omissions": ["query_fanout_refused"],
+                            },
+                            "decision": {
+                                "schema": "gt.interception_decision.v1",
+                                "mode": "PASS_THROUGH",
+                                "reason_codes": ["refine_query_scope_next_turn"],
+                            },
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    outputs.append(session.suppress(action,
+                        {
+                            "output": output,
+                            "returncode": 2,
+                            "exception_info": "repository-wide query fanout refused",
+                            "extra": {"gt_typed_action": True},
+                        }, reason="query_fanout_refused"
+                    ))
+                    continue
+                repository_wide_queries += int(repository_wide)
                 capability = f"typed_{typed_kind}"
                 if not (
                     session.capability_active("typed_actions")
@@ -639,7 +1980,7 @@ def install_runtime_hooks(
                         payload, ensure_ascii=False, sort_keys=True,
                         separators=(",", ":"),
                     )
-                    outputs.append({
+                    outputs.append(session.suppress(action, {
                         "output": output,
                         "returncode": 2,
                         "exception_info": "GroundTruth typed capability disabled",
@@ -650,23 +1991,61 @@ def install_runtime_hooks(
                             ).hexdigest(),
                             "interception_decision": "PASS_THROUGH",
                         },
-                    })
+                    }, reason="capability_disabled"))
                     continue
-                request, result = execute_typed_action_fail_open(
+                if (
+                    typed_kind in _GRAPH_DEPENDENT_TYPED_KINDS
+                    and
+                    adapter.graph_db
+                    and not adapter.graph_fresh
+                    and session.capability_active("graph_refresh")
+                    and session.capability_active("graph_queries")
+                ):
+                    adapter.refresh_graph(phase="graph_query")
+                graph_snapshot = adapter.graph_query_snapshot()
+                request, result = session.execute(action, partial(execute_typed_action_fail_open,
                     action,
                     repo_root=adapter.repo_root or os.getcwd(),
                     configuration={
                         "graph_db": (
-                            adapter.graph_db
-                            if adapter.graph_fresh
+                            graph_snapshot.graph_path
+                            if graph_snapshot.graph_current
                             and session.capability_active("graph_queries")
                             else ""
                         ),
-                        "graph_fresh": adapter.graph_fresh,
-                        "repository_revision": adapter.repository_revision,
+                        "graph_fresh": graph_snapshot.graph_current,
+                        "repository_revision": graph_snapshot.source_revision,
                         "gt_mode": session.mode.value,
                     },
-                )
+                ))
+                result_bytes = len(str(result.get("output") or "").encode("utf-8"))
+                if typed_turn_bytes + result_bytes > 49_152:
+                    output = json.dumps(
+                        {
+                            "schema": "gt.compiled_observation.v1",
+                            "direct_answer": None,
+                            "evidence": {
+                                "schema": "gt.evidence_artifact.v1",
+                                "semantics": "incomplete",
+                                "omissions": ["query_turn_budget_exceeded"],
+                            },
+                            "decision": {
+                                "schema": "gt.interception_decision.v1",
+                                "mode": "PASS_THROUGH",
+                                "reason_codes": ["refine_query_scope_next_turn"],
+                            },
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    result = {
+                        "output": output,
+                        "returncode": 2,
+                        "exception_info": "typed query turn budget exceeded",
+                        "extra": {"gt_typed_action": True},
+                    }
+                    result_bytes = len(output.encode("utf-8"))
+                typed_turn_bytes += result_bytes
                 outputs.append(result)
                 extra = dict(result.get("extra") or {})
                 typed_by_index[action_index] = {
@@ -687,75 +2066,119 @@ def install_runtime_hooks(
                     ) if request is not None else False,
                 }
                 continue
+            session.observe_select_catalog_action(_command(action))
             command = _command(action)
-            if not command:
+            executed_surface = _executed_command_surface(action)
+            if not executed_surface.strip():
                 # Stock Mini-SWE still delegates a malformed/empty action to
                 # the environment. GT must observe less, not invent a result
                 # or consume an action the baseline would have executed.
-                outputs.append(environment.execute(action))
+                outputs.append(session.execute(action, partial(environment.execute, action)))
                 continue
             is_submit = False
             if not session.disabled:
                 try:
-                    is_submit = is_submit_command(command)
+                    is_submit = is_submit_command(executed_surface)
                 except Exception as exc:  # noqa: BLE001 - detection is fail-open
                     session.degrade("submit_detection", exc)
-            # Command-level fast path: the marker is literally in the command.
             if is_submit:
-                if submit_allowed():
-                    outputs.append(environment.execute(action))
-                else:
-                    outputs.append(dict(_NOT_EXECUTED))
+                # The submit gate may re-run the repository's own suite to check
+                # the regression baseline, and a suite can write to tracked
+                # files. Anything carried from before that is no longer a
+                # description of this worktree, so the next action captures for
+                # real rather than trusting it.
+                carried_snapshot = None
+            # Command-level fast path: the marker is literally in the command.
+            if is_submit and not submit_allowed(pre_execution=True):
+                outputs.append(session.suppress(action, dict(_NOT_EXECUTED), reason="submit_refused"))
+                if session.can_enforce:
+                    # The enforced gate speaks for itself. A plan-gate refusal
+                    # has already queued its own directive, and rendering the
+                    # ENFORCED text beside it would describe a posture this run
+                    # is not in.
                     directives.append(_refusal_directive(adapter))
                 continue
             preimage = None
             pre_snapshot = None
             if not session.disabled:
                 try:
-                    adapter.global_action += 1
                     adapter.before_action("bash", command)
                     preimage = _capture_edit_preimage(adapter, command)
                     if (
                         adapter.repo_root
                         and session.capability_active("snapshot_authority")
                     ):
-                        pre_snapshot = capture_workspace(
-                            adapter.repo_root,
-                            excluded_roots=(_state_exclusion(adapter),),
-                        )
+                        pre_snapshot = (carried_snapshot
+                                        if carried_check_generation == getattr(adapter, "_automatic_check_generation", 0)
+                                        and not getattr(adapter, "_background_writers_seen", False)
+                                        else None)
+                        if pre_snapshot is None:
+                            pre_snapshot = capture_workspace(
+                                adapter.repo_root,
+                                excluded_roots=_state_exclusions(adapter),
+                            )
                         adapter.record_repository_snapshot(
                             pre_snapshot, boundary="before_action"
                         )
+                        _refresh_native_graph(adapter, session)
                 except Exception as exc:  # noqa: BLE001 - observation is fail-open
                     session.degrade("before_action", exc)
+            pending_submission = None
             try:
-                result = environment.execute(action)
-            except Submitted:
+                result = session.execute(action, partial(environment.execute, action))
+            except Submitted as exc:
                 # RESULT-level submit interception: the command's OUTPUT began
                 # with the magic string even though the command text did not
-                # (an adversarial shell-joined bypass). The gate is the
-                # authority here, exactly as Mini-SWE's own _check_finished is
-                # for a legitimate submit. Refused -> instruction-channel
-                # directive; accepted -> let the run exit via the raised
-                # Submitted.
-                if submit_allowed():
+                # Preserve the terminal while normal post-action processing
+                # captures its workspace effects. A pre-execution suppression
+                # receipt cannot authorize refusal after this command ran.
+                pending_submission = exc
+                result = getattr(exc, "gt_execution_result", None)
+                if not isinstance(result, dict):
+                    # Third-party environments may discard the raw result when
+                    # raising Submitted. Preserve native termination and mark
+                    # incomplete observation instead of inventing a result.
+                    session.degrade("submitted_result_missing", RuntimeError("original result unavailable"))
                     raise
-                outputs.append(dict(_NOT_EXECUTED))
-                directives.append(_refusal_directive(adapter))
-                continue
             outputs.append(result)
             if session.disabled:
+                if pending_submission is not None:
+                    raise pending_submission
                 continue
             output = _observation_output(result)
             returncode = _returncode(result)
+            output_artifact = (result.get("extra") or {}).get("output_artifact")
+            timed_out = bool((result.get("extra") or {}).get("timed_out"))
+            capture_meta = result.get("extra") or {}
+            if (capture_meta.get("surviving_descendants")
+                    or capture_meta.get("descendant_scope") != "linux_subreaper"):
+                snapshot_carry_disabled = True
+            # A shell may exit zero before a child holding stdout times out.
+            # Preserve its actual exit code in the artifact, never certify the
+            # interrupted workload from that aggregate zero.
+            semantic_returncode = None if timed_out else returncode
             try:
                 changed_files, edit_before_after = _capture_edit_after(adapter, preimage)
                 created_files: tuple[str, ...] = ()
+                # Bound here, not inside the branch below: the evidence call is
+                # past several dedents and would raise NameError on any action
+                # that captured no pre-action snapshot.
+                pre_graph_snapshot = None
+                transaction_artifacts: dict | None = None
                 if pre_snapshot is not None:
                     post_snapshot = capture_workspace(
                         adapter.repo_root,
-                        excluded_roots=(_state_exclusion(adapter),),
+                        excluded_roots=_state_exclusions(adapter),
                     )
+                    # This tree is the next action's starting tree, unless GT
+                    # runs something against the worktree in between.
+                    carried_snapshot = (
+                        post_snapshot if not snapshot_carry_disabled
+                        and capture_meta.get("capture_complete") is True
+                        and post_snapshot.complete else None
+                    )
+                    carried_check_generation = getattr(adapter, "_automatic_check_generation", 0)
+                    pre_graph_snapshot = adapter.graph_query_snapshot()
                     transaction = diff_workspace(
                         pre_snapshot,
                         post_snapshot,
@@ -765,15 +2188,24 @@ def install_runtime_hooks(
                     adapter.record_repository_snapshot(
                         post_snapshot, boundary="after_action"
                     )
+                    if transaction.complete:
+                        # An empty authoritative diff is evidence of no edit.
+                        # Do not retain shell-intent guesses from outside root.
+                        changed_files = transaction.changed_paths
+                        edit_before_after = {}
                     if transaction.changes:
+                        transaction_artifacts = compile_transaction_artifacts(
+                            transaction,
+                            graph_db=(
+                                pre_graph_snapshot.graph_path
+                                if pre_graph_snapshot.graph_current
+                                else None
+                            ),
+                        )
                         adapter.record_edit_transaction(transaction)
-                        adapter.record_transaction_artifacts(
-                            compile_transaction_artifacts(
-                                transaction,
-                                graph_db=(
-                                    adapter.graph_db if adapter.graph_fresh else None
-                                ),
-                            )
+                        adapter.record_transaction_artifacts(transaction_artifacts)
+                        adapter.prepare_verification_candidate(
+                            transaction, pre_graph_snapshot
                         )
                         changed_files = transaction.changed_paths
                         created_files = _created_files_excluding_exact_renames(transaction)
@@ -791,15 +2223,7 @@ def install_runtime_hooks(
                     if adapter.phase != "IMPLEMENT":
                         adapter.begin_implement()
                     adapter.note_edit(changed_files)
-                    if (
-                        adapter.graph_db
-                        and not adapter.graph_fresh
-                        and session.capability_active("graph_refresh")
-                        and os.environ.get(
-                            "GT_REFRESH_INDEX_AFTER_EDIT", ""
-                        ).strip().lower() in {"1", "true", "yes", "on"}
-                    ):
-                        adapter.refresh_graph()
+                _refresh_native_graph(adapter, session)
                 if returncode not in (None, 0):
                     adapter.record_episode_failure(
                         command=command,
@@ -818,50 +2242,149 @@ def install_runtime_hooks(
                 session.after_action(
                     command=command,
                     output=output,
-                    returncode=returncode,
+                    returncode=semantic_returncode,
                     action_index=action_index,
                 )
-                rendered = ""
-                if session.capability_active("evidence_delivery"):
-                    rendered = _run_evidence(
-                        adapter, command, output, returncode, adapter.global_action,
-                        changed_files, edit_before_after, created_files,
-                        allow_live_probes=session.allows_live_probes,
+                execution_candidates = []
+                if pre_snapshot is not None:
+                    adapter.observe_plan_checks(command, result, pre_snapshot, post_snapshot, environment)
+                # Quoted payload is message text, never command shape:
+                # `git commit -m 'x;pytest'` must not reset the governor's
+                # verification-failure streak or read as a search.
+                command_surface = _unquoted_command_surface(command)
+                adapter.note_search_drift(command_surface)
+                churn_signal = adapter.churn_governor.observe(
+                    command_surface,
+                    productive=bool(changed_files),
+                    returncode=returncode,
+                )
+                if churn_signal == "steer":
+                    adapter.queue_churn_steer(
+                        adapter.build_churn_steer(
+                            adapter.churn_governor.stall_turns
+                        )
                     )
-                    if not session.capability_model_visible("evidence_delivery"):
-                        rendered = ""
+                elif churn_signal == "verify_steer":
+                    adapter.queue_churn_steer(
+                        adapter.build_verify_steer(
+                            adapter.churn_governor.verify_fail_streak
+                        )
+                    )
+                elif churn_signal == "abort":
+                    adapter.signal_churn_abort()
                 execution = compile_execution_evidence(
                     command=command,
                     output=output,
                     returncode=returncode,
                     action_id=adapter.global_action,
                     repository_revision=adapter.repository_revision,
+                    output_artifact=output_artifact,
+                    timed_out=timed_out,
+                    environment_sha256=str((result.get("extra") or {}).get("environment_sha256") or ""),
+                    output_artifact_path=(
+                        str(Path(result["extra"]["output_artifact"]["root"])
+                            / result["extra"]["output_artifact"]["sha256"])
+                        if (result.get("extra") or {}).get("output_artifact") else ""
+                    ),
                 )
                 if (
                     execution is not None
                     and session.capability_active("execution_evidence")
                 ):
-                    structured = adapter.record_execution_evidence(execution)
+                    structured = adapter.record_execution_evidence(
+                        execution, command=command
+                    )
                     if session.capability_model_visible("execution_evidence"):
-                        rendered = "\n".join(
-                            part for part in (structured, rendered) if part
+                        from .output_evidence import EvidenceStore
+                        from .request_history import store_history_evidence
+
+                        execution_digest = hashlib.sha256(execution.canonical_bytes()).hexdigest()
+                        execution_reference = store_history_evidence(
+                            EvidenceStore(adapter.engine_state.layout.evidence_root),
+                            execution.canonical_bytes(), kind="execution_evidence",
                         )
+                        execution_candidates.append(GTDecisionCandidate(
+                            rendered=structured, kind="execution_evidence",
+                            dedup_key=f"execution:{execution_digest}",
+                            artifact_sha256=execution_digest,
+                            artifact_reference=execution_reference,
+                            current_failure=(execution.outcome in {"fail", "env_fail"}
+                                             or execution.observed_test_outcome in {"fail", "env_fail"}),
+                            action_index=adapter.global_action,
+                            unit_id=execution_digest,
+                            supersession_key=f"execution:{execution.command_sha256}",
+                            source_revision=execution.repository_revision,
+                        ))
+                if session.capability_model_visible("evidence_delivery"):
+                    if session.allows_live_probes:
+                        # GT's own bounded probes run HERE, after the post-image
+                        # above was taken, and they write into the worktree:
+                        # `py_compile` drops bytecode beside every source it
+                        # checks, and the covering lane runs the repository's
+                        # own tests. Anything carried from before them describes
+                        # a tree GT has since moved itself, so the next action's
+                        # diff would charge GT's own bytecode to the agent --
+                        # a phantom edit, a spurious epoch bump, and evidence
+                        # invalidated for nothing. This is one of the points the
+                        # module comment above means by "GT itself may run a
+                        # subprocess against the worktree"; it was the one place
+                        # that did not honour it.
+                        carried_snapshot = None
+                    rendered = _run_evidence(
+                        adapter, command, output, semantic_returncode, adapter.global_action,
+                        changed_files, edit_before_after, created_files,
+                        allow_live_probes=session.allows_live_probes,
+                        decision_session=session,
+                        additional_candidates=tuple(execution_candidates),
+                        output_artifact=output_artifact,
+                        pre_edit_graph=(
+                            pre_graph_snapshot.graph_path
+                            if pre_graph_snapshot is not None
+                            and pre_graph_snapshot.graph_current
+                            else ""
+                        ),
+                        syntax_findings=tuple(
+                            row for row in (
+                                (transaction_artifacts or {}).get("syntax") or ()
+                            )
+                            if row.get("valid") is False
+                            or (
+                                row.get("status") == "incomplete"
+                                and "syntax_tree_incomplete"
+                                in (row.get("diagnostics") or ())
+                            )
+                        ),
+                    )
+                else:
+                    session.queue_decision_candidates(execution_candidates)
+                    rendered = ""
                 if rendered and session.model_visible:
                     rendered_by_index[action_index] = rendered
-                if adapter.pending_transient and session.model_visible:
-                    directives.append({
-                        "role": "user", "content": adapter.pending_transient,
-                    })
-                    adapter.pending_transient = ""
             except Exception as exc:  # noqa: BLE001 - preserve tool observation
                 session.degrade("after_action", exc)
                 rendered_by_index.clear()
                 directives.clear()
+            if pending_submission is not None:
+                # Observe the policy outcome, but pre-execution authority cannot
+                # suppress an already executed action or its native terminal.
+                submit_allowed()
+                raise pending_submission
         if not session.disabled and session.model_visible:
             for directive in adapter.pending_directives:
+                try:
+                    encoded = directive.encode("utf-8")
+                    identity = hashlib.sha256(encoded).hexdigest()
+                    adapter.store.put_blob("plan_gate_directives", identity, encoded)
+                    adapter.store.append("plan_gate_directive_prepared",
+                                         rendered_sha256=identity, rendered_bytes=len(encoded),
+                                         rendered_blob=f"plan_gate_directives/{identity}.json")
+                except Exception as exc:  # receipt failure must not discard the gate's guidance
+                    session.degrade("plan_gate_delivery_receipt", exc)
                 directives.append({"role": "user", "content": directive})
         adapter.pending_directives = []
         formatter = getattr(model, "format_observation_messages", None)
+        if session.disabled and native_add_messages is not None:
+            agent.add_messages = native_add_messages
         if callable(formatter):
             formatted = list(formatter(message, outputs, agent.get_template_vars()))
             if not session.disabled:
@@ -902,6 +2425,21 @@ def install_runtime_hooks(
     model._prepare_messages_for_api = MethodType(prepare_messages, model)
     model._gt_original_query = original_query
     model.query = MethodType(query, model)
+    if callable(transport):
+        model._query = MethodType(query_transport, model)
+        # The admission refusals raised inside query_transport are
+        # deterministic (``retryable = False``): a replayed request can only
+        # refuse again. Register them on the model's own abort list so the
+        # tenacity loop in ``LitellmModel.query`` stops after one attempt
+        # instead of spending up to ten billed retries on the same refusal.
+        # Instance-scoped: the shared class list is left untouched.
+        abort_exceptions = getattr(model, "abort_exceptions", None)
+        if isinstance(abort_exceptions, list):
+            model.abort_exceptions = [
+                *abort_exceptions,
+                ProviderContextWindowUnavailable,
+                ProviderRequestTooLarge,
+            ]
     agent._gt_original_execute_actions = execute
     agent.execute_actions = MethodType(execute_actions, agent)
     handle = RuntimeHookHandle(
@@ -915,6 +2453,7 @@ def install_runtime_hooks(
         native_query=native_query,
         native_transport=native_transport,
         native_add_messages=native_add_messages,
+        native_exact_provider_payload=native_exact_provider_payload,
     )
     agent._gt_runtime_hook_handle = handle
     return handle

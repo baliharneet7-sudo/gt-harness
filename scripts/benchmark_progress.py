@@ -122,7 +122,15 @@ def emit_official(root: Path, suite: str, task_id: str) -> dict[str, Any]:
     return {"schema": SCHEMA, "benchmark_suite": suite, "tasks": [task]}
 
 
-def emit_harbor(root: Path, task_id: str) -> dict[str, Any]:
+def emit_harbor(
+    root: Path,
+    task_id: str,
+    *,
+    model: str = "",
+    effective_model: str = "",
+    treatment_sha: str = "",
+    gt_source_sha: str = "",
+) -> dict[str, Any]:
     """Read Terminal-Bench's official Harbor verifier result without job-status inference."""
     matches: list[tuple[Path, dict[str, Any]]] = []
     for path in sorted(root.rglob("result.json")) if root.exists() else []:
@@ -166,7 +174,15 @@ def emit_harbor(root: Path, task_id: str) -> dict[str, Any]:
             if not matches
             else "multiple_harbor_trial_results",
         }
-    return {"schema": SCHEMA, "benchmark_suite": "terminal-bench-2", "tasks": [task]}
+    receipt = {"schema": SCHEMA, "benchmark_suite": "terminal-bench-2", "tasks": [task]}
+    metadata = {
+        "model": model,
+        "effective_model": effective_model,
+        "treatment_sha": treatment_sha,
+        "gt_source_sha": gt_source_sha,
+    }
+    receipt.update({key: value for key, value in metadata.items() if value})
+    return receipt
 
 
 def emit_live(planned_csv: str, results_path: Path) -> dict[str, Any]:
@@ -279,6 +295,10 @@ def main() -> int:
     harbor.add_argument("--root", type=Path, required=True)
     harbor.add_argument("--task-id", required=True)
     harbor.add_argument("--output", type=Path, required=True)
+    harbor.add_argument("--model", default="")
+    harbor.add_argument("--effective-model", default="")
+    harbor.add_argument("--treatment-sha", default="")
+    harbor.add_argument("--gt-source-sha", default="")
     live = sub.add_parser("emit-live")
     live.add_argument("--planned-csv", required=True)
     live.add_argument("--results", type=Path, required=True)
@@ -292,7 +312,14 @@ def main() -> int:
     if args.command == "emit-official":
         payload = emit_official(args.root, args.suite, args.task_id)
     elif args.command == "emit-harbor":
-        payload = emit_harbor(args.root, args.task_id)
+        payload = emit_harbor(
+            args.root,
+            args.task_id,
+            model=args.model,
+            effective_model=args.effective_model,
+            treatment_sha=args.treatment_sha,
+            gt_source_sha=args.gt_source_sha,
+        )
     elif args.command == "emit-live":
         payload = emit_live(args.planned_csv, args.results)
     else:

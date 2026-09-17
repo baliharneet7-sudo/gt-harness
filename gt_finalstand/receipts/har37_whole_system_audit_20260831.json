@@ -1,0 +1,43 @@
+{
+  "authorization": {
+    "benchmark_ready": false,
+    "reason": "explicit_user_approval_required"
+  },
+  "checks": [
+    {
+      "collected": 760,
+      "command": "python -m pytest -q -rA",
+      "exit_code": 0,
+      "failed": 0,
+      "passed": 754,
+      "skipped": 6,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "4bf167770ec7851b9c98b2deba4728ef31a83b015dadc952667a8b37a88213ae"
+    },
+    {
+      "command": "GH_TOKEN=<gh auth token> python scripts/validate_gt_finalstand.py",
+      "exit_code": 0,
+      "result": "{\r\n  \"counts\": {\r\n    \"direct\": 17,\r\n    \"language_operation_pairs\": 210,\r\n    \"languages\": 30,\r\n    \"role_audit\": 129,\r\n    \"todo_statuses\": 26\r\n  },\r\n  \"errors\": [],\r\n  \"harness_commit\": \"bf8dd8f0af3111059ec2b84508e4585622f2df7d\",\r\n  \"ok\": true,\r\n  \"schema\": \"gt.finalstand.validation.v1\",\r\n  \"status_counts\": {\r\n    \"COMPLETE\": 25,\r\n    \"REMOVED\": 1\r\n  }\r\n}",
+      "validation_receipt_sha256": "4288be95d4bd066530192e541785e7d86ffe86306789561f5d96fe2a1db6430d"
+    },
+    {
+      "command": "python -c verify_terminal_receipt(har5_terminal_baseline.json)",
+      "exit_code": 0,
+      "receipt_sha256": "476deabd71c0f2a81110b2a3325fb058df700c62e17f99a6d24079ca39cf68fc",
+      "result": "True; benchmark_ready=false; provider_calls=0; benchmark_runs=0"
+    }
+  ],
+  "cross_boundary": {
+    "benchmark_runs": 0,
+    "groundtruth_engine_probe_status": "PASS",
+    "har36_windows_witness_status": "PASS",
+    "har5_final_receipt_sha256": "476deabd71c0f2a81110b2a3325fb058df700c62e17f99a6d24079ca39cf68fc",
+    "provider_calls": 0
+  },
+  "groundtruth_head": "f2863f8781edaeaef8787c515e36381cdbd692d5",
+  "harness_head": "bf8dd8f0af3111059ec2b84508e4585622f2df7d",
+  "repository": "harneet2512/gt-harness",
+  "schema": "gt.har37.whole_system_audit.v1",
+  "status": "PASS",
+  "tree_manifest_sha256": "7d02f2cb937067f91278eacff21354f3c8f6fa220ed38f96fae876a16878d51f"
+}

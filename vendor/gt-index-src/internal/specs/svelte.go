@@ -10,15 +10,10 @@ func init() {
 		Extensions: []string{".svelte"},
 		Language:   svelte.GetLanguage(),
 
-		// The vendored svelte grammar parses `<script>` content as `raw_text`;
-		// it never emits function_declaration/call_expression, so no
-		// definition or call can be extracted. caller_support is False in the
-		// host registry until a grammar-aware extraction path is verified on
-		// the Linux source-built indexer.
 		FunctionNodes: []string{},
 		ClassNodes:    []string{},
-		CallNodes:     []string{},
-		ImportNodes:   []string{},
+		CallNodes:     []string{"call_expression"},
+		ImportNodes:   []string{"import_statement"},
 
 		NameField:       "name",
 		ReturnTypeField: "",

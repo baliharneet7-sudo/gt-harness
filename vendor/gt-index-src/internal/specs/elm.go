@@ -17,12 +17,8 @@ func init() {
 
 		NameField:       "",
 		ReturnTypeField: "",
-		// The vendored tree-sitter-elm grammar exposes a `body` field on
-		// value_declaration. An empty BodyField made childByFieldOrType return
-		// nil, so extractCalls never ran and elm produced zero CALLS edges
-		// despite valid definitions.
-		BodyField:   "body",
-		ParamsField: "",
+		BodyField:       "",
+		ParamsField:     "",
 
 		IsExported: func(name string) bool {
 			return true

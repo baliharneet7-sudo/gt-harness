@@ -1,0 +1,34 @@
+{
+  "binary_bytes": 60574058,
+  "binary_path": "D:/gt-har80-artifacts/gt-index-har80.exe",
+  "binary_sha256": "2b4c2e2fd9a09db58292482aae35c7c082747f7c3facbb2817d44e85b59f2c02",
+  "build_id": "811e3fd4bda94dcaafb9a5076e609324b085b17253eb072616f59d55ced0e3b8",
+  "build_tags": "sqlite_fts5",
+  "capabilities": [
+    "atomic_graph_publication",
+    "call_resolution_v2",
+    "framework_surface_resolution_v1",
+    "incremental_stale_suppression",
+    "parse_failure_accounting",
+    "retained_call_candidates",
+    "versioned_query_policy"
+  ],
+  "cgo_enabled": true,
+  "go_toolchain": "go1.26.7",
+  "goarch": "amd64",
+  "goos": "windows",
+  "graph_schema_version": "v15.2-trust-tier",
+  "module_closure": {
+    "complete": true,
+    "go_mod": "go.mod",
+    "go_sum": "go.sum"
+  },
+  "receipt_digest_sha256": "bf738c2e76806356a4c0383e861cff6821d29a6e6b342956bc863272ccac30ad",
+  "schema": "gt.producer_artifact.v2",
+  "source_commit": "43c6d723840f784d5eb939418dc2df57a6ff0a37",
+  "source_manifest_file_count": 2197,
+  "source_manifest_sha256": "a3aa83504c235caf46dd7ee8e424ca599575cd75633e99f7c4754691d99a499b",
+  "source_repository": "github.com/harneet2512/groundtruth",
+  "source_tree": "1028a3b8f6be7c585393ce07b2e9ba87bd052084",
+  "status": "VERIFIED"
+}

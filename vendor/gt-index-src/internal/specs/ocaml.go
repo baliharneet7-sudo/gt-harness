@@ -12,15 +12,14 @@ func init() {
 
 		FunctionNodes: []string{"value_definition", "let_binding"},
 		ClassNodes:    []string{"type_definition", "module_definition"},
-		CallNodes:     []string{"application_expression"},
+		CallNodes:     []string{"application"},
 		ImportNodes:   []string{"open_statement"},
 
-		// The vendored OCaml grammar exposes no "name" field on
-		// value_definition/let_binding; the name lives in a value_name wrapper
-		// child. parser.functionNodeName descends to the first value_name
-		// (grammar-scoped), so `let target value = ...` yields the bare name
-		// "target". Pattern-matching bindings (let (a, b) = ...) without a
-		// value_name abstain.
+		// KNOWN LIMITATION: OCaml tree-sitter grammar does not expose a "name" field
+		// on value_definition or let_binding nodes. Names are extracted via the
+		// extractFirstIdentifier fallback in parser.go, which finds the first
+		// identifier child node. This works for simple let bindings (let foo = ...)
+		// but may fail for pattern-matching bindings (let (a, b) = ...).
 		NameField: "",
 		BodyField: "body",
 

@@ -1,1 +1,1 @@
-"""Repository-owned benchmark and verification scripts."""
+"""Installed runtime and product command modules."""

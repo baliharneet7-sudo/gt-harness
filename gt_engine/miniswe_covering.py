@@ -19,9 +19,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-from gt_engine.language_registry import INDEXABLE_SOURCE_SUFFIXES
+_SOURCE_EXTS = frozenset({
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".c",
+    ".cc", ".h", ".cpp", ".rb", ".php", ".swift", ".cs",
+})
 
-_SOURCE_EXTS = INDEXABLE_SOURCE_SUFFIXES
+# Extensions the certified producer parser checks (parser_inspection._LANGUAGE,
+# mirrored from compile_transaction_artifacts). Edits outside this set have no
+# harness-certified syntax check and the probe abstains.
+_SYNTAX_PROBE_EXTS = frozenset({
+    ".py", ".pyi", ".go", ".ts", ".tsx", ".js", ".jsx", ".rs",
+})
+
+# gt-index -inspect-jsonl rejects request payloads above this bound
+# (cmd/gt-index/inspection.go maxInspectionBytes).
+_MAX_INSPECTION_BYTES = 2 * 1024 * 1024
 
 
 def _repo_relative(path: str, repo_root: str) -> str | None:
@@ -68,27 +80,102 @@ _TEST_FAILURE_FILE_RE = __import__("re").compile(
     r"(?m)([A-Za-z0-9_./-]+\.py)(?::\d+|::)"
 )
 
+# Path-bearing tokens in test output: ``vendor/src/a.py``, ``src/a.py:12``,
+# ``tests/test_a.py::test_x``, ``D:\repo\src\a.py``. Anything without a
+# separator or extension never matches an edited path anyway.
+_OUTPUT_TOKEN_RE = __import__("re").compile(r"[A-Za-z0-9_~$./\\:+@=-]+")
+
 
 def _failing_test_files(output: str) -> tuple[str, ...]:
     """Test source files named in a failing test's output (best-effort)."""
     return tuple(dict.fromkeys(_TEST_FAILURE_FILE_RE.findall(output or "")))
 
 
-def attribute_test_failure(adapter, command: str, output: str, *, returncode):
+def _command_cwds(command: str, repo_root: str) -> list[str]:
+    """Working directories named by ``cd`` segments in the command.
+
+    ``cd tests && pytest`` emits paths relative to ``tests/`` - and an agent
+    quoting ``../src/a.py`` still reaches the edited file it hit. A ``cd``
+    inside quoted payload text is not a ``cd`` word pair after shlex.
+    """
+    import shlex
+
+    try:
+        words = shlex.split(command or "", posix=True)
+    except ValueError:
+        words = (command or "").split()
+    cwds: list[str] = []
+    for index, word in enumerate(words[:-1]):
+        if word == "cd" and not words[index + 1].startswith("-"):
+            cwds.append(os.path.join(repo_root, words[index + 1]))
+    return cwds
+
+
+def _output_repo_paths(command: str, output: str, repo_root: str) -> set[str]:
+    """Every path token in the output, normalized to repo-relative form.
+
+    Absolute paths, repo-relative paths and paths relative to a ``cd``'d
+    working directory all resolve to the same string an edited file carries;
+    ``vendor/src/a.py`` normalizes to itself and never to ``src/a.py`` - the
+    exact miss substring matching made (it linked ``src/a.py`` because the
+    vendor path CONTAINS it).
+    """
+    bases = [repo_root, *_command_cwds(command, repo_root)]
+    found: set[str] = set()
+    for token in _OUTPUT_TOKEN_RE.findall(output or ""):
+        token = token.strip("\"'")
+        token = token.split("::", 1)[0]  # file::nodeid
+        # ``path:12`` and ``path:12:34`` line/column refs; ``path:L12``.
+        token = __import__("re").sub(r"(?::\d+|:\d+:\d+|:L\d+)$", "", token)
+        if not token or "://" in token:
+            continue
+        candidates = (
+            (token,)
+            if os.path.isabs(token)
+            else tuple(os.path.join(base, token) for base in bases)
+        )
+        for candidate in candidates:
+            rel = _repo_relative(candidate, repo_root)
+            if rel:
+                found.add(rel.lower())
+    return found
+
+
+def attribute_test_failure(
+    adapter, command: str, output: str, *, returncode, observed: str = ""
+):
     """Attribute the model's OWN failing test to the edited surface.
 
     covering_red fires when a covering test fails BECAUSE of an edited file.
     Rather than requiring a separate covering run, a failing test whose output
     references an edited file (traceback frame / test path) IS the covering RED
     for that surface. Correct-or-quiet: no edit, no failing test, no file link.
+
+    ``observed`` is the textual outcome the certified classifier read from the
+    output. A piped `pytest … | tail` exits with TAIL's status - the failure
+    evidence is the FAILED rows in the stream, not the pipeline's returncode,
+    so an observed ``fail``/``env_fail`` satisfies the failing-test half on
+    its own (run 35016130850: 10 observed failures, zero covering entries).
     """
-    if not returncode or not adapter._edited_files:
+    if not (returncode or observed in ("fail", "env_fail")):
+        return None
+    if not adapter._edited_files:
         return None
     if not command or not output:
         return None
-    low_output = (output or "").lower()
+    # Path attribution, not substring attribution: ``vendor/src/a.py`` must
+    # never satisfy an edit to ``src/a.py``. Every path token in the output
+    # is normalized to repo-relative form - resolving absolute paths and
+    # ``cd``-relative paths - and only exact equality links a failure to an
+    # edited file.
+    root = adapter.repo_root or os.getcwd()
     edited = sorted(adapter._edited_files)
-    linked = [f for f in edited if f.lower() in low_output]
+    found = _output_repo_paths(command, output, root)
+    linked = [
+        f
+        for f in edited
+        if str(f).replace("\\", "/").strip("/").lower() in found
+    ]
     if not linked:
         return None
     from groundtruth.runtime.gateway import CoveringResult
@@ -107,22 +194,94 @@ def attribute_test_failure(adapter, command: str, output: str, *, returncode):
     )
 
 
+def _syntax_probe_rows(adapter, files: list[str]) -> dict[str, dict] | None:
+    """Producer-certified syntax rows for each file's on-disk post-edit bytes.
+
+    Reuses the same ``gt-index -inspect-jsonl`` boundary as
+    ``compile_transaction_artifacts``: the pinned producer parses the
+    caller-supplied bytes with tree-sitter and returns one typed row per
+    request. Returns ``None`` when that boundary is unavailable so the caller
+    can degrade to the Python compile probe; a file that cannot be resolved
+    under the repo root, read, or fit the producer byte bound simply has no
+    row - an abstention, never a finding.
+    """
+    from .parser_inspection import ParserInspectionRequest, inspect_sources
+
+    root = adapter.repo_root or os.getcwd()
+    requests: list[ParserInspectionRequest] = []
+    names: list[str] = []
+    for rel in files:
+        path = rel if os.path.isabs(rel) else os.path.join(root, rel)
+        repo_rel = _repo_relative(path, root)
+        if repo_rel is None:
+            continue
+        try:
+            content = Path(path).read_bytes()
+        except OSError:
+            continue
+        if len(content) > _MAX_INSPECTION_BYTES:
+            continue
+        requests.append(ParserInspectionRequest(
+            f"syntax_probe:{repo_rel}", repo_rel, content,
+        ))
+        names.append(rel)
+    if not requests:
+        return {}
+    try:
+        rows = inspect_sources(requests)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return None
+    return dict(zip(names, rows, strict=True))
+
+
 def run_syntax_probe(adapter, changed_files: tuple[str, ...]) -> str:
     """Proactive post-edit syntax check (syntax_result / GT_EDIT_CHECK).
 
     Reframed trigger: GT runs a bounded syntax probe on every edit of a
-    checkable file, instead of waiting for the model to run a check. A broken
-    edit is delivered as syntax evidence immediately. Correct-or-quiet: no
-    edited .py files or a clean compile.
+    producer-checkable file, instead of waiting for the model to run a check.
+    A broken edit is delivered as syntax evidence immediately. The certified
+    producer parser owns the check for every extension it parses
+    (.py/.pyi/.go/.ts/.tsx/.js/.jsx/.rs); where that boundary is unavailable,
+    the probe degrades to ``py_compile`` for Python files and stays quiet for
+    the rest. Correct-or-quiet: no edited checkable file or a clean parse.
     """
     if os.environ.get("GT_VERIFY_EXECUTE", "").strip() != "1":
         return ""
-    py_files = [f for f in changed_files if f.endswith(".py")]
-    if not py_files:
+    checkable = [
+        rel for rel in dict.fromkeys(changed_files)
+        if os.path.splitext(rel)[1].lower() in _SYNTAX_PROBE_EXTS
+    ][:3]
+    if not checkable:
         return ""
+    rows = _syntax_probe_rows(adapter, checkable)
     lines: list[str] = []
-    for rel in py_files[:3]:
+    for rel in checkable:
+        row = rows.get(rel) if rows is not None else None
+        if row is not None:
+            if row.get("complete"):
+                continue
+            diagnostics = [
+                str(item).strip()
+                for item in (row.get("diagnostics") or ())
+                if str(item).strip()
+            ]
+            # "syntax_tree_incomplete" is the producer's only parse-failure
+            # diagnostic - positive syntax evidence. Any other incomplete row
+            # is a request/transport fault (path_invalid, content_too_large,
+            # parser_error:...), an abstention rather than a finding, and the
+            # file falls through to the degraded per-language check.
+            if "syntax_tree_incomplete" in diagnostics:
+                tail = diagnostics[:8]
+                producer = str(row.get("parser_identity") or "")
+                if producer:
+                    tail = [*tail, f"producer={producer}"]
+                lines.append(f"{rel}: syntax error\n" + "\n".join(tail))
+                continue
+        if not rel.endswith((".py", ".pyi")):
+            continue
         path = rel if os.path.isabs(rel) else os.path.join(adapter.repo_root or "", rel)
+        if not os.path.isfile(path):
+            continue
         try:
             proc = subprocess.run(
                 [sys.executable, "-m", "py_compile", path],
@@ -181,7 +340,8 @@ def run_covering_lane(adapter, changed_files: tuple[str, ...]):
     """
     if os.environ.get("GT_VERIFY_EXECUTE", "").strip() != "1":
         return None
-    if not adapter.graph_db:
+    snapshot = adapter.graph_query_snapshot()
+    if not snapshot.graph_current:
         return None
     src = [
         path for path in changed_files
@@ -199,12 +359,12 @@ def run_covering_lane(adapter, changed_files: tuple[str, ...]):
     except Exception:  # noqa: BLE001 - covering absent -> feature quiet
         return None
 
-    symbols = _symbols_for_files(adapter.graph_db, tuple(src), repo_root)
+    symbols = _symbols_for_files(snapshot.graph_path, tuple(src), repo_root)
     if not symbols:
         return None
     try:
         selected = select_covering_tests(
-            adapter.graph_db, symbols, limit=2, repo_root=repo_root
+            snapshot.graph_path, symbols, limit=2, repo_root=repo_root
         )
         files = [c["file"] for c in (selected or []) if c.get("file")]
     except Exception:  # noqa: BLE001

@@ -4,8 +4,7 @@ The two Harbor agents install the same pinned treatment bundle. ``MiniSweAgent``
 runs the stock loop with ``--gt-off`` and never activates or imports GT in the
 runner. ``MiniSweGtAgent`` activates the advisory session and forwards only the
 GT state/index configuration. This makes activation—not package drift—the A/B
-treatment. Version 2.3.0 is the default; a closed 2.2.8 override exists only
-for execution matched to the historical baseline.
+treatment. The shipping product has one closed scaffold version: 2.4.6.
 
 ``uv tool install`` does not emit a ~/.local/bin/python shim; the tool venv's
 interpreter lives at the layout GTNanoAgent already relies on.
@@ -14,58 +13,76 @@ interpreter lives at the layout GTNanoAgent already relies on.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from pathlib import Path
 
 from harbor.agents.installed.base import (
     BaseInstalledAgent,
+    CliFlag,
     EnvVar,
+    NonZeroAgentExitCodeError,
     with_prompt_template,
 )
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from eval._env import UTF8_ENV, provider_env
+from gt_harness.product import project_task_environment
+from scripts.agent_resource_evidence import capture_snapshot, write_host_interval
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_REMOTE_DIR = "/installed-agent/miniswe"
-_REMOTE_RUNNER = "/installed-agent/miniswe_run.py"
-_REMOTE_REPRO = "/installed-agent/miniswe_repro.py"
+_REMOTE_BUNDLE_DIR = "/installed-agent/bundle"
 _REMOTE_GT_BINARY = "/installed-agent/gt-index"
-_VENDOR_DIR = _REPO_ROOT / "vendor"
+_REMOTE_UV_INSTALLER = "/installed-agent/uv-install.tar.gz"
+_REMOTE_PYTHON_ARCHIVE = "/installed-agent/python-3.12.13.tar.gz"
+_REMOTE_PYTHON_DIR = "/installed-agent/python"
+_REMOTE_WHEELHOUSE = "/installed-agent/wheelhouse"
+_REMOTE_DENSE_MODEL_DIR = "/installed-agent/dense-model"
+_REMOTE_LSP_BIN = "/installed-agent/lsp-bin"
 _REMOTE_PY = "$HOME/.local/share/uv/tools/nano-harness/bin/python"
-_UV_VERSION = "0.11.32"
-_PYTHON_VERSION = "3.12.13"
-_DEFAULT_MINISWE_AGENT_VERSION = "2.3.0"
-_ALLOWED_MINISWE_AGENT_VERSIONS = frozenset({"2.2.8", "2.3.0"})
-_UV_INSTALL = f"https://astral.sh/uv/{_UV_VERSION}/install.sh"
-_UV_INSTALL_COMMAND = (
-    f"if command -v curl >/dev/null 2>&1; then curl -LsSf {_UV_INSTALL}; "
-    f"else wget -qO- {_UV_INSTALL}; fi"
-)
-# After the uv tool install the staged checkout is removed (the tool venv holds
-# the installed wheel copy). Leaving it readable lets a root task model
-# discover GT's gate logic with a broad `find /` and reverse-engineer the
-# submit seam (observed live: modernize-scientific-stack split the submit magic
-# string across adjacent literals after importing gt_engine.miniswe_evidence).
-_GT_STAGED_SOURCE_CLEANUP = (
-    f"cp {_REMOTE_DIR}/scripts/miniswe_gt_run.py {_REMOTE_RUNNER} && "
-    f"cp {_REMOTE_DIR}/scripts/miniswe_repro.py {_REMOTE_REPRO} && "
-    f"chmod +x {_REMOTE_RUNNER} && "
-    f"rm -rf -- {_REMOTE_DIR}"
+_DEFAULT_MINISWE_AGENT_VERSION = "2.4.6"
+_ALLOWED_MINISWE_AGENT_VERSIONS = frozenset({"2.4.6"})
+_UV_INSTALLER_SHA256 = "aab924fd522efd06f1c5f3b93a243864fc453132c94b2dc49f1371b528a4b967"
+_PYTHON_ARCHIVE_SHA256 = "5854aa6ec71cad00334d5065633c210b2e7feb40956767a59a91791cadcf0b79"
+_PROVIDER_BILLING_FAILURE = re.compile(
+    r"(?:insufficient[ _-]*balance|(?:http(?: status)?|status(?: code)?)\s*[:=]?\s*402\b)",
+    re.IGNORECASE,
 )
 
-# Task images vary (debian, alpine, ...); use either common downloader, then
-# let uv bring its own Python so we never depend on the image's python3.
-_ENSURE_DOWNLOADER = (
-    "command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || { "
-    "command -v apt-get >/dev/null && apt-get clean && "
-    "rm -rf /var/lib/apt/lists/* && apt-get update && "
-    "apt-get install -y --fix-missing wget; } || { "
-    "command -v apk >/dev/null && apk add --no-cache wget bash; } || { "
-    "command -v dnf >/dev/null && dnf install -y wget; } || { "
-    "command -v yum >/dev/null && yum install -y wget; }"
-)
+
+# ``scripts.miniswe_supervisor.conserve_failure`` maps an exhausted agent budget
+# to terminal="timeout" and exit 3, and gives every other conserved outcome its
+# own code (4 provider_failed, 5 internal_error, 6 setup_error, 137 OOM kill).
+# Exit 3 is therefore an exact, unambiguous statement: "the agent used all of the
+# time the task itself allows".
+#
+# A benchmark timeout is a RESULT, not an infrastructure fault. Both frozen GT-off
+# baselines grade theirs: the Terminal-Bench 2.0 control is 89/89 graded with 4
+# AgentTimeoutError trials counted as non-solves inside its 66/89, and the DeepSWE
+# 10-task control is 10/10 graded with no censoring. Re-raising here instead turns
+# our timeout into a Pier trial exception -- status ERROR, reward null, graded
+# false -- which silently removes a zero from the GT numerator AND denominator
+# while the baseline keeps its zeros. That is a comparison biased in our favour by
+# construction, and it is why run 34257199043 produced no reward after 250
+# completed model calls and 334 executed commands.
+#
+# So: absorb exactly this one code, let ``run`` return, and let the task's own
+# official verifier grade whatever the agent committed. Every other exit code is
+# re-raised untouched -- those are faults where a grade would be a lie about what
+# the agent was able to attempt.
+SUPERVISOR_TIMEOUT_EXIT_CODE = 3
+
+
+class ProviderBillingError(NonZeroAgentExitCodeError):
+    """The provider rejected a request because the account cannot fund it."""
+
+
+def _groundtruth_release() -> dict:
+    """Read the sole release manifest, including from an installed harness wheel."""
+    from gt_harness.product import groundtruth_release
+
+    return groundtruth_release(_REPO_ROOT)
 
 
 def _miniswe_agent_version() -> str:
@@ -80,6 +97,90 @@ def _miniswe_agent_version() -> str:
 class MiniSweAgent(BaseInstalledAgent):
     """Mini-SWE-Agent, GT-off, as a Terminal-Bench 2.0 agent."""
 
+    # Pier forwards workflow agent kwargs to the installed-agent constructor.
+    # Declare the runner limit here so Harbor retains it instead of silently
+    # dropping the unknown ``max_iterations`` kwarg at the base-class boundary.
+    CLI_FLAGS = [
+        CliFlag(
+            kwarg="max_iterations",
+            cli="--step-limit",
+            type="int",
+            default=100,
+        ),
+        CliFlag(kwarg="task_id", cli="--task-id", type="str", default=""),
+        CliFlag(
+            kwarg="product_source_sha",
+            cli="--product-source-sha",
+            type="str",
+            default="",
+        ),
+        CliFlag(
+            kwarg="time_budget_seconds",
+            cli="--time-budget-seconds",
+            type="int",
+            default=1,
+        ),
+    ]
+
+    @staticmethod
+    def _agent_exit_code(exc: NonZeroAgentExitCodeError) -> int | None:
+        """Recover the child's exit status from Harbor's formatted message."""
+        match = re.search(r"Command failed \(exit (-?\d+)\)", str(exc))
+        return int(match.group(1)) if match else None
+
+    @classmethod
+    def _absorb_agent_timeout(cls, exc: NonZeroAgentExitCodeError) -> None:
+        """Re-raise unless the agent merely ran out of its own task budget.
+
+        Returning lets Harbor proceed to the task's official verifier, which is
+        what produces the graded reward. See SUPERVISOR_TIMEOUT_EXIT_CODE.
+        """
+        if cls._agent_exit_code(exc) != SUPERVISOR_TIMEOUT_EXIT_CODE:
+            raise exc
+
+    def _classify_exec_error(self, command: str, result):
+        """Keep monetary rejection distinct from transient rate limiting.
+
+        Harbor 0.20 classifies by scanning combined terminal output. A wrapper
+        can print ``ApiRateLimitError`` after DeepSeek's HTTP 402 payload and
+        thereby overwrite the provider's actual ``Insufficient Balance``
+        reason. Billing is terminal for an approved run and must never enter a
+        rate-limit retry policy.
+        """
+        output = f"{result.stdout or ''}\n{result.stderr or ''}"
+        if _PROVIDER_BILLING_FAILURE.search(output):
+            detail = (
+                f"Command failed (exit {result.return_code}): {command}\n"
+                f"stdout: {self._truncate_output(result.stdout)}\n"
+                f"stderr: {self._truncate_output(result.stderr)}"
+            )
+            return ProviderBillingError(detail)
+        return super()._classify_exec_error(command, result)
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ):
+        """Apply Pier's filtered-egress proxy at the Harbor execution seam.
+
+        Harbor 0.20's ``BaseInstalledAgent`` calls ``environment.exec``
+        directly and does not invoke Pier's ``agent_process_env`` hook.  Without
+        this bridge, the task container has the proxy sidecar but the model
+        process attempts direct DNS and fails closed.
+        """
+        process_env = environment.agent_process_env(env)
+        return await super().exec_as_agent(
+            environment,
+            command,
+            env=process_env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
+
     @staticmethod
     def name() -> str:
         return "miniswe"
@@ -89,66 +190,253 @@ class MiniSweAgent(BaseInstalledAgent):
 
     @staticmethod
     def _gt_wheel() -> Path:
-        wheels = sorted(_VENDOR_DIR.glob("groundtruth_mcp-*.whl"))
-        if not wheels:
+        release = _groundtruth_release()
+        configured = os.environ.get("GT_GROUNDTRUTH_WHEEL_HOST", "")
+        wheel = Path(configured) if configured else _REPO_ROOT / release["wheel_path"]
+        if not wheel.is_file():
+            raise FileNotFoundError(f"GroundTruth wheel is missing: {wheel}")
+        MiniSweAgent._require_digest(wheel, release["wheel_sha256"], "groundtruth_wheel")
+        return wheel
+
+    @staticmethod
+    def _require_digest(path: Path, expected: str, label: str) -> None:
+        import hashlib
+
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise ValueError(f"{label} digest mismatch")
+
+    @staticmethod
+    def _harness_wheel() -> Path:
+        wheel = Path(os.environ.get("GT_HARNESS_WHEEL_HOST", ""))
+        expected = os.environ.get("GT_HARNESS_WHEEL_SHA256", "")
+        if not wheel.is_file() or not re.fullmatch(r"[0-9a-f]{64}", expected):
             raise FileNotFoundError(
-                f"Mini-SWE treatment bundle needs the vendored GroundTruth "
-                f"wheel in {_VENDOR_DIR} (build with: pip wheel --no-deps "
-                "-w vendor D:\\Groundtruth)"
+                "Mini-SWE treatment bundle needs GT_HARNESS_WHEEL_HOST and "
+                "GT_HARNESS_WHEEL_SHA256 from the verified product bundle"
             )
-        return wheels[-1]
+        MiniSweAgent._require_digest(wheel, expected, "harness_wheel")
+        return wheel
 
     @staticmethod
     def _gt_binary_host() -> Path:
+        release = _groundtruth_release()
         override = os.environ.get("GT_INDEX_BINARY_HOST", "")
-        path = Path(override) if override else _VENDOR_DIR / "gt-index-linux-amd64"
+        path = Path(override) if override else _REPO_ROOT / release["producer_path"]
         if not path.is_file():
             raise FileNotFoundError(
                 f"Mini-SWE treatment bundle needs a Linux gt-index binary at "
                 f"{path} (or set GT_INDEX_BINARY_HOST)"
+            )
+        MiniSweAgent._require_digest(path, release["producer_sha256"], "groundtruth_producer")
+        return path
+
+    @staticmethod
+    def _lsp_bin_host() -> Path:
+        """Locate host-staged language servers. REQUIRED, not optional.
+
+        LSP promotion discovers servers with shutil.which, and the task
+        container reaches only the model transport -- nothing can be installed
+        at task time. Servers therefore arrive the way every other execution
+        input does: resolved on the host, uploaded, and put on PATH.
+
+        This used to return None when unprovisioned, and install() skipped the
+        upload, so a run with no language servers produced promotion_no_servers
+        and a weaker graph while still reporting a normal result. On a
+        benchmark that measures what GT contributes, silently contributing
+        less is the worst available failure: the number comes out lower and
+        nothing in the record says why. Language servers are mandatory
+        capability, so absence is now a setup error, exactly as it already is
+        for the uv installer, the Python archive and the wheelhouse.
+        """
+
+        configured = os.environ.get("GT_LSP_BIN_HOST", "").strip()
+        if not configured:
+            raise FileNotFoundError(
+                "GT_LSP_BIN_HOST is required: language servers are mandatory "
+                "capability and must be staged on the host before the task runs"
+            )
+        path = Path(configured)
+        if not path.is_dir():
+            raise FileNotFoundError(
+                f"GT_LSP_BIN_HOST is set but no directory exists at {path}"
+            )
+        from gt_harness.lsp_assets import verify_lsp_assets
+
+        verify_lsp_assets(path)
+        return path
+
+    @staticmethod
+    def _dense_model_host() -> Path:
+        """Locate the pinned retrieval model on the host. REQUIRED.
+
+        What must not happen is a provisioned model that never reaches the
+        task environment, because GT reads GT_DENSE_MODEL_DIR inside the
+        container while the workflow exports a host path.
+
+        Nor may it be absent. This used to return None when unprovisioned and
+        the runtime recorded the capability as unavailable, which means a run
+        could retrieve without the embedder and still report a normal result -
+        measuring GT with a capability switched off and no line in the record
+        saying so. The embedder is mandatory capability, so absence is a setup
+        error rather than a quiet downgrade.
+        """
+
+        configured = os.environ.get("GT_DENSE_MODEL_DIR", "").strip()
+        if not configured:
+            raise FileNotFoundError(
+                "GT_DENSE_MODEL_DIR is required: the retrieval embedder is "
+                "mandatory capability and must be staged on the host"
+            )
+        path = Path(configured)
+        if not path.is_dir():
+            raise FileNotFoundError(
+                f"GT_DENSE_MODEL_DIR is set but no directory exists at {path}"
+            )
+        return path
+
+    @staticmethod
+    def _uv_installer_host() -> Path:
+        path = Path(os.environ.get("GT_UV_INSTALLER_HOST", ""))
+        if not path.is_file():
+            raise FileNotFoundError(
+                "Mini-SWE treatment bundle requires the pre-downloaded uv 0.11.32 "
+                "archive in GT_UV_INSTALLER_HOST"
+            )
+        MiniSweAgent._require_digest(path, _UV_INSTALLER_SHA256, "uv_installer")
+        return path
+
+    @staticmethod
+    def _python_archive_host() -> Path:
+        path = Path(os.environ.get("GT_PYTHON_ARCHIVE_HOST", ""))
+        if not path.is_file():
+            raise FileNotFoundError(
+                "Mini-SWE treatment bundle requires the pre-downloaded Python "
+                "3.12.13 archive in GT_PYTHON_ARCHIVE_HOST"
+            )
+        MiniSweAgent._require_digest(path, _PYTHON_ARCHIVE_SHA256, "python_archive")
+        return path
+
+    @staticmethod
+    def _wheelhouse_host() -> Path:
+        path = Path(os.environ.get("GT_WHEELHOUSE_HOST", ""))
+        if not path.is_dir() or not any(path.iterdir()):
+            raise FileNotFoundError(
+                "Mini-SWE treatment bundle requires the pre-downloaded dependency "
+                "wheelhouse in GT_WHEELHOUSE_HOST"
             )
         return path
 
     async def install(self, environment: BaseEnvironment) -> None:
         wheel = self._gt_wheel()
         binary = self._gt_binary_host()
+        uv_installer = self._uv_installer_host()
+        python_archive = self._python_archive_host()
+        wheelhouse = self._wheelhouse_host()
         miniswe_version = _miniswe_agent_version()
-        await environment.upload_dir(_REPO_ROOT / "scripts", f"{_REMOTE_DIR}/scripts")
-        await environment.upload_dir(_REPO_ROOT / "eval", f"{_REMOTE_DIR}/eval")
-        await environment.upload_dir(_REPO_ROOT / "gt_engine", f"{_REMOTE_DIR}/gt_engine")
-        await environment.upload_file(
-            _REPO_ROOT / "pyproject.toml", f"{_REMOTE_DIR}/pyproject.toml"
-        )
-        remote_wheel = f"{_REMOTE_DIR}/{wheel.name}"
-        await environment.upload_file(wheel, remote_wheel)
+        remote_gt_wheel = f"{_REMOTE_BUNDLE_DIR}/{wheel.name}"
+        # Harbor's task images do not guarantee that the treatment mount exists.
+        # Create it before any upload so setup fails only on a real artifact or
+        # runtime error, not because the destination directory is absent.
+        await self.exec_as_root(environment, f"mkdir -p {_REMOTE_BUNDLE_DIR}")
+        await environment.upload_file(wheel, remote_gt_wheel)
+        harness_wheel = self._harness_wheel()
+        remote_harness_wheel = f"{_REMOTE_BUNDLE_DIR}/{harness_wheel.name}"
+        await environment.upload_file(harness_wheel, remote_harness_wheel)
         await environment.upload_file(binary, _REMOTE_GT_BINARY)
-        await self.exec_as_root(
-            environment, _ENSURE_DOWNLOADER, env={"DEBIAN_FRONTEND": "noninteractive"}
-        )
+        await environment.upload_file(uv_installer, _REMOTE_UV_INSTALLER)
+        await environment.upload_file(python_archive, _REMOTE_PYTHON_ARCHIVE)
+        await environment.upload_dir(wheelhouse, _REMOTE_WHEELHOUSE)
+        # Both are mandatory capability, so both upload unconditionally. The
+        # resolvers above raise when unstaged, which is what makes a missing
+        # embedder or missing language servers a loud setup failure instead of
+        # a run that quietly measures GT with less than GT has.
+        dense_model = self._dense_model_host()
+        await environment.upload_dir(dense_model, _REMOTE_DENSE_MODEL_DIR)
+        lsp_bin = self._lsp_bin_host()
+        await environment.upload_dir(lsp_bin, _REMOTE_LSP_BIN)
+        await self.exec_as_root(environment, f"chmod -R 755 {_REMOTE_LSP_BIN}")
         await self.exec_as_root(environment, f"chmod 755 {_REMOTE_GT_BINARY}")
         install = (
             "set -eu; "
-            f"{_UV_INSTALL_COMMAND} | sh && "
-            f'"$HOME/.local/bin/uv" tool install --python {_PYTHON_VERSION} '
+            f"echo '{_UV_INSTALLER_SHA256}  {_REMOTE_UV_INSTALLER}' | sha256sum -c - && "
+            'mkdir -p /tmp/uv-extract "$HOME/.local/bin" && '
+            f"tar -xzf {_REMOTE_UV_INSTALLER} -C /tmp/uv-extract && "
+            'cp /tmp/uv-extract/uv-x86_64-unknown-linux-gnu/uv "$HOME/.local/bin/uv" && '
+            'chmod 755 "$HOME/.local/bin/uv" && '
+            f"mkdir -p {_REMOTE_PYTHON_DIR} && tar -xzf {_REMOTE_PYTHON_ARCHIVE} "
+            f"-C {_REMOTE_PYTHON_DIR} --strip-components=1 && "
+            f'"$HOME/.local/bin/uv" tool install --offline --no-index '
+            f"--find-links {_REMOTE_WHEELHOUSE} --python {_REMOTE_PYTHON_DIR}/bin/python3.12 "
             f'--with "mini-swe-agent=={miniswe_version}" '
-            f"--with {shlex.quote(remote_wheel)} --with 'numpy==2.5.1' "
-            f"{_REMOTE_DIR} && "
+            f"--with {shlex.quote(remote_gt_wheel)} --with 'numpy==2.5.1' "
+            "--with 'onnxruntime==1.20.1' --with 'tokenizers==0.23.1' "
+            f"{shlex.quote(remote_harness_wheel)} && "
             f'"{_REMOTE_PY}" -c "import importlib.metadata as m, sys; '
             "assert sys.version_info[:3] == (3, 12, 13); "
             f"assert m.version('mini-swe-agent') == '{miniswe_version}'; "
             "assert m.version('groundtruth-mcp') == '1.0.0'; "
             "assert m.version('numpy') == '2.5.1'; "
-            "import minisweagent, groundtruth, gt_engine" + '" && '
-            f'"{_REMOTE_GT_BINARY}" -root {_REMOTE_DIR}/gt_engine '
+            "assert m.version('onnxruntime') == '1.20.1'; "
+            "assert m.version('tokenizers') == '0.23.1'; "
+            "import minisweagent, groundtruth, gt_engine, onnxruntime, tokenizers" + '" && '
+            "mkdir -p /tmp/gt-install-smoke-src && "
+            "printf 'def smoke():\\n    return 1\\n' > /tmp/gt-install-smoke-src/smoke.py && "
+            f'"{_REMOTE_GT_BINARY}" -root /tmp/gt-install-smoke-src '
             "-output /tmp/gt-install-smoke.db >/dev/null && "
             "test -s /tmp/gt-install-smoke.db && rm -f /tmp/gt-install-smoke.db && "
-            'rm -rf "$HOME/.cache/uv/archive-v0" && '
-            f"{_GT_STAGED_SOURCE_CLEANUP}"
+            # Mandatory capability must WORK, not merely be present. The asset
+            # manifest proves the bytes arrived; it cannot tell whether a
+            # server executes in this container. A language server that is
+            # staged but unrunnable degrades the graph exactly as a missing one
+            # does, and just as quietly, so each is executed here and a
+            # non-zero exit fails the install.
+            f"{_REMOTE_LSP_BIN}/gopls version >/dev/null && "
+            f"{_REMOTE_LSP_BIN}/rust-analyzer --version >/dev/null && "
+            # pyright-langserver has no non-server invocation: --version,
+            # --help and --stdio --version all exit 1 with "Connection input
+            # stream is not set", because it only speaks LSP. Executed in the
+            # gate task's own image, that exit killed the && chain and the
+            # install with it. The same node runtime and the same package are
+            # exercised through pyright's CLI entry, and node --check proves
+            # the langserver entry itself parses under this node without
+            # starting a server that would never return.
+            f'"{_REMOTE_LSP_BIN}/node-runtime/bin/node" '
+            f"{_REMOTE_LSP_BIN}/node-runtime/servers/node_modules/pyright/index.js "
+            "--version >/dev/null && "
+            f'"{_REMOTE_LSP_BIN}/node-runtime/bin/node" --check '
+            f"{_REMOTE_LSP_BIN}/node-runtime/servers/node_modules/pyright/"
+            "langserver.index.js >/dev/null && "
+            f"{_REMOTE_LSP_BIN}/typescript-language-server --version >/dev/null && "
+            # The embedder likewise: loading the pinned ONNX graph and the
+            # tokenizer is what proves retrieval can actually embed. An
+            # unloadable model would otherwise surface as "no dense evidence"
+            # in the result and as nothing at all in the record.
+            f'"{_REMOTE_PY}" -c "import onnxruntime, tokenizers, pathlib; '
+            f"root = pathlib.Path('{_REMOTE_DENSE_MODEL_DIR}'); "
+            "sess = onnxruntime.InferenceSession(str(root / 'model.onnx'), "
+            "providers=['CPUExecutionProvider']); "
+            "assert sess.get_inputs(), 'dense model exposes no inputs'; "
+            "tok = tokenizers.Tokenizer.from_file(str(root / 'tokenizer.json')); "
+            "assert tok.encode('gt embedder smoke').ids, 'tokenizer produced no ids'"
+            '" && '
+            'rm -rf "$HOME/.cache/uv/archive-v0" /tmp/uv-extract && '
+            f"rm -rf -- {_REMOTE_BUNDLE_DIR} /tmp/gt-install-smoke-src"
         )
         await self.exec_as_agent(environment, install, env=dict(UTF8_ENV))
+        from gt_harness.lsp_assets import verify_lsp_assets
+
+        receipt = verify_lsp_assets(lsp_bin)
+        await self.exec_as_agent(
+            environment,
+            f'"{_REMOTE_PY}" -m gt_harness.lsp_assets --root {_REMOTE_LSP_BIN} '
+            f"--expected-manifest-sha256 {receipt['manifest_sha256']}",
+            env=dict(UTF8_ENV),
+        )
 
     def _model_and_env(self) -> tuple[str, dict[str, str]]:
-        model = self.model_name or "deepseek-v4-flash"
+        model = str(self.model_name or "").strip()
+        if not model:
+            raise ValueError("model_name is required by the provider route")
         if not os.environ.get("OPENAI_BASE_URL"):
             model = model.split("/", 1)[-1]
         env = provider_env()
@@ -157,15 +445,34 @@ class MiniSweAgent(BaseInstalledAgent):
 
     def _run_command(self, instruction: str, model: str, extra_args: str = "") -> str:
         # T1.1: the requested model MUST reach the runner (it was silently
-        # dropped before, so a non-default model fell back to deepseek-v4-flash).
+        # dropped before, so a non-default model fell back to a stale default).
         # The runner's --model + --metrics are the single source of truth.
         return (
-            f'"{_REMOTE_PY}" {_REMOTE_RUNNER} '
+            # Staged language servers must be discoverable by shutil.which,
+            # which is how LSP promotion finds them. Prepending keeps the
+            # image PATH intact and simply wins for these four names.
+            f'PATH="{_REMOTE_LSP_BIN}:$PATH" '
+            f'exec "{_REMOTE_PY}" -m scripts.miniswe_supervisor '
             f"--task {shlex.quote(instruction)} --model {shlex.quote(model)} "
             f'--cwd "$PWD" '
             f"--output /logs/agent/miniswe_trajectory.json "
             f"--temperature 1.0 "
             f"--metrics /logs/agent/miniswe_report.json "
+            f"--product-receipt /logs/agent/gt-run.json "
+            f"--adapter-receipt /logs/agent/benchmark-adapter.json "
+            # NOT /logs/artifacts/model.patch. That path belongs to the
+            # benchmark: task.toml's [[verifier.collect]] regenerates it with
+            # `git diff --binary BASE HEAD` - commits only - so on any run that
+            # reaches the verifier our working-tree export is overwritten, and on
+            # any run that does not, the verifier stage never executes. There is
+            # no path on which this file is graded, in either arm, ever.
+            #
+            # What writing it there DID do was make a 43,605-byte export in run
+            # 34095557374 look like the gradeable object, and it was reasoned
+            # about as one for an hour. Same bytes, honest name, and the
+            # two-producers-one-path race disappears.
+            f"--patch-output /logs/agent/gt-worktree.patch "
+            f"{self.build_cli_flags()} "
             f"{extra_args}"
             "</dev/null 2>&1"
         )
@@ -175,15 +482,20 @@ class MiniSweAgent(BaseInstalledAgent):
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
         model, env = self._model_and_env()
-        await self.exec_as_agent(
-            environment,
-            self._run_command(
-                instruction,
-                model,
-                extra_args="--gt-off --state-dir /logs/agent/gt-state ",
-            ),
-            env=env,
-        )
+        try:
+            await self.exec_as_agent(
+                environment,
+                self._run_command(
+                    instruction,
+                    model,
+                    extra_args="--gt-off --state-dir /logs/agent/gt-state ",
+                ),
+                env=env,
+            )
+        except NonZeroAgentExitCodeError as exc:
+            # Both arms must treat an exhausted budget identically, or the
+            # treatment difference is partly a bookkeeping difference.
+            self._absorb_agent_timeout(exc)
 
 
 class MiniSweGtAgent(MiniSweAgent):
@@ -209,52 +521,81 @@ class MiniSweGtAgent(MiniSweAgent):
             'print(minisweagent.__version__)"'
         )
 
+    @staticmethod
+    async def _resource_snapshot(
+        environment: BaseEnvironment, task_id: str, product_source_sha: str
+    ) -> dict[str, object]:
+        snapshotter = getattr(environment, "agent_resource_snapshot", None)
+        if not callable(snapshotter):
+            raise RuntimeError("environment lacks host cgroup snapshot support")
+        cgroup = await snapshotter()
+        if not isinstance(cgroup, dict):
+            raise RuntimeError("host cgroup snapshot is malformed")
+        return capture_snapshot(cgroup, task_id=task_id, product_source_sha=product_source_sha)
+
     @with_prompt_template
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
         model, env = self._model_and_env()
-        env.update({k: v for k, v in os.environ.items() if k.startswith("GT_")})
+        env.update(project_task_environment(os.environ, treatment="groundtruth"))
         env.update(self.resolve_env_vars())
         env.setdefault("GT_INDEX_BINARY", _REMOTE_GT_BINARY)
+        # Unconditional: the resolver raises when the embedder is unstaged, so
+        # reaching here means it was uploaded and the container must be told
+        # where it landed. A conditional here would let a staged embedder go
+        # unused inside the task, which is the same silent downgrade one layer
+        # further in.
+        self._dense_model_host()
+        env["GT_DENSE_MODEL_DIR"] = _REMOTE_DENSE_MODEL_DIR
+        env["GT_TASK_ID"] = str(self._resolved_flags.get("task_id", ""))
+        env["GT_PRODUCT_SOURCE_SHA"] = str(self._resolved_flags.get("product_source_sha", ""))
+        task_id = env["GT_TASK_ID"].strip()
+        product_source_sha = env["GT_PRODUCT_SOURCE_SHA"].strip()
+        if not task_id or not re.fullmatch(r"[0-9a-f]{40}", product_source_sha):
+            raise ValueError("benchmark agent resource identity is incomplete")
+        attestation_key = os.environ.get("GT_RESOURCE_ATTESTATION_KEY", "").strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", attestation_key):
+            raise ValueError("GT_RESOURCE_ATTESTATION_KEY must be 64 lowercase hex characters")
         # GT state (events.jsonl) lives OUTSIDE the graded workspace AND inside
         # the captured /logs/agent/ tree so a post-run 17-feature census reads
         # the exact evidence_delivery rows instead of heuristic transcript text.
         env["GT_STATE_DIR"] = "/logs/agent/gt-state"
+        # GT state (events.jsonl, graph.db) lives OUTSIDE the graded workspace.
         extra = '--state-dir "$GT_STATE_DIR" --gt-mode advisory '
-        await self.exec_as_agent(
-            environment,
-            self._run_command(instruction, model, extra_args=extra),
-            env=env,
-        )
-
-
-class MiniSweEngineAgent(MiniSweGtAgent):
-    """Mini-SWE-Agent + the Inline Engine (ENGINE posture) as a TB2 agent.
-
-    Same treatment bundle as the advisory GT arm, but the runner selects
-    ``--gt-mode engine``: every selected action crosses the engine boundary,
-    is normalized, decided, executed literally or deterministically, compiled
-    into one canonical observation, and bound to a delivery receipt. GT-off
-    (``MiniSweAgent``) remains the stock-equivalent baseline and rollback path.
-    """
-
-    @staticmethod
-    def name() -> str:
-        return "miniswe-engine"
-
-    @with_prompt_template
-    async def run(
-        self, instruction: str, environment: BaseEnvironment, context: AgentContext
-    ) -> None:
-        model, env = self._model_and_env()
-        env.update({k: v for k, v in os.environ.items() if k.startswith("GT_")})
-        env.update(self.resolve_env_vars())
-        env.setdefault("GT_INDEX_BINARY", _REMOTE_GT_BINARY)
-        env["GT_STATE_DIR"] = "/logs/agent/gt-state"
-        extra = '--state-dir "$GT_STATE_DIR" --gt-mode engine '
-        await self.exec_as_agent(
-            environment,
-            self._run_command(instruction, model, extra_args=extra),
-            env=env,
-        )
+        resource_path = Path(self.logs_dir) / "agent-resource.json"
+        resource_path.unlink(missing_ok=True)
+        before = await self._resource_snapshot(environment, task_id, product_source_sha)
+        try:
+            await self.exec_as_agent(
+                environment,
+                self._run_command(instruction, model, extra_args=extra),
+                env=env,
+            )
+        except NonZeroAgentExitCodeError as exc:
+            # Remove anything the task may have written at the canonical name;
+            # only the host adapter is permitted to publish this attestation.
+            resource_path.unlink(missing_ok=True)
+            exit_code = self._agent_exit_code(exc)
+            if exit_code == 137:
+                try:
+                    after = await self._resource_snapshot(environment, task_id, product_source_sha)
+                    write_host_interval(
+                        resource_path,
+                        before=before,
+                        after=after,
+                        task_id=task_id,
+                        product_source_sha=product_source_sha,
+                        exit_code=137,
+                        attestation_key=attestation_key,
+                    )
+                except Exception:
+                    # Resource finalization cannot replace the exact runner error.
+                    resource_path.unlink(missing_ok=True)
+                    pass
+            self._absorb_agent_timeout(exc)
+        except BaseException:
+            resource_path.unlink(missing_ok=True)
+            raise
+        else:
+            resource_path.unlink(missing_ok=True)

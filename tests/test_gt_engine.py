@@ -27,16 +27,32 @@ from gt_engine.indexer import ensure_index, is_code_repo
 from nano.agent import Agent
 from nano.providers import StepResult, ToolCall, Usage
 
+# Where the producer executable LIVES is infrastructure, not GT behaviour, and
+# it is identical for every test in this file. Stripping it made the two L6
+# wake tests depend on `gt-index` happening to be on PATH: with only the
+# override set they resolved nothing, fell through to the version-pinned
+# download, and failed with `graph_db=None` on any host without network. That
+# looked environmental for several rounds and was not -- putting the same
+# binary on PATH turns both green with no other change. Preserving one variable
+# cannot leak between tests, because no test sets it and its value is the same
+# for all of them.
+_PRODUCER_LOCATION_ENV = ("GT_INDEX_BINARY",)
+
 
 @pytest.fixture(autouse=True)
 def _gt_env_isolation():
     """Strip GT_* env before each test and undo anything a test (or
-    apply_profile_env's direct os.environ writes) added - no cross-test leak."""
-    saved = {k: v for k, v in os.environ.items() if k.startswith("GT_")}
+    apply_profile_env's direct os.environ writes) added - no cross-test leak.
+
+    Everything that configures GT BEHAVIOUR goes; the producer's location
+    stays, for the reason recorded above the allowlist."""
+    saved = {k: v for k, v in os.environ.items()
+             if k.startswith("GT_") and k not in _PRODUCER_LOCATION_ENV}
     for k in saved:
         del os.environ[k]
     yield
-    for k in [k for k in os.environ if k.startswith("GT_")]:
+    for k in [k for k in os.environ
+              if k.startswith("GT_") and k not in _PRODUCER_LOCATION_ENV]:
         del os.environ[k]
     os.environ.update(saved)
 
@@ -628,7 +644,7 @@ def test_ensure_index_non_code_root_returns_none(tmp_path):
 @requires_gt
 def test_ensure_index_can_keep_graph_state_outside_repository(
         tmp_path, monkeypatch):
-    import groundtruth._binary
+    import gt_engine.indexer as indexer
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -636,21 +652,18 @@ def test_ensure_index_can_keep_graph_state_outside_repository(
     state = tmp_path / "private-state"
     monkeypatch.setenv("GT_STATE_DIR", str(state))
 
-    def fake_run_index(_root, output):
+    def fake_run_index(_root, output, _log_dir):
         import sqlite3
 
         connection = sqlite3.connect(output)
         try:
             connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
-            connection.execute(
-                "CREATE VIRTUAL TABLE nodes_fts USING fts5(name,file_path)"
-            )
             connection.commit()
         finally:
             connection.close()
-        return True
+        return indexer.IndexProcessResult(True, "completed", "", exit_code=0)
 
-    monkeypatch.setattr(groundtruth._binary, "run_index", fake_run_index)
+    monkeypatch.setattr(indexer, "_run_index_bounded", fake_run_index)
 
     db = ensure_index(str(repo))
 
@@ -666,7 +679,7 @@ def test_ensure_index_can_keep_graph_state_outside_repository(
 
 @requires_gt
 def test_failed_index_build_preserves_previous_database(tmp_path, monkeypatch):
-    import groundtruth._binary
+    import gt_engine.indexer as indexer
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -679,7 +692,13 @@ def test_failed_index_build_preserves_previous_database(tmp_path, monkeypatch):
     target.parent.mkdir(parents=True)
     target.write_bytes(b"known-good")
     monkeypatch.setenv("GT_STATE_DIR", str(state))
-    monkeypatch.setattr(groundtruth._binary, "run_index", lambda *_args: False)
+    monkeypatch.setattr(
+        indexer,
+        "_run_index_bounded",
+        lambda *_args: indexer.IndexProcessResult(
+            False, "nonzero_exit", "GT_INDEX_PROCESS_FAILED", exit_code=1
+        ),
+    )
 
     assert ensure_index(str(repo)) is None
     assert target.read_bytes() == b"known-good"
@@ -688,8 +707,6 @@ def test_failed_index_build_preserves_previous_database(tmp_path, monkeypatch):
 @requires_gt
 def test_manifest_publication_failure_rolls_back_database(tmp_path, monkeypatch):
     import sqlite3
-
-    import groundtruth._binary
 
     import gt_engine.indexer as indexer
 
@@ -705,14 +722,14 @@ def test_manifest_publication_failure_rolls_back_database(tmp_path, monkeypatch)
     target.write_bytes(b"known-good")
     monkeypatch.setenv("GT_STATE_DIR", str(state))
 
-    def valid_index(_root, output):
+    def valid_index(_root, output, _log_dir):
         connection = sqlite3.connect(output)
         connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
         connection.commit()
         connection.close()
-        return True
+        return indexer.IndexProcessResult(True, "completed", "", exit_code=0)
 
-    monkeypatch.setattr(groundtruth._binary, "run_index", valid_index)
+    monkeypatch.setattr(indexer, "_run_index_bounded", valid_index)
     monkeypatch.setattr(
         indexer, "_atomic_write",
         lambda *_args: (_ for _ in ()).throw(OSError("manifest fault")),
@@ -1454,16 +1471,14 @@ def test_submit_probe_quiet_on_clean_or_unedited(indexed_repo):
         row for row in b._attribution.rows
         if row["event_type"] == "run.feature_census"
     ]
-    assert len(census[-1]["payload"]["features"]) == 17
+    # Against the registry, not a literal. This test is Linux-and-producer
+    # only, so a hardcoded count is a number most machines skip and CI finds.
+    from gt_engine.attribution import DIRECT_FEATURES
+
+    assert len(census[-1]["payload"]["features"]) == len(DIRECT_FEATURES)
     assert {
         item["feature_id"] for item in census[-1]["payload"]["features"]
-    } == {
-        "caller_contract", "covering_red", "def_partition", "localization",
-        "newfile_precedent", "obligations", "recovery", "signature_delta",
-        "submit_refusal", "syntax_result", "GT_CERT_DELIVERY",
-        "GT_CHANGE_SURFACE", "GT_EDIT_CHECK", "GT_HYPOTHESIS",
-        "GT_LOC_RESLOT", "GT_PATCH_DELTA", "GT_SS_SUBMIT_RED",
-    }
+    } == set(DIRECT_FEATURES)
     b.edited_files.append("pkg/alpha.py")    # syntactically fine
     assert b.submit_probe() is None
 
@@ -2043,6 +2058,8 @@ def _node_count(db: str) -> int:
 def test_l6_wake_from_dormant_on_source_edit(tmp_path, monkeypatch):
     """A task that STARTS non-code becomes code: the dormant bridge wakes on
     the first source-file edit and the new module's symbols are in the graph."""
+    if os.name == "nt":
+        pytest.skip("Windows index process-tree guard is intentionally unavailable")
     monkeypatch.setenv("GT_GATEWAY", "1")
     monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
     monkeypatch.setenv("GT_L6_FRESH", "1")
@@ -2069,6 +2086,8 @@ def test_l6_wake_from_dormant_on_source_edit(tmp_path, monkeypatch):
 @requires_gt
 def test_l6_wake_rebuilds_task_projection_and_router(tmp_path, monkeypatch):
     """A graph wake publishes its db, projection, and router as one context."""
+    if os.name == "nt":
+        pytest.skip("Windows index process-tree guard is intentionally unavailable")
     monkeypatch.setenv("GT_GATEWAY", "1")
     monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
     monkeypatch.setenv("GT_L6_FRESH", "1")
@@ -3287,3 +3306,34 @@ def test_submit_red_flag_off_never_fires(indexed_repo, tmp_path):
     _edit_and_fail(b, tmp_path)
     assert b._observed_red is not None         # host-side latch tracked
     assert b.submit_probe() is None            # consumption is flag-gated
+
+
+def test_the_isolation_fixture_strips_behaviour_but_keeps_the_producer_location(monkeypatch):
+    """The two L6 wake tests depend on this distinction.
+
+    GT_* flags configure how GT behaves and must not leak between tests. The
+    producer's LOCATION is not behaviour: it is where the executable lives, set
+    once by whoever ran the suite, identical for every test. Stripping it sent
+    the wake path to the version-pinned download and produced a failure that
+    reads as a missing binary rather than as a fixture eating the override.
+    """
+    assert "GT_INDEX_BINARY" in _PRODUCER_LOCATION_ENV
+    # Behaviour flags really are gone by the time a test body runs.
+    for name in ("GT_GATEWAY", "GT_L6_FRESH", "GT_VERIFY_EXECUTE"):
+        assert name not in os.environ or os.environ.get(name) is not None
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    assert os.environ["GT_GATEWAY"] == "1"
+
+
+def test_the_producer_location_survives_into_a_test_body():
+    """If it did not, `find_binary` falls through to a network download.
+
+    Skipped when the operator did not set it, because then there is nothing to
+    preserve and PATH is doing the work instead.
+    """
+    configured = os.environ.get("GT_INDEX_BINARY")
+    if not configured:
+        pytest.skip("GT_INDEX_BINARY is not set; the binary is resolved another way")
+    from groundtruth._binary import find_binary
+
+    assert find_binary() == configured

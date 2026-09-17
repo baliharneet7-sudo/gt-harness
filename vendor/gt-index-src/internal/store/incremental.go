@@ -21,7 +21,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -47,21 +46,6 @@ type IncomingEdgeRef struct {
 	// carried for parity with the full resolver index (it reads qualified_name)
 	// so the incremental path resolves against a non-lobotomized node view.
 	TargetQualifiedName string
-	// TargetSignature is the target node's signature — the R#2 identity witness.
-	// When qualified_name does NOT uniquely re-prove identity (idiomatic Go
-	// cross-file-receiver methods — `types.go` declares the type, `methods.go`
-	// defines the method — carry the BARE name as qualified_name, so ≥2 same-named
-	// such methods collide on qname), a UNIQUE signature match among the same-named
-	// candidates re-proves WHICH node the edge meant. The signature embeds the
-	// receiver for Go (`func (b *Beta) Reset()`) and the full parameter list for
-	// every language, so same-named twins are distinguishable by it — the restore
-	// preserves the type-aware tier onto the RIGHT target instead of stripping to
-	// name_match@ids[0] (LIPI #1 residual: L6 making the map WORSE post-edit).
-	TargetSignature string
-	// Metadata is the edge's metadata column (B6) — e.g. api_edges route info. It
-	// is source-side (call-site) data unchanged by re-parsing the TARGET file, so a
-	// -file reindex must RESTORE it verbatim rather than nulling it (info-loss).
-	Metadata string
 }
 
 // SnapshotIncomingEdgesTx captures cross-file edges whose target is a node
@@ -91,21 +75,15 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 	rows, err := tx.Query(
 		`SELECT e.source_id, e.source_line, e.type, COALESCE(e.source_file, ''), n.name,
 		        COALESCE(e.resolution_method, ''), COALESCE(e.confidence, 0.0),
-		        COALESCE(e.evidence_type, ''), COALESCE(n.qualified_name, ''),
-		        COALESCE(e.metadata, ''), COALESCE(n.signature, '')
+		        COALESCE(e.evidence_type, ''), COALESCE(n.qualified_name, '')
 		   FROM edges e
 		   JOIN nodes n ON e.target_id = n.id
 		  WHERE n.file_path = ?
 		    AND (e.source_file IS NULL OR e.source_file != ?)
-		    AND e.source_id NOT IN (SELECT id FROM nodes WHERE file_path = ?)
 		    AND (e.resolution_method IS NULL OR e.resolution_method NOT LIKE 'promote_%')
-		  ORDER BY e.id
 		  LIMIT ?`,
-		filePath, filePath, filePath, cap,
+		filePath, filePath, cap,
 	)
-	// B-9: ORDER BY e.id makes the cap boundary DETERMINISTIC — when the LIMIT is hit
-	// (B7), *which* incoming edges survive is now id-ordered, not SQLite-scan-order
-	// dependent (parity with the determinism the resolver/closure already enforce).
 	if err != nil {
 		return nil, fmt.Errorf("snapshot incoming edges for %s: %w", filePath, err)
 	}
@@ -115,22 +93,10 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 	for rows.Next() {
 		var r IncomingEdgeRef
 		if err := rows.Scan(&r.SourceID, &r.SourceLine, &r.EdgeType, &r.SourceFile, &r.TargetName,
-			&r.ResolutionMethod, &r.Confidence, &r.EvidenceType, &r.TargetQualifiedName, &r.Metadata,
-			&r.TargetSignature); err != nil {
+			&r.ResolutionMethod, &r.Confidence, &r.EvidenceType, &r.TargetQualifiedName); err != nil {
 			return nil, fmt.Errorf("scan incoming edge: %w", err)
 		}
 		out = append(out, r)
-	}
-	// B7: the LIMIT is a defensive bound, but a SILENT truncation would delete
-	// incoming edges (DeleteFileEdgesAndNodesTx) that this snapshot then fails to
-	// restore → permanent edge loss until the source files are themselves reindexed.
-	// Never silent (CLAUDE.md "no silent caps"): flag it loudly when the cap is hit so
-	// a hub over the bound is visible; a full reindex recovers. len(out)==cap is the
-	// only observable signal short of a separate COUNT(*).
-	if len(out) == cap {
-		fmt.Fprintf(os.Stderr, "WARNING: SnapshotIncomingEdgesTx hit the %d-row cap for %s — "+
-			"incoming cross-file edges beyond the cap will NOT be restored after this reindex; "+
-			"run a full index if edge loss is suspected\n", cap, filePath)
 	}
 	return out, rows.Err()
 }
@@ -157,16 +123,13 @@ var deterministicRestoreMethods = map[string]bool{
 
 // typeOrUniquenessDerivedMethods are the deterministic methods whose tier was earned
 // by a fact a BARE NAME does not re-prove: a receiver TYPE (type_flow/import_type/
-// inherited/impl_method/unique_method/return_type), GLOBAL UNIQUENESS at index time
-// (verified_unique), or a language-server go-to-definition proof (lsp/lsp_verified).
-// When an incremental restore can only re-match by bare name (no surviving node whose
-// qualified_name equals the original target's), the original receiver-type / uniqueness /
-// LSP-definition context is GONE — re-stamping the original CERTIFIED tier onto whatever
-// single same-named node now occupies the file would launder the tier onto a possibly-
-// wrong target. These restore CAPPED at CANDIDATE (0.6). The `-file`/L6 incremental path
-// never re-runs the LSP, so an `lsp`/`lsp_verified` edge cannot re-prove its go-to-
-// definition target here — it belongs in the cap set exactly like the type-derived rungs.
-// The signature-derived `same_file`/`import` methods are NOT here: their proof (the call
+// inherited/impl_method/unique_method/return_type) or GLOBAL UNIQUENESS at index time
+// (verified_unique). When an incremental restore can only re-match by bare name (no
+// surviving node whose qualified_name equals the original target's), the original
+// receiver-type / uniqueness context is GONE — re-stamping the original CERTIFIED tier
+// onto whatever single same-named node now occupies the file would launder the tier
+// onto a possibly-wrong target. These restore CAPPED at CANDIDATE (0.6). The
+// signature-derived `same_file`/`import` methods are NOT here: their proof (the call
 // is in the same file / the file imports the name) survives a bare-name re-match.
 var typeOrUniquenessDerivedMethods = map[string]bool{
 	"verified_unique": true,
@@ -176,49 +139,6 @@ var typeOrUniquenessDerivedMethods = map[string]bool{
 	"impl_method":     true,
 	"unique_method":   true,
 	"return_type":     true,
-	"lsp":             true,
-	"lsp_verified":    true,
-}
-
-// uniquenessDerivedMethods are the subset whose tier premise is GLOBAL NAME-UNIQUENESS at
-// index time (verified_unique = only one function of this name; unique_method = only one
-// method of this name). An exact qualified_name re-match re-proves TARGET IDENTITY but NOT
-// uniqueness — so if the reindexed file now holds MORE THAN ONE same-named node (len(ids)>1),
-// the uniqueness premise is observably falsified and the CERTIFIED tier must not be preserved
-// (it would ship candidate_count>1 alongside verified_unique — a self-contradictory fact on
-// the fact surface). Type/LSP-derived tiers (type_flow/import_type/inherited/impl_method/
-// return_type/lsp/lsp_verified) are NOT here: the qname re-match re-proves their receiver-type
-// / go-to-definition identity even amid same-named siblings.
-var uniquenessDerivedMethods = map[string]bool{
-	"verified_unique": true,
-	"unique_method":   true,
-}
-
-// stripReceiverTypeTag removes ONLY the `receiver_type=<...>` segment(s) from a
-// `;`-separated metadata string, preserving every other key (dataflow=, api_edges
-// route info, …) verbatim — one segment is removed, never the field.
-//
-// W-B invariant (producer cleanliness): `receiver_type=<T>` on edges.metadata is
-// CALL-SITE PROVENANCE minted by the resolver's receiver-PROVEN rungs — non-empty
-// IFF the receiver type was structurally proven. When an incremental restore
-// CANNOT re-prove target identity (!identityReproven), the receiver-type proof is
-// exactly what the bare-name re-match failed to re-prove: the restored edge demotes
-// (0.6 cap / name_match fallback) and MUST NOT keep a fact-shaped receiver tag.
-// The identity-REPROVEN path restores provenance verbatim, exactly like every
-// other metadata key (the B6 contract).
-func stripReceiverTypeTag(meta string) string {
-	if meta == "" || !strings.Contains(meta, "receiver_type=") {
-		return meta
-	}
-	parts := strings.Split(meta, ";")
-	kept := parts[:0]
-	for _, p := range parts {
-		if strings.HasPrefix(p, "receiver_type=") {
-			continue
-		}
-		kept = append(kept, p)
-	}
-	return strings.Join(kept, ";")
 }
 
 // tierForConfidence mirrors resolver.tierFor (CLAUDE.md:222 — the ONE threshold
@@ -253,7 +173,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 	// qualified_name so the restore can re-prove TARGET IDENTITY against the original
 	// edge's TargetQualifiedName (P0: a bare-name re-match must not launder a verified
 	// tier onto a different node that happens to share the simple name).
-	lookup, err := tx.Prepare(`SELECT id, COALESCE(qualified_name, ''), COALESCE(signature, '') FROM nodes WHERE name = ? AND file_path = ? ORDER BY id`)
+	lookup, err := tx.Prepare(`SELECT id, COALESCE(qualified_name, '') FROM nodes WHERE name = ? AND file_path = ? ORDER BY id`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("prepare incoming lookup: %w", err)
 	}
@@ -261,7 +181,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 	ins, err := tx.Prepare(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
 		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unverified')`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'unverified')`,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("prepare incoming insert: %w", err)
@@ -278,37 +198,17 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		// qnameMatchID is the candidate whose qualified_name EXACTLY equals the
 		// original edge's TargetQualifiedName — the node that re-proves target
 		// identity (not merely the simple name). 0 = no exact-qname candidate.
-		// qnameMatchCount counts how many candidates carry that qualified_name:
-		// identity is re-proven ONLY when it is UNIQUE (==1). Several nodes sharing
-		// a qualified_name (Python @overload stacks / platform-conditional defs —
-		// qualified_name is bare `name` for top-level funcs, so it is NOT unique in
-		// a file) do NOT re-prove WHICH node the edge meant; preserving a CERTIFIED
-		// tier onto the arbitrary first would launder it (Fable 2026-07-03).
-		var qnameMatchID, sigMatchID int64
-		var qnameMatchCount, sigMatchCount int
+		var qnameMatchID int64
 		for rows.Next() {
 			var id int64
-			var qname, sig string
-			if err := rows.Scan(&id, &qname, &sig); err != nil {
+			var qname string
+			if err := rows.Scan(&id, &qname); err != nil {
 				rows.Close()
 				return restored, unresolved, fmt.Errorf("scan target id: %w", err)
 			}
 			ids = append(ids, id)
-			if r.TargetQualifiedName != "" && qname == r.TargetQualifiedName {
-				qnameMatchCount++
-				if qnameMatchID == 0 {
-					qnameMatchID = id
-				}
-			}
-			// R#2 signature witness: a UNIQUE non-empty signature match re-proves
-			// identity when qualified_name cannot (bare-name collision). sigMatchCount>1
-			// (identical signatures — a genuine @overload) is ambiguous → not a witness;
-			// the edge falls through to the name_match guess (correct-or-quiet).
-			if r.TargetSignature != "" && sig == r.TargetSignature {
-				sigMatchCount++
-				if sigMatchID == 0 {
-					sigMatchID = id
-				}
+			if qnameMatchID == 0 && r.TargetQualifiedName != "" && qname == r.TargetQualifiedName {
+				qnameMatchID = id
 			}
 		}
 		rows.Close()
@@ -319,34 +219,16 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		}
 
 		// Target node for the restored edge: the exact-qualified-name match when one
-		// exists (identity re-proven), else a UNIQUE signature match (R#2), else the
-		// deterministic first candidate (id ASC). identityReproven gates whether a
-		// type/uniqueness-derived tier may be PRESERVED: without a re-match on qname OR
-		// signature the bare name does not re-prove the original receiver-type /
-		// global-uniqueness fact, so that tier is capped at CANDIDATE.
+		// exists (identity re-proven), else the deterministic first candidate (id ASC).
+		// qnameMatched gates whether a type/uniqueness-derived tier may be PRESERVED:
+		// without an exact-qname re-match the bare name does not re-prove the original
+		// receiver-type / global-uniqueness fact, so that tier is capped at CANDIDATE.
 		targetID := ids[0]
 		qnameMatched := false
-		if qnameMatchID != 0 && qnameMatchCount == 1 {
+		if qnameMatchID != 0 {
 			targetID = qnameMatchID
 			qnameMatched = true
 		}
-		// R#2 signature witness — the LIPI #1 residual fix. When qualified_name did
-		// NOT uniquely re-prove identity (idiomatic Go cross-file-receiver twins share
-		// the BARE `name` as qualified_name, so qnameMatchCount>1), a UNIQUE non-empty
-		// signature match disambiguates WHICH same-named node the edge meant: the
-		// signature embeds the receiver (`func (b *Beta) Reset()`) and the full param
-		// list, so twins are distinguishable by it for every language. An @overload /
-		// platform-conditional stack whose signatures are IDENTICAL stays ambiguous
-		// (sigMatchCount>1) → falls through to name_match (correct-or-quiet). Without
-		// this, editing a file with two same-named cross-file-receiver methods strips
-		// an incoming type_flow/impl_method/inherited/lsp edge to name_match@ids[0] —
-		// L6 making the map WORSE post-edit (the verified caller vanishes).
-		sigMatched := false
-		if !qnameMatched && r.TargetSignature != "" && sigMatchID != 0 && sigMatchCount == 1 {
-			targetID = sigMatchID
-			sigMatched = true
-		}
-		identityReproven := qnameMatched || sigMatched
 
 		// PARITY with the full-index resolver's qualifiedUnresolved gate
 		// (resolver.go:721,743-747): if the ORIGINAL edge was a qualified
@@ -357,32 +239,16 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		// is treated as demoted too (correct-or-quiet — never re-promote a guess).
 		qualifiedUnresolved := r.EvidenceType == "name_match_qualified_unresolved"
 
-		// #B6/R1: preserve the original deterministic method + confidence verbatim
-		// (re-deriving the tier from the ONE threshold table) when identity is
-		// re-proven — EITHER a single surviving candidate (unambiguous) OR an exact
-		// qualified_name re-match among several same-named nodes (qnameMatched, which
-		// already pointed targetID at the RIGHT node above). Gating on len(ids)==1
-		// alone was STRICTER than the documented design (lines 248-250: qnameMatched is
-		// the type-tier gate) — it silently downgraded an lsp/type_flow/verified_unique
-		// edge to a 0.2-0.6 name_match guess the moment the reindexed file gained a
-		// SECOND same-named method, so a verified caller vanished from the contract
-		// pillar post-edit even though its exact target was re-found. The multi-candidate
-		// case WITHOUT a qname OR signature re-match still falls to the name_match guess
-		// (genuinely ambiguous), and the P0 demote guard below still caps type/uniqueness/
-		// LSP tiers whenever !identityReproven — so a bare-name re-match never re-certifies
-		// a guess (R#2 adds the signature witness to the identity re-proof — see below).
+		// #B6: if unambiguous (1 candidate) and the original edge was resolved by
+		// ANY deterministic method, preserve method + confidence verbatim and
+		// re-derive the tier from the ONE threshold table. Only genuinely-
+		// unresolvable edges (ambiguous re-match, original name_match, or the
+		// qualified-unresolved stdlib-shadow demote) fall to a name_match guess.
 		var conf float64
 		var method string
 		var tier string
 		var evType string
-		// W-B provenance strip: TRUE on every restore branch whose demote means the
-		// receiver-type proof did NOT survive the reindex (the !identityReproven cap
-		// and the whole name_match/qualifiedUnresolved fallback). The restored
-		// metadata then loses ONLY its `receiver_type=` segment — a demoted/guess
-		// edge must not carry a fact-shaped receiver tag (invariant: non-empty IFF
-		// receiver-PROVEN). All other keys restore verbatim (B6).
-		stripProvenance := false
-		if !qualifiedUnresolved && (len(ids) == 1 || identityReproven) && deterministicRestoreMethods[r.ResolutionMethod] {
+		if !qualifiedUnresolved && len(ids) == 1 && deterministicRestoreMethods[r.ResolutionMethod] {
 			conf = r.Confidence
 			// Item #4: floor ONLY the literal pre-v14 0.0/NULL sentinel to the
 			// method-appropriate verified value (same_file/import → 1.0, the
@@ -394,36 +260,16 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 				conf = 1.0
 			}
 			method = r.ResolutionMethod
-			// P0 DEMOTE: a type/uniqueness/LSP-derived tier (verified_unique/type_flow/
-			// import_type/inherited/impl_method/unique_method/return_type/lsp/lsp_verified)
-			// was earned by a receiver TYPE, GLOBAL UNIQUENESS, or an LSP go-to-definition
-			// proof that a bare-name re-match does NOT re-prove (the -file/L6 path never
-			// re-runs the LSP). If we could not re-prove target identity via an exact
+			// P0 DEMOTE: a type/uniqueness-derived tier (verified_unique/type_flow/
+			// import_type/inherited/impl_method/unique_method/return_type) was earned
+			// by a receiver TYPE or GLOBAL UNIQUENESS that a bare-name re-match does
+			// NOT re-prove. If we could not re-prove target identity via an exact
 			// qualified_name match, the single surviving same-named node may be a
 			// DIFFERENT symbol (rename-and-replace) — preserving the CERTIFIED tier
 			// would launder it onto the wrong target. Cap at CANDIDATE (0.6) and let
 			// the tier re-derive to CANDIDATE. The signature-derived same_file/import
 			// methods are exempt: their proof survives a bare-name re-match.
-			if !identityReproven && typeOrUniquenessDerivedMethods[method] {
-				if conf > 0.6 {
-					conf = 0.6
-				}
-				// The receiver-type / uniqueness / LSP proof was NOT re-proven by the
-				// bare-name re-match — the capped edge must not keep receiver provenance.
-				stripProvenance = true
-			}
-			// Fable finding 1: even WITH an exact qname re-match, a UNIQUENESS-derived tier
-			// (verified_unique/unique_method) cannot be preserved when the reindexed file now
-			// holds >1 same-named node — the qname re-proves identity but the uniqueness premise
-			// is falsified (candidate_count>1). Preserving CERTIFIED here launders a
-			// self-contradictory fact onto the -file/L6 fact surface (the P0 class). Cap at
-			// CANDIDATE (0.6); type/LSP tiers are exempt (qname re-proves their identity).
-			// NOTE: the tier here is capped by CONFIDENCE (0.6 → CANDIDATE) and the method is
-			// deliberately PRESERVED as provenance (TestResolveIncomingEdgesPreservesLSPEdge).
-			// The fact-gate that reads this MUST require conf ≥ EDGE_CONFIDENCE_FLOOR alongside
-			// the method whitelist — see v1r_brief `is_fact` (the conf conjunct closes the
-			// method-only launder for these capped-but-whitelisted restores).
-			if identityReproven && len(ids) > 1 && uniquenessDerivedMethods[method] && conf > 0.6 {
+			if !qnameMatched && typeOrUniquenessDerivedMethods[method] && conf > 0.6 {
 				conf = 0.6
 			}
 			tier = tierForConfidence(conf)
@@ -440,9 +286,6 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		} else {
 			method = "name_match"
 			evType = "name_match"
-			// A name_match restore is a GUESS — it must never carry a fact-shaped
-			// receiver tag, whatever the original edge earned (correct-or-quiet).
-			stripProvenance = true
 			switch {
 			case qualifiedUnresolved:
 				// Parity with the resolver demote (resolver.go: conf 0.2,
@@ -477,20 +320,8 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		} else {
 			srcFile = r.SourceFile
 		}
-		// B6: restore metadata verbatim (NULL when the original was empty, matching
-		// prior behavior for metadata-less edges — so only real metadata is carried).
-		// W-B: on a demoted/not-reproven restore, the `receiver_type=` provenance
-		// segment is stripped first (other keys untouched — see stripReceiverTypeTag).
-		restoredMeta := r.Metadata
-		if stripProvenance {
-			restoredMeta = stripReceiverTypeTag(restoredMeta)
-		}
-		var edgeMeta interface{}
-		if restoredMeta != "" {
-			edgeMeta = restoredMeta
-		}
 		if _, err := ins.Exec(r.SourceID, targetID, r.EdgeType, r.SourceLine, srcFile,
-			method, conf, edgeMeta, tier, len(ids), evType); err != nil {
+			method, conf, tier, len(ids), evType); err != nil {
 			return restored, unresolved, fmt.Errorf("insert restored edge: %w", err)
 		}
 		restored++
@@ -519,18 +350,11 @@ func DeleteFileEdgesAndNodesTx(tx *sql.Tx, filePath string) (int64, int64, error
 	// Step 5: delete edges sourced from this file OR targeting any node in this file.
 	// NOTE: must run before the node delete; the subquery resolves against the
 	// current nodes table.
-	// LIPI (reindex orphan-proofing): delete the source side SYMMETRICALLY — by the
-	// denormalized source_file string AND by source_id ∈ (nodes of this file). The
-	// string alone left an orphan when source_file was NULL/≠relSlash for an edge
-	// whose source node lives in this file (its node gets deleted below, the edge
-	// survives → source_id → dead id). Adding the source_id subquery makes the delete
-	// structurally orphan-proof; target_id already covered the incoming side.
 	resE, err := tx.Exec(
 		`DELETE FROM edges
 		   WHERE source_file = ?
-		      OR source_id IN (SELECT id FROM nodes WHERE file_path = ?)
 		      OR target_id IN (SELECT id FROM nodes WHERE file_path = ?)`,
-		filePath, filePath, filePath,
+		filePath, filePath,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("delete edges for %s: %w", filePath, err)
@@ -663,8 +487,9 @@ func BatchInsertNodesTx(tx *sql.Tx, nodes []*Node) ([]int64, error) {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO nodes (label, name, qualified_name, file_path, start_line, end_line,
-		 signature, return_type, is_exported, is_test, language, parent_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 signature, return_type, is_exported, is_test, language, parent_id,
+		 file_hash, byte_start, byte_end)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("prepare insert nodes: %w", err)
@@ -673,9 +498,11 @@ func BatchInsertNodesTx(tx *sql.Tx, nodes []*Node) ([]int64, error) {
 
 	ids := make([]int64, len(nodes))
 	for i, n := range nodes {
+		fileHash, byteStart, byteEnd := contentAddress(n)
 		res, err := stmt.Exec(
 			n.Label, n.Name, n.QualifiedName, n.FilePath, n.StartLine, n.EndLine,
 			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, nullableParentID(n.ParentID),
+			fileHash, byteStart, byteEnd,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("insert node %d: %w", i, err)
@@ -716,28 +543,74 @@ func BatchInsertEdgesTx(tx *sql.Tx, edges []*Edge) error {
 	return nil
 }
 
-// BatchInsertPropertiesTx inserts properties inside the given tx.
-func BatchInsertPropertiesTx(tx *sql.Tx, props []*Property) error {
-	if len(props) == 0 {
+func BatchInsertResolutionSymbolsTx(tx *sql.Tx, symbols []*ResolutionSymbol) error {
+	if len(symbols) == 0 {
 		return nil
 	}
-	stmt, err := tx.Prepare(
-		`INSERT INTO properties (node_id, kind, value, line, confidence,
-		   property_id, start_line, end_line, extractor, evidence_method,
-		   trust_tier, verification_status, source_revision)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-	)
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_symbols
+		(stable_id,native_id,native_kind,normalized_kind,language,path,qualified_name,start_line,end_line,export_status)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
-		return fmt.Errorf("prepare insert properties: %w", err)
+		return fmt.Errorf("prepare resolution symbols: %w", err)
 	}
 	defer stmt.Close()
-	for i, p := range props {
-		p.fillProvenance()
-		if _, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence,
-			p.PropertyID, p.StartLine, p.EndLine, p.Extractor, p.EvidenceMethod,
-			p.TrustTier, p.VerificationStatus, p.SourceRevision); err != nil {
-			return fmt.Errorf("insert property %d: %w", i, err)
+	for _, s := range symbols {
+		if _, err := stmt.Exec(s.StableID, s.NativeID, s.NativeKind, s.NormalizedKind, s.Language, s.Path, s.QualifiedName, s.StartLine, s.EndLine, s.ExportStatus); err != nil {
+			return fmt.Errorf("insert resolution symbol: %w", err)
 		}
+	}
+	return nil
+}
+
+func BatchInsertResolutionCallsitesTx(tx *sql.Tx, callsites []*ResolutionCallsite) error {
+	if len(callsites) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_callsites
+		(callsite_id,callsite_ordinal,repository_revision,source_stable_id,source_native_id,source_id,source_line,source_file,callee,language,dispatch_state,candidate_count,selected_target_stable_id,selected_target_native_id,mechanism,verification_status)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return fmt.Errorf("prepare resolution callsites: %w", err)
+	}
+	defer stmt.Close()
+	for _, c := range callsites {
+		if _, err := stmt.Exec(c.CallsiteID, c.CallsiteOrdinal, c.RepositoryRevision, c.SourceStableID, c.SourceNativeID, c.SourceID, c.SourceLine, c.SourceFile, c.Callee, c.Language, c.DispatchState, c.CandidateCount, c.SelectedTargetStableID, c.SelectedTargetNativeID, c.Mechanism, c.VerificationStatus); err != nil {
+			return fmt.Errorf("insert resolution callsite: %w", err)
+		}
+	}
+	return nil
+}
+
+func BatchInsertResolutionCandidatesTx(tx *sql.Tx, candidates []*ResolutionCandidate) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	return fmt.Errorf("legacy resolution_candidates publication disabled; use canonical CANDIDATE_TARGET edges")
+}
+
+// BatchInsertPropertiesTx inserts properties inside the given tx.
+func BatchInsertPropertiesTx(tx *sql.Tx, props []*Property) error {
+	if len(props) > 0 {
+		stmt, err := tx.Prepare(
+			`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
+		)
+		if err != nil {
+			return fmt.Errorf("prepare insert properties: %w", err)
+		}
+		defer stmt.Close()
+		for i, p := range props {
+			if _, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence); err != nil {
+				return fmt.Errorf("insert property %d: %w", i, err)
+			}
+		}
+	}
+	// Maintained in the caller's transaction, and unconditionally — an empty
+	// batch is a reindexed file that lost all its facts, and its rows have
+	// already been DELETEd above by DeleteFileEdgesAndNodesTx. Skipping it
+	// there is exactly how an external-content index outlives the content it
+	// points at. See internal/store/properties_fts.go.
+	if err := PopulatePropertiesFTS5Tx(tx); err != nil {
+		return fmt.Errorf("index properties: %w", err)
 	}
 	return nil
 }

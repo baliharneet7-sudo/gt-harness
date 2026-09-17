@@ -25,6 +25,7 @@ ARMS = (
 
 _TEMPLATE_SENTINEL = "REQUIRED_AT_AUTHORIZED_EXECUTION"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _ARM_BINDING_KEYS = {
     "schema",
     "runner",
@@ -41,11 +42,334 @@ _ARM_AGENTS = {
     )
     for arm in ARMS
 }
+HAR9_CLOSEOUT_SCHEMA = "gt.har9.closeout_receipt.v1"
+HAR9_REQUIRED_UNITS = frozenset(
+    {
+        "har5",
+        "har6",
+        "har7",
+        "har8",
+        "har9",
+        "har10",
+        "har11",
+        "har12",
+        "har14",
+        "har29",
+        "har30",
+        "har35",
+        "har36",
+        "har37",
+        "har38",
+        "har41",
+        "har42",
+        "har48",
+        "har59",
+        "har60",
+        "har61",
+    }
+)
+HAR9_ASSEMBLY_INPUT_SCHEMA = "gt.har9.assembly_inputs.v1"
+HAR9_ASSEMBLY_INPUTS = tuple(sorted(HAR9_REQUIRED_UNITS))
+HAR9_GROUNDTRUTH_UNITS = frozenset({"har42", "har60", "har61"})
+HAR9_REPOSITORY_NAMES = frozenset({"harness", "groundtruth"})
 
 
 def _canonical_sha256(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def build_closeout_receipt(
+    *,
+    harness_head: str,
+    groundtruth_head: str,
+    unit_heads: dict[str, str],
+    input_receipts: dict[str, str],
+    environment_sha256: str,
+    unit_repositories: dict[str, str] | None = None,
+    provider_calls: int = 0,
+    benchmark_runs: int = 0,
+    allow_provisional: bool = True,
+) -> dict[str, Any]:
+    """Assemble a provider-free closeout without authorizing a benchmark."""
+    if not _SHA1_RE.fullmatch(harness_head) or not _SHA1_RE.fullmatch(groundtruth_head):
+        raise ValueError("closeout repository heads must be full commit SHAs")
+    if not unit_heads or any(
+        not isinstance(name, str)
+        or not name
+        or not _SHA1_RE.fullmatch(value)
+        for name, value in unit_heads.items()
+    ):
+        raise ValueError("closeout unit heads must be named full commit SHAs")
+    if not set(unit_heads) <= HAR9_REQUIRED_UNITS:
+        raise ValueError("closeout unit heads contain an unknown unit")
+    if provider_calls != 0 or benchmark_runs != 0:
+        raise ValueError("closeout must remain provider-free and benchmark-free")
+    if not isinstance(input_receipts, dict) or not input_receipts or any(
+        not isinstance(name, str)
+        or not name
+        or not _SHA256_RE.fullmatch(value)
+        for name, value in input_receipts.items()
+    ):
+        raise ValueError("closeout inputs must be named SHA-256 receipt digests")
+    if not set(input_receipts) <= HAR9_REQUIRED_UNITS:
+        raise ValueError("closeout inputs contain an unknown unit")
+    repositories = unit_repositories or {
+        name: ("groundtruth" if name in HAR9_GROUNDTRUTH_UNITS else "harness")
+        for name in unit_heads
+    }
+    if set(repositories) != set(unit_heads) or any(
+        not isinstance(name, str) or repo not in HAR9_REPOSITORY_NAMES
+        for name, repo in repositories.items()
+    ):
+        raise ValueError(
+            "closeout unit repositories must bind every unit to harness or groundtruth"
+        )
+    if not isinstance(environment_sha256, str) or (
+        environment_sha256 != "UNVERIFIED" and not _SHA256_RE.fullmatch(environment_sha256)
+    ):
+        raise ValueError("closeout environment identity must be a SHA-256 digest")
+    if not allow_provisional:
+        missing = sorted(HAR9_REQUIRED_UNITS - set(unit_heads))
+        if missing:
+            raise ValueError(f"terminal closeout missing unit heads: {', '.join(missing)}")
+        missing_receipts = sorted(HAR9_REQUIRED_UNITS - set(input_receipts))
+        if missing_receipts:
+            raise ValueError(
+                "terminal closeout missing input receipts: "
+                + ", ".join(missing_receipts)
+            )
+        if environment_sha256 == "UNVERIFIED":
+            raise ValueError("terminal closeout requires a concrete environment digest")
+    payload: dict[str, Any] = {
+        "schema": HAR9_CLOSEOUT_SCHEMA,
+        "harness_head": harness_head,
+        "groundtruth_head": groundtruth_head,
+        "unit_heads": dict(sorted(unit_heads.items())),
+        "unit_repositories": dict(sorted(repositories.items())),
+        "input_receipts": dict(sorted(input_receipts.items())),
+        "environment_sha256": environment_sha256,
+        "results": {"provider_calls": 0, "benchmark_runs": 0},
+        "authorization": {
+            "status": "BENCHMARK_READY_AWAITING_USER_RUN_APPROVAL",
+            "benchmark_ready": False,
+        },
+    }
+    payload["bundle_sha256"] = _canonical_sha256(payload)
+    return payload
+
+
+def verify_closeout_receipt(
+    receipt: Any,
+    *,
+    expected_harness_head: str | None = None,
+    expected_groundtruth_head: str | None = None,
+    expected_unit_heads: dict[str, str] | None = None,
+    expected_input_receipts: dict[str, str] | None = None,
+    expected_environment_sha256: str | None = None,
+    require_terminal: bool = False,
+) -> bool:
+    """Verify persisted closeout bytes and every identity before assembly."""
+    if not isinstance(receipt, dict) or receipt.get("schema") != HAR9_CLOSEOUT_SCHEMA:
+        return False
+    required = {
+        "schema",
+        "harness_head",
+        "groundtruth_head",
+        "unit_heads",
+        "unit_repositories",
+        "input_receipts",
+        "environment_sha256",
+        "results",
+        "authorization",
+        "bundle_sha256",
+    }
+    if set(receipt) != required:
+        return False
+    if not _SHA1_RE.fullmatch(receipt["harness_head"]) or not _SHA1_RE.fullmatch(
+        receipt["groundtruth_head"]
+    ):
+        return False
+    unit_heads = receipt["unit_heads"]
+    unit_repositories = receipt["unit_repositories"]
+    input_receipts = receipt["input_receipts"]
+    if not isinstance(unit_heads, dict) or not set(unit_heads) <= HAR9_REQUIRED_UNITS or any(
+        not isinstance(k, str) or not _SHA1_RE.fullmatch(v)
+        for k, v in unit_heads.items()
+    ):
+        return False
+    if (
+        not isinstance(unit_repositories, dict)
+        or set(unit_repositories) != set(unit_heads)
+        or any(repo not in HAR9_REPOSITORY_NAMES for repo in unit_repositories.values())
+        or unit_repositories
+        != {
+            name: ("groundtruth" if name in HAR9_GROUNDTRUTH_UNITS else "harness")
+            for name in unit_heads
+        }
+    ):
+        return False
+    if (
+        not isinstance(input_receipts, dict)
+        or not set(input_receipts) <= HAR9_REQUIRED_UNITS
+        or any(
+            not isinstance(k, str) or not _SHA256_RE.fullmatch(v)
+            for k, v in input_receipts.items()
+        )
+    ):
+        return False
+    environment = receipt["environment_sha256"]
+    if environment != "UNVERIFIED" and not _SHA256_RE.fullmatch(environment):
+        return False
+    results = receipt["results"]
+    authorization = receipt["authorization"]
+    if results != {"provider_calls": 0, "benchmark_runs": 0} or not isinstance(authorization, dict):
+        return False
+    if (
+        authorization.get("benchmark_ready") is not False
+        or authorization.get("status") != "BENCHMARK_READY_AWAITING_USER_RUN_APPROVAL"
+    ):
+        return False
+    if (
+        expected_harness_head is not None
+        and receipt["harness_head"] != expected_harness_head
+    ):
+        return False
+    if (
+        expected_groundtruth_head is not None
+        and receipt["groundtruth_head"] != expected_groundtruth_head
+    ):
+        return False
+    if expected_unit_heads is not None and unit_heads != dict(
+        sorted(expected_unit_heads.items())
+    ):
+        return False
+    if expected_input_receipts is not None and input_receipts != dict(
+        sorted(expected_input_receipts.items())
+    ):
+        return False
+    if expected_environment_sha256 is not None and environment != expected_environment_sha256:
+        return False
+    if require_terminal and (
+        set(unit_heads) != HAR9_REQUIRED_UNITS
+        or set(unit_repositories) != HAR9_REQUIRED_UNITS
+        or set(input_receipts) != HAR9_REQUIRED_UNITS
+        or environment == "UNVERIFIED"
+    ):
+        return False
+    unsigned = dict(receipt)
+    unsigned.pop("bundle_sha256", None)
+    return receipt["bundle_sha256"] == _canonical_sha256(unsigned)
+
+
+def build_assembly_input_skeleton(
+    *,
+    harness_head: str,
+    groundtruth_head: str,
+    unit_heads: dict[str, str] | None = None,
+    input_receipts: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Create a fill-in map without claiming final heads or benchmark readiness."""
+    if not _SHA1_RE.fullmatch(harness_head) or not _SHA1_RE.fullmatch(groundtruth_head):
+        raise ValueError("assembly input heads must be full commit SHAs")
+
+    observed_heads = unit_heads or {}
+    observed_receipts = input_receipts or {}
+    if not set(observed_heads) <= HAR9_REQUIRED_UNITS:
+        raise ValueError("assembly input contains an unknown unit")
+    if not set(observed_receipts) <= HAR9_REQUIRED_UNITS:
+        raise ValueError("assembly input contains an unknown receipt")
+    if any(not _SHA1_RE.fullmatch(value) for value in observed_heads.values()):
+        raise ValueError("assembly unit heads must be full commit SHAs")
+    if any(not _SHA256_RE.fullmatch(value) for value in observed_receipts.values()):
+        raise ValueError("assembly input receipts must be SHA-256 digests")
+
+    payload: dict[str, Any] = {
+        "schema": HAR9_ASSEMBLY_INPUT_SCHEMA,
+        "harness_head": harness_head,
+        "groundtruth_head": groundtruth_head,
+        "unit_heads": {
+            name: observed_heads.get(name, "UNVERIFIED")
+            for name in HAR9_ASSEMBLY_INPUTS
+        },
+        "input_receipts": {
+            name: observed_receipts.get(name, "UNVERIFIED")
+            for name in HAR9_ASSEMBLY_INPUTS
+        },
+        "state": "PROVISIONAL_INPUTS_PENDING_FINAL_HEADS",
+        "pending_units": [
+            name for name in HAR9_ASSEMBLY_INPUTS if name not in observed_heads
+        ],
+        "pending_receipts": [
+            name for name in HAR9_ASSEMBLY_INPUTS if name not in observed_receipts
+        ],
+        "results": {"provider_calls": 0, "benchmark_runs": 0},
+        "authorization": {
+            "benchmark_ready": False,
+            "status": "BENCHMARK_READY_AWAITING_USER_RUN_APPROVAL",
+        },
+    }
+    payload["skeleton_sha256"] = _canonical_sha256(payload)
+    return payload
+
+
+def verify_assembly_input_skeleton(receipt: Any) -> bool:
+    """Verify the complete key set and digest before terminal closeout assembly."""
+    if not isinstance(receipt, dict) or receipt.get("schema") != HAR9_ASSEMBLY_INPUT_SCHEMA:
+        return False
+    required = {
+        "schema",
+        "harness_head",
+        "groundtruth_head",
+        "unit_heads",
+        "input_receipts",
+        "state",
+        "pending_units",
+        "pending_receipts",
+        "results",
+        "authorization",
+        "skeleton_sha256",
+    }
+    if set(receipt) != required:
+        return False
+    if not _SHA1_RE.fullmatch(receipt["harness_head"]) or not _SHA1_RE.fullmatch(
+        receipt["groundtruth_head"]
+    ):
+        return False
+    unit_heads = receipt["unit_heads"]
+    input_receipts = receipt["input_receipts"]
+    if not isinstance(unit_heads, dict) or set(unit_heads) != HAR9_REQUIRED_UNITS:
+        return False
+    if not isinstance(input_receipts, dict) or set(input_receipts) != HAR9_REQUIRED_UNITS:
+        return False
+    if any(
+        value != "UNVERIFIED" and not _SHA1_RE.fullmatch(value)
+        for value in unit_heads.values()
+    ):
+        return False
+    if any(
+        value != "UNVERIFIED" and not _SHA256_RE.fullmatch(value)
+        for value in input_receipts.values()
+    ):
+        return False
+    pending_units = [name for name in HAR9_ASSEMBLY_INPUTS if unit_heads[name] == "UNVERIFIED"]
+    pending_receipts = [
+        name for name in HAR9_ASSEMBLY_INPUTS if input_receipts[name] == "UNVERIFIED"
+    ]
+    if receipt["state"] != "PROVISIONAL_INPUTS_PENDING_FINAL_HEADS":
+        return False
+    if receipt["pending_units"] != pending_units or receipt["pending_receipts"] != pending_receipts:
+        return False
+    if receipt["results"] != {"provider_calls": 0, "benchmark_runs": 0}:
+        return False
+    if receipt["authorization"] != {
+        "benchmark_ready": False,
+        "status": "BENCHMARK_READY_AWAITING_USER_RUN_APPROVAL",
+    }:
+        return False
+    unsigned = dict(receipt)
+    unsigned.pop("skeleton_sha256", None)
+    return receipt["skeleton_sha256"] == _canonical_sha256(unsigned)
 
 
 def _numeric_equals(value: Any, expected: float) -> bool:

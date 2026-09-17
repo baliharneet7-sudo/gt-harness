@@ -1,38 +1,171 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import inspect
+from types import MethodType
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
-from scripts.miniswe_gt_run import CredentialIsolatedLocalEnvironment
+from scripts.miniswe_gt_run import (
+    BoundedHistoryAgent,
+    CredentialIsolatedLocalEnvironment,
+    _compact_miniswe_history,
+    _model_and_kwargs,
+    _write_model_patch,
+)
 from scripts.miniswe_repro import (
+    RECEIPT_SCHEMA,
+    RESPONSE_DIGEST_SUBJECT,
     ResearchModelMismatch,
     RunReceiptObserver,
+    _canonical,
     build_reproducibility_manifest,
     write_reproducibility_manifest,
 )
 
+# Historical request sizes used by the regression fixtures.
+MAX_TOOL_OUTPUT_CHARS = 16_000
+
+
+def test_muse_route_preserves_the_baseline_xhigh_reasoning_contract(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
+
+    model, kwargs = _model_and_kwargs("meta/muse-spark-1.2-contributor", 1.0)
+
+    assert model == "openai/meta/muse-spark-1.2-contributor"
+    assert kwargs["reasoning"] == {"effort": "xhigh"}
+
+
+def test_deepseek_route_forwards_relace_only_without_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "16384")
+    monkeypatch.setenv(
+        "GT_PROVIDER_ROUTING_JSON",
+        json.dumps(
+            {
+                "only": ["relace"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            }
+        ),
+    )
+
+    model, kwargs = _model_and_kwargs("deepseek/deepseek-v4-flash-0731", 1.0)
+
+    assert model == "openai/deepseek/deepseek-v4-flash-0731"
+    assert kwargs["max_tokens"] == 16_384
+    assert "max_completion_tokens" not in kwargs
+    assert kwargs["extra_body"] == {
+        "provider": {
+            "only": ["relace"],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+        }
+    }
+
+
+def test_deepseek_openrouter_route_refuses_missing_provider_lock(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
+    monkeypatch.delenv("GT_PROVIDER_ROUTING_JSON", raising=False)
+
+    with pytest.raises(ValueError, match="provider_routing_env_invalid"):
+        _model_and_kwargs("deepseek/deepseek-v4-flash-0731", 1.0)
+
+
+class FakeResponse:
+    """A provider response object, dumped the way litellm dumps one."""
+
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def model_dump(self, mode: str | None = None) -> dict:
+        return json.loads(json.dumps(self._payload))
+
 
 class FakeModel:
+    """Mirrors LitellmModel 2.4.6's composition, not a convenient subset.
+
+    The point of the mirror is the retry loop. Upstream, query() runs
+    ``for attempt in retry(...)`` and the loop body is
+    ``self._query(self._prepare_messages_for_api(messages), **kwargs)`` -
+    so message preparation happens once per ATTEMPT while the wrapper's own
+    post-processing happens once per CALL. A fake with only a query() method
+    cannot express that asymmetry, which is why the N-requests-to-1-terminal
+    ledger defect was invisible to this suite for as long as it existed.
+    """
+
     model_name = "openai/deepseek-v4-flash"
     model_kwargs = {"temperature": 1.0, "api_base": "https://gateway.invalid"}
+    max_attempts = 3
+
+    def __init__(self, *, failures: int = 0, error: Exception | None = None,
+                 reported_model: str = "deepseek-v4-flash"):
+        self.abort_exceptions: list[type[BaseException]] = [KeyboardInterrupt]
+        self.failures = failures
+        self.error = error or TimeoutError("provider timeout")
+        self.reported_model = reported_model
+        self.transport_calls = 0
 
     def _prepare_messages_for_api(self, messages):
         return [{k: v for k, v in row.items() if k != "extra"} for row in messages]
 
+    def _query(self, messages, **kwargs):
+        self.transport_calls += 1
+        if self.transport_calls <= self.failures:
+            raise self.error
+        return FakeResponse({
+            "id": f"resp-{self.transport_calls}",
+            "model": self.reported_model,
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+        })
+
     def query(self, messages, **kwargs):
-        self._prepare_messages_for_api(messages)
+        response = None
+        last: Exception | None = None
+        for _ in range(self.max_attempts):
+            try:
+                response = self._query(self._prepare_messages_for_api(messages), **kwargs)
+                break
+            except Exception as exc:
+                # tenacity's retry_if_not_exception_type: an abort exception
+                # reaches the caller on its first occurrence, unretried.
+                if isinstance(exc, tuple(self.abort_exceptions)):
+                    raise
+                last = exc
+        else:
+            raise last  # type: ignore[misc]
         return {
             "role": "assistant",
             "content": "ok",
-            "extra": {
-                "response": {
-                    "id": "resp-1",
-                    "model": "deepseek-v4-flash",
-                    "usage": {"prompt_tokens": 3, "completion_tokens": 2},
-                }
-            },
+            "extra": {"response": response.model_dump(mode="json")},
         }
+
+
+def _rows(observer) -> list[dict]:
+    return [json.loads(line) for line in
+            observer.events_path.read_text(encoding="utf-8").splitlines()]
+
+
+def _pairs(rows: list[dict]) -> list[tuple[str, str]]:
+    """(open request id, terminal request id) in emission order."""
+    out: list[tuple[str, str]] = []
+    pending = None
+    for row in rows:
+        if row["event"] == "provider_request":
+            assert pending is None, "a request opened while another was unterminated"
+            pending = row["request_id"]
+        else:
+            assert pending is not None, "a terminal row with no open request"
+            out.append((pending, row["request_id"]))
+            pending = None
+    assert pending is None, "run ended with an unterminated request"
+    return out
 
 
 def test_neutral_receipt_observer_commits_final_request_and_response(tmp_path):
@@ -62,13 +195,7 @@ def test_neutral_receipt_observer_commits_final_request_and_response(tmp_path):
 
 
 def test_neutral_observer_fails_loudly_on_model_substitution(tmp_path):
-    class WrongModel(FakeModel):
-        def query(self, messages, **kwargs):
-            result = super().query(messages, **kwargs)
-            result["extra"]["response"]["model"] = "fallback-model"
-            return result
-
-    model = WrongModel()
+    model = FakeModel(reported_model="fallback-model")
     observer = RunReceiptObserver(
         tmp_path, requested_model="deepseek-v4-flash",
         resolved_model="openai/deepseek-v4-flash",
@@ -77,15 +204,14 @@ def test_neutral_observer_fails_loudly_on_model_substitution(tmp_path):
     with pytest.raises(ResearchModelMismatch):
         model.query([{"role": "user", "content": "task"}])
     assert observer.model_mismatch is True
+    # The mismatch is raised from inside the retry loop, so it must be an
+    # abort exception or the run bills ten substituted calls before failing.
+    assert model.transport_calls == 1
+    assert observer.request_count == 1
 
 
 def test_neutral_observer_records_provider_failure_symmetrically(tmp_path):
-    class FailedModel(FakeModel):
-        def query(self, messages, **kwargs):
-            self._prepare_messages_for_api(messages)
-            raise TimeoutError("provider timeout")
-
-    model = FailedModel()
+    model = FakeModel(failures=FakeModel.max_attempts)
     observer = RunReceiptObserver(
         tmp_path, requested_model="deepseek-v4-flash",
         resolved_model="openai/deepseek-v4-flash",
@@ -93,11 +219,15 @@ def test_neutral_observer_records_provider_failure_symmetrically(tmp_path):
     observer.install(model)
     with pytest.raises(TimeoutError):
         model.query([{"role": "user", "content": "task"}])
-    rows = [json.loads(line) for line in observer.events_path.read_text(
-        encoding="utf-8"
-    ).splitlines()]
-    assert rows[-1]["event"] == "provider_failure"
-    assert rows[-1]["request_id"] == rows[0]["request_id"]
+    rows = _rows(observer)
+    # Every attempt is a request, so every attempt owes a terminal. Three
+    # failed attempts are three failures - not one, and not two orphans.
+    assert [row["event"] for row in rows] == [
+        "provider_request", "provider_failure",
+        "provider_request", "provider_failure",
+        "provider_request", "provider_failure",
+    ]
+    assert all(opened == closed for opened, closed in _pairs(rows))
     assert observer.receipt()["valid"] is True
 
 
@@ -188,6 +318,34 @@ def test_manifest_is_invalid_when_any_receipt_layer_is_invalid(tmp_path):
     )
     assert bad_provider["research_valid"] is False
     assert bad_journal["research_valid"] is False
+    missing_engine = build_reproducibility_manifest(
+        event_journal={"valid": True},
+        request_receipt={"valid": True, "model_mismatch": False},
+        **common,
+    )
+    assert missing_engine["research_valid"] is False
+
+
+@pytest.mark.parametrize("mode, receipt, expected", [
+    ("off", None, True),
+    ("assistive", None, False),
+    ("assistive", {"schema": "gt.engine_integrity.v1", "valid": True,
+                   "mode": "assistive", "issues": [], "disabled_stage": ""}, True),
+    ("assistive", {"schema": "gt.engine_integrity.v1", "valid": True,
+                   "mode": "advisory", "issues": [], "disabled_stage": ""}, False),
+    ("assistive", {"schema": "gt.engine_integrity.v1", "valid": True,
+                   "mode": "assistive", "issues": [], "disabled_stage": "before_action"}, False),
+])
+def test_manifest_requires_matching_engine_integrity(tmp_path, monkeypatch, mode, receipt, expected):
+    monkeypatch.setattr("scripts.miniswe_repro._installed_packages", lambda: {})
+    manifest = build_reproducibility_manifest(
+        task="fixture", requested_model="model-a", resolved_model="model-a",
+        provider_reported_model="model-a", fallback_model="", temperature=0,
+        cwd=str(tmp_path), step_limit=1, timeout=1, gt_mode=mode,
+        event_journal={"valid": True}, request_receipt={"valid": True},
+        engine_integrity=receipt,
+    )
+    assert manifest["research_valid"] is expected
 
 
 def test_agent_shell_environment_excludes_host_credentials(monkeypatch, tmp_path):
@@ -202,3 +360,926 @@ def test_agent_shell_environment_excludes_host_credentials(monkeypatch, tmp_path
     template = env.get_template_vars()
     assert "OPENAI_API_KEY" not in template
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in template
+
+
+def test_miniswe_tool_output_is_bounded_with_recoverable_tail(tmp_path) -> None:
+    from gt_engine.output_evidence import (
+        PREVIEW_HEAD_CHARS,
+        PREVIEW_TAIL_CHARS,
+        EvidenceStore,
+    )
+
+    raw = "HEAD" + ("x" * ((PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS) * 2)) + "TAIL"
+    store = EvidenceStore(tmp_path / "evidence")
+    spool = tmp_path / "spool"
+    spool.write_bytes(raw.encode())
+    reference = store.publish(spool)
+    bounded = store.preview(reference)
+    assert len(bounded) < len(raw)
+    assert bounded.startswith("HEAD")
+    assert bounded.endswith("TAIL")
+    assert "output truncated" in bounded
+    # A printed pointer is not free: resolving it costs the agent a full
+    # turn per page. The preview stays content, and complete bytes remain
+    # recoverable from the artifact for audit.
+    assert "gt-evidence read" not in bounded
+    assert store.read(reference["sha256"], len(raw) - 4, 4)["text"] == "TAIL"
+
+
+def test_miniswe_history_references_duplicates_below_old_size_threshold() -> None:
+    payload = "verified output\n" * 1000
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "old"}]},
+        {"role": "tool", "tool_call_id": "old", "content": payload},
+        {"role": "assistant", "tool_calls": [{"id": "new"}]},
+        {"role": "tool", "tool_call_id": "new", "content": payload},
+    ]
+    _compact_miniswe_history(messages)
+    assert messages[1]["content"].startswith("[identical tool output already shown")
+    assert messages[1]["extra"]["gt_history_reference"]["original_content"] == payload
+    assert messages[-1]["content"] == payload
+
+
+def test_miniswe_history_preserves_distinct_old_evidence_above_old_size_threshold() -> None:
+    payload = "unique old failure evidence\n" * 6000
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "old"}]},
+        {"role": "tool", "tool_call_id": "old", "content": payload},
+        {"role": "assistant", "tool_calls": [{"id": "new"}]},
+        {"role": "tool", "tool_call_id": "new", "content": "different current output"},
+    ]
+    _compact_miniswe_history(messages)
+    assert messages[1]["content"] == payload
+
+
+def _repeated_history(payload: str) -> list[dict]:
+    return [row for name in ("old", "new") for row in (
+        {"role": "assistant", "tool_calls": [{"id": name}]},
+        {"role": "tool", "tool_call_id": name, "content": payload,
+         "extra": {"raw_output": payload, "returncode": 0}},
+    )]
+
+
+def test_history_reference_is_idempotent_and_recovers_without_anchor() -> None:
+    payload = "unicode evidence: 漢字\n" * 1000
+    messages = _repeated_history(payload)
+    _compact_miniswe_history(messages)
+    reference = messages[1]["extra"]["gt_history_reference"]
+    assert reference["sha256"] == hashlib.sha256(payload.encode()).hexdigest()
+    assert reference["utf8_bytes"] == len(payload.encode())
+    snapshot = copy.deepcopy(messages)
+    _compact_miniswe_history(messages)
+    assert messages == snapshot
+    del messages[2:]
+    _compact_miniswe_history(messages)
+    assert messages[1]["content"] == payload
+    assert "gt_history_reference" not in messages[1]["extra"]
+
+
+def test_history_reference_rebinds_directly_to_newest_full_result() -> None:
+    payload = "evidence\n" * 1000
+    messages = _repeated_history(payload)
+    _compact_miniswe_history(messages)
+    messages.extend([
+        {"role": "assistant", "tool_calls": [{"id": "latest"}]},
+        {"role": "tool", "tool_call_id": "latest", "content": payload,
+         "extra": {"raw_output": payload, "returncode": 0}},
+    ])
+    _compact_miniswe_history(messages)
+    for index in (1, 3):
+        assert messages[index]["extra"]["gt_history_reference"]["tool_call_id"] == "latest"
+    assert messages[-1]["content"] == payload
+
+
+@pytest.mark.parametrize("field,value", [
+    ("raw_output", "different hidden middle"), ("returncode", 1),
+    ("exception_info", {"type": "Timeout"}),
+])
+def test_history_keeps_equal_visible_output_with_distinct_provenance(field, value) -> None:
+    messages = _repeated_history("same visible output\n" * 1000)
+    messages[1]["extra"][field] = value
+    snapshot = copy.deepcopy(messages)
+    _compact_miniswe_history(messages)
+    assert messages == snapshot
+
+
+def test_history_rejects_corrupted_reference() -> None:
+    messages = _repeated_history("evidence\n" * 1000)
+    _compact_miniswe_history(messages)
+    messages[1]["extra"]["gt_history_reference"]["original_content"] += "corruption"
+    with pytest.raises(ValueError, match="history_reference_digest_mismatch"):
+        _compact_miniswe_history(messages)
+
+
+def test_real_agent_query_sends_references_and_retains_audit_content(tmp_path) -> None:
+    class CapturingModel:
+        def query(self, messages):
+            self.received = copy.deepcopy(messages)
+            return {"role": "assistant", "content": "done"}
+
+    model = CapturingModel()
+    env = CredentialIsolatedLocalEnvironment(cwd=str(tmp_path), timeout=5)
+    agent = BoundedHistoryAgent(model, env, system_template="policy", instance_template="{{task}}")
+    payload = "verified tool result\n" * 1000
+    agent.messages = _repeated_history(payload)
+    agent.query()
+    assert model.received[1]["content"].startswith("[identical tool output already shown")
+    assert model.received[-1]["content"] == payload
+    assert agent.messages[1]["extra"]["gt_history_reference"]["original_content"] == payload
+    assert agent.n_calls == 1
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_history_preserves_unpaired_or_ambiguous_results(duplicate) -> None:
+    messages = _repeated_history("evidence\n" * 1000)
+    messages[0]["tool_calls"] = [{"id": "old"}, {"id": "old"}] if duplicate else []
+    snapshot = copy.deepcopy(messages)
+    _compact_miniswe_history(messages)
+    assert messages == snapshot
+
+
+def test_miniswe_history_drops_old_tool_payloads_before_quadratic_replay() -> None:
+    messages = [{"role": "system", "content": "policy"}]
+    for index in range(20):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": f"call-{index}", "function": {"arguments": "{}"}}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": f"call-{index}",
+                    "content": "x" * MAX_TOOL_OUTPUT_CHARS,
+                    "extra": {"raw_output": "x" * MAX_TOOL_OUTPUT_CHARS},
+                },
+            ]
+        )
+
+    _compact_miniswe_history(messages)
+
+    provider_chars = sum(
+        len(json.dumps({key: value for key, value in row.items() if key != "extra"}))
+        for row in messages
+    )
+    assert provider_chars < 30_000
+    assert sum(
+        str(row.get("content", "")).startswith("[identical tool output already shown") for row in messages
+    ) == 19
+    assert messages[-1]["content"] == "x" * MAX_TOOL_OUTPUT_CHARS
+    assert messages[2]["extra"]["raw_output"] == "x" * MAX_TOOL_OUTPUT_CHARS
+
+
+def test_miniswe_history_preserves_reasoning_metadata_and_tool_arguments() -> None:
+    messages = [{"role": "system", "content": "policy"}]
+    for index in range(4):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "provider_specific_fields": {
+                        "reasoning": "r" * (1_000 if index == 3 else 60_000)
+                    },
+                    "tool_calls": [
+                        {
+                            "id": f"call-{index}",
+                            "function": {
+                                "name": "bash",
+                                "arguments": json.dumps(
+                                    {"command": "x" * (1_000 if index == 3 else 60_000)}
+                                ),
+                            },
+                        }
+                    ],
+                    "extra": {"response": {"reasoning": "r" * 60_000}},
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": f"call-{index}",
+                    "content": "ok",
+                    "extra": {"raw_output": "ok"},
+                },
+            ]
+        )
+
+    newest_arguments = messages[-2]["tool_calls"][0]["function"]["arguments"]
+    _compact_miniswe_history(messages)
+
+    provider_chars = sum(
+        len(json.dumps({key: value for key, value in row.items() if key != "extra"}))
+        for row in messages
+    )
+    # Reasoning-model continuity is a provider contract. Tool output may be
+    # compacted, but assistant reasoning and action semantics remain intact
+    # even when that means this deterministic pass cannot reach its target.
+    assert provider_chars > 120_000
+    assert "provider_specific_fields" in messages[1]
+    assert messages[1]["tool_calls"][0]["function"]["arguments"] != "{}"
+    assert messages[-2]["tool_calls"][0]["function"]["arguments"] == newest_arguments
+    assert messages[1]["extra"]["response"]["reasoning"] == "r" * 60_000
+
+
+def test_miniswe_history_preserves_every_result_in_latest_multi_tool_turn() -> None:
+    messages = [
+        {"role": "system", "content": "policy"},
+        {
+            "role": "assistant",
+            "provider_specific_fields": {"reasoning": "r" * 2_000},
+            "tool_calls": [
+                {"id": "old", "function": {"name": "bash", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "old", "content": "x" * 80_000},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "new-1", "function": {"name": "bash", "arguments": "{}"}},
+                {"id": "new-2", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "new-1", "content": "first-current-result"},
+        {"role": "tool", "tool_call_id": "new-2", "content": "second-current-result"},
+    ]
+
+    _compact_miniswe_history(messages)
+
+    assert messages[2]["content"] == "x" * 80_000
+    assert messages[4]["content"] == "first-current-result"
+    assert messages[5]["content"] == "second-current-result"
+
+
+def test_environment_bounds_model_output_but_preserves_exact_raw_output(tmp_path) -> None:
+    from gt_engine.output_evidence import (
+        PREVIEW_HEAD_CHARS,
+        PREVIEW_TAIL_CHARS,
+        EvidenceStore,
+    )
+
+    # The model-visible bound is the preview window, not the old 8KB page:
+    # outputs up to it pass whole (a pointer costs an entire turn to
+    # dereference), and only beyond it the preview elides head/tail.
+    raw = "HEAD" + ("x" * ((PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS) * 2)) + "TAIL"
+    command = (
+        f'{sys.executable} -c "print(\'HEAD\' + \'x\' * '
+        f'{(PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS) * 2} + \'TAIL\', end=\'\')"'
+    )
+    env = CredentialIsolatedLocalEnvironment(cwd=str(tmp_path), timeout=5)
+
+    result = env.execute({"command": command})
+
+    assert len(result["output"]) < len(raw)
+    assert result["output"].startswith("HEAD")
+    assert result["output"].endswith("TAIL")
+    assert "output truncated" in result["output"]
+    assert "gt-evidence read" not in result["output"]
+    ref = result["extra"]["output_artifact"]
+    assert EvidenceStore(ref["root"]).bytes(ref["sha256"]) == raw.encode()
+
+
+def test_model_patch_exports_committed_tracked_and_untracked_changes(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_env = dict(os.environ)
+    git_env.update(
+        {
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "test@example.invalid",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        }
+    )
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=git_env)
+    (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, env=git_env)
+    subprocess.run(
+        ["git", "commit", "-qm", "base"], cwd=repo, check=True, env=git_env
+    )
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    (repo / "new.txt").write_text("new\n", encoding="utf-8")
+    output = repo / "model.patch"
+    (repo / ".model.patch.tmp.abcdefgh").write_text("orphaned_internal_patch", encoding="utf-8")
+    (repo / ".task-owned").write_text("legitimate_dotfile", encoding="utf-8")
+    index_before = (repo / ".git" / "index").read_bytes()
+
+    state = repo / "runtime-records"
+    state.mkdir()
+    (state / "internal.json").write_text('{"internal_state": true}', encoding="utf-8")
+    _write_model_patch(repo, baseline, output, excluded_roots=(state,))
+
+    patch_text = output.read_text(encoding="utf-8")
+    assert "tracked.txt" in patch_text
+    assert "+changed" in patch_text
+    assert "new.txt" in patch_text
+    assert "+new" in patch_text
+    assert "internal_state" not in patch_text
+    assert "runtime-records/" not in patch_text
+    assert "orphaned_internal_patch" not in patch_text
+    assert "legitimate_dotfile" in patch_text
+    assert (repo / ".git" / "index").read_bytes() == index_before
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux procfs boundary")
+def test_model_shell_cannot_read_provider_key_from_parent_procfs(tmp_path):
+    canary = "gt-provider-procfs-canary"
+    parent_code = r'''
+import os
+import subprocess
+import sys
+from gt_harness.process_boundary import harden_process_secret_boundary
+
+harden_process_secret_boundary()
+child_env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
+child_code = r"""
+import os
+try:
+    payload = open(f"/proc/{os.getppid()}/environ", "rb").read()
+except OSError:
+    print("BLOCKED")
+else:
+    print("LEAK" if b"gt-provider-procfs-canary" in payload else "READABLE")
+"""
+result = subprocess.run(
+    [sys.executable, "-c", child_code],
+    env=child_env,
+    text=True,
+    capture_output=True,
+    check=True,
+)
+print(result.stdout.strip())
+'''
+    env = dict(os.environ)
+    env["OPENAI_API_KEY"] = canary
+
+    result = subprocess.run(
+        [sys.executable, "-c", parent_code],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "BLOCKED"
+    assert canary not in result.stdout
+
+
+# Ruling 3b - the ledger contract under retry. Before the terminal hook moved
+# to the transport seam these cases produced N request rows against a single
+# terminal row, and receipt() reported every earlier attempt as "provider
+# request lacks terminal receipt". The corruption was stochastic: it needed a
+# flaky provider, so it could not appear in any synthetic rehearsal and would
+# have first appeared on a paid run, as an attestation refusal on a task that
+# may well have succeeded.
+
+
+def test_retried_call_pairs_every_attempt(tmp_path):
+    """Two failures then a success: 3 requests, 3 terminals, all paired."""
+    model = FakeModel(failures=2)
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    model.query([{"role": "user", "content": "task"}])
+    rows = _rows(observer)
+    assert [row["event"] for row in rows] == [
+        "provider_request", "provider_failure",
+        "provider_request", "provider_failure",
+        "provider_request", "provider_response",
+    ]
+    assert all(opened == closed for opened, closed in _pairs(rows))
+    assert observer.request_count == 3
+    assert observer.receipt()["valid"] is True
+    assert observer.receipt()["issues"] == []
+
+
+def test_single_retry_leaves_no_request_without_a_terminal(tmp_path):
+    """The minimal case the old seam got wrong: one retry, two requests."""
+    model = FakeModel(failures=1)
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    model.query([{"role": "user", "content": "task"}])
+    rows = _rows(observer)
+    requests = [row for row in rows if row["event"] == "provider_request"]
+    terminals = [row for row in rows if row["event"] != "provider_request"]
+    assert len(requests) == 2 and len(terminals) == 2
+    assert {row["request_id"] for row in requests} == {
+        row["request_id"] for row in terminals
+    }
+    assert not any("lacks terminal" in issue
+                   for issue in observer.receipt()["issues"])
+
+
+def test_response_digest_covers_the_raw_provider_response(tmp_path):
+    """v2: the digest is over what the provider returned, and says so."""
+    model = FakeModel()
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    model.query([{"role": "user", "content": "task"}])
+    response = _rows(observer)[-1]
+    assert response["schema"] == RECEIPT_SCHEMA == "gt.provider-receipt.v2"
+    assert response["response_digest_subject"] == RESPONSE_DIGEST_SUBJECT
+    raw = FakeResponse({"id": "resp-1", "model": "deepseek-v4-flash",
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 2}})
+    assert response["response_sha256"] == hashlib.sha256(
+        _canonical(raw.model_dump(mode="json"))
+    ).hexdigest()
+    assert response["usage"] == {"prompt_tokens": 3, "completion_tokens": 2}
+
+
+def test_terminal_capture_observes_a_call_that_bypasses_query(tmp_path):
+    """GT's select_catalog turn reaches _query without going through the
+    query reference the recorder used to hook.
+
+    Nine calls in, nine terminals out - the shape that previously came out
+    as nine requests against eight responses.
+    """
+    model = FakeModel()
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    native_query = FakeModel.query  # as GT captures it, before the recorder
+    native_query(model, [{"role": "user", "content": "bootstrap"}])
+    for step in range(8):
+        model.query([{"role": "user", "content": "step %d" % step}])
+    rows = _rows(observer)
+    assert len([r for r in rows if r["event"] == "provider_request"]) == 9
+    assert len([r for r in rows if r["event"] == "provider_response"]) == 9
+    receipt = observer.receipt()
+    assert receipt["valid"] is True
+    assert not any("lacks terminal" in issue for issue in receipt["issues"])
+
+
+def _rewrite(observer, rows: list[dict]) -> None:
+    observer.events_path.write_text(
+        "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows),
+        encoding="utf-8",
+    )
+
+
+def test_dropped_terminal_row_is_rejected(tmp_path):
+    """Mutation (3c): the pairing invariant is enforced, not decorative."""
+    model = FakeModel(failures=1)
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    model.query([{"role": "user", "content": "task"}])
+    rows = _rows(observer)
+    _rewrite(observer, [row for row in rows if row["event"] != "provider_failure"])
+    receipt = observer.receipt()
+    assert receipt["valid"] is False
+    assert any("lacks terminal" in issue for issue in receipt["issues"])
+
+
+def test_duplicated_terminal_row_is_rejected(tmp_path):
+    """Mutation (3c): exactly one terminal per request, not at least one."""
+    model = FakeModel()
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    model.query([{"role": "user", "content": "task"}])
+    rows = _rows(observer)
+    _rewrite(observer, rows + [rows[-1]])
+    receipt = observer.receipt()
+    assert receipt["valid"] is False
+    assert any("multiple provider terminals" in issue
+               for issue in receipt["issues"])
+
+
+def test_seam_replaced_after_install_is_named_not_inferred(tmp_path):
+    """Terminal capture shares model._query with GT's own runtime hooks.
+
+    Installing in the wrong order replaces this hook silently: request rows
+    keep arriving from the surviving prepare hook, terminals stop, and the
+    ledger reports N orphaned requests - a true symptom that points at the
+    provider instead of at the seam.
+    """
+    model = FakeModel()
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    model.query([{"role": "user", "content": "before"}])
+    assert observer.receipt()["valid"] is True
+
+    model._query = FakeModel._query.__get__(model, FakeModel)  # a later hook wins
+    receipt = observer.receipt()
+    assert receipt["valid"] is False
+    assert any("seam replaced after install: _query" in issue
+               for issue in receipt["issues"])
+
+
+def test_intact_seams_raise_no_issue(tmp_path):
+    """The positive case: without it the negative above proves nothing."""
+    model = FakeModel()
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    model.query([{"role": "user", "content": "task"}])
+    assert observer.receipt()["issues"] == []
+
+
+# The retry defect, as it actually happened. Recorded run 33567358689 is one
+# of the three source_runs cited by the lineage exception's product review
+# packet, so this shape reached evidence that was used for review.
+RECORDED_RETRY_LEDGER = (
+    Path(__file__).resolve().parent
+    / "fixtures/har81_attestation/recorded_runs/33567358689/provider_events.jsonl"
+)
+
+
+def test_recorded_retry_ledger_is_rejected_by_the_pairing_invariant(tmp_path):
+    """Drive the real receipt() over the real corrupt ledger.
+
+    Ten request rows share ONE request_sha256, one messages_sha256 and one
+    content-addressed blob - a single logical call retried to tenacity's
+    default stop_after_attempt(10). Nine of them have no terminal row,
+    because v1 emitted request rows inside the retry loop and the terminal
+    row outside it. Synthetic negatives prove the invariant fires; this
+    proves it fires on the shape that actually occurred.
+    """
+    rows = [json.loads(line) for line in
+            RECORDED_RETRY_LEDGER.read_text(encoding="utf-8").splitlines() if line.strip()]
+    requests = [row for row in rows if row["event"] == "provider_request"]
+    retried = requests[4:]
+    assert len(retried) == 10
+    assert len({row["request_sha256"] for row in retried}) == 1
+    assert len({row["request_blob"] for row in retried}) == 1
+
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.events_path.write_bytes(RECORDED_RETRY_LEDGER.read_bytes())
+    observer.request_count = len(requests)
+    receipt = observer.receipt()
+    assert receipt["valid"] is False
+    orphaned = [issue for issue in receipt["issues"] if "lacks terminal" in issue]
+    assert len(orphaned) == 9
+
+
+def test_recorded_retry_ledger_carries_a_permanently_failing_payload():
+    """The ten attempts could not have succeeded: the error is deterministic.
+
+    BadRequestError is absent from LitellmModel.abort_exceptions, so
+    retry_if_not_exception_type retried an 8 MB over-size rejection ten
+    times. Recorded here because it is budget and spend, not just noise.
+    """
+    rows = [json.loads(line) for line in
+            RECORDED_RETRY_LEDGER.read_text(encoding="utf-8").splitlines() if line.strip()]
+    failures = [row for row in rows if row["event"] == "provider_failure"]
+    assert len(failures) == 1
+    assert failures[0]["error_type"] == "BadRequestError"
+    assert "exceeds 8 MB" in failures[0]["error"]
+
+
+# REV-384 spend ruling. A deterministic 4xx rejection must cost one attempt,
+# not ten. Recorded run 33567358689 burned ten identical 8 MB bodies on a
+# single BadRequestError because tenacity retries anything not named in
+# abort_exceptions.
+
+
+def _litellm_error(name: str, message: str):
+    import httpx
+    from litellm import exceptions
+
+    kind = getattr(exceptions, name)
+    kwargs = {"message": message, "model": "deepseek-v4-flash",
+              "llm_provider": "openai"}
+    # Some litellm exception types require the originating response object.
+    if "response" in inspect.signature(kind.__init__).parameters:
+        kwargs["response"] = httpx.Response(
+            422, request=httpx.Request("POST", "https://provider.invalid/v1")
+        )
+    return kind(**kwargs)
+
+
+def test_deterministic_rejection_costs_one_attempt(tmp_path):
+    """One request row, one failure row, and the error reaches the caller."""
+    model = FakeModel(
+        failures=FakeModel.max_attempts,
+        error=_litellm_error("BadRequestError", "The total text input size exceeds 8 MB"),
+    )
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    with pytest.raises(Exception, match="exceeds 8 MB"):
+        model.query([{"role": "user", "content": "oversize"}])
+    rows = _rows(observer)
+    assert [row["event"] for row in rows] == ["provider_request", "provider_failure"]
+    assert model.transport_calls == 1
+    # Evidence is not lost by aborting - the failure is still recorded.
+    assert rows[1]["error_type"] == "BadRequestError"
+    assert observer.receipt()["valid"] is True
+
+
+def test_unprocessable_entity_also_costs_one_attempt(tmp_path):
+    model = FakeModel(
+        failures=FakeModel.max_attempts,
+        error=_litellm_error("UnprocessableEntityError", "unprocessable"),
+    )
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    with pytest.raises(Exception, match="unprocessable"):
+        model.query([{"role": "user", "content": "task"}])
+    assert model.transport_calls == 1
+
+
+@pytest.mark.parametrize(
+    "name", ["RateLimitError", "InternalServerError", "ServiceUnavailableError"],
+)
+def test_transient_provider_errors_still_retry(name, tmp_path):
+    """The control. Aborting everything would be a worse defect than retrying
+    everything: a 429 or a 5xx is exactly what retries exist for."""
+    model = FakeModel(failures=2, error=_litellm_error(name, "transient"))
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    model.query([{"role": "user", "content": "task"}])
+    assert model.transport_calls == 3
+    rows = _rows(observer)
+    assert [row["event"] for row in rows] == [
+        "provider_request", "provider_failure",
+        "provider_request", "provider_failure",
+        "provider_request", "provider_response",
+    ]
+    assert observer.receipt()["valid"] is True
+
+
+def test_recorded_oversize_rejection_would_now_cost_one_attempt(tmp_path):
+    """Tie the ruling to the run that motivated it.
+
+    The recorded ledger shows ten request rows for one BadRequestError. The
+    same error under the current abort set produces one.
+    """
+    recorded = [json.loads(line) for line in
+                RECORDED_RETRY_LEDGER.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    recorded_attempts = len([
+        row for row in recorded
+        if row["event"] == "provider_request"
+        and row["request_sha256"] == recorded[-2]["request_sha256"]
+    ]) if recorded[-2]["event"] == "provider_request" else 10
+    assert recorded_attempts == 10
+
+    model = FakeModel(
+        failures=FakeModel.max_attempts,
+        error=_litellm_error("BadRequestError", "The total text input size exceeds 8 MB"),
+    )
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    with pytest.raises(Exception):
+        model.query([{"role": "user", "content": "oversize"}])
+    assert model.transport_calls == 1
+
+
+# Adversarial review of the seam move's own machinery. Each of these pins a
+# property the change silently depends on; none of them was tested when the
+# change landed.
+
+
+def test_rebinding_the_same_seam_function_is_not_a_replacement(tmp_path):
+    """The guard must not fail a good run closed.
+
+    _seam_issues compares bound methods with !=, not `is not`. Rebinding the
+    same underlying function to the same instance produces a NEW bound-method
+    object that is equal but not identical, and an identity comparison would
+    report a replacement that never happened - adding an issue to a valid
+    ledger and refusing a run that was fine.
+    """
+    model = FakeModel()
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    assert observer._seam_issues() == []
+
+    installed = model._query
+    model._query = MethodType(installed.__func__, model)
+    assert model._query == installed
+    assert model._query is not installed
+    assert observer._seam_issues() == []
+
+
+def test_install_shadows_abort_exceptions_without_mutating_the_class(tmp_path):
+    """The registration is per instance; another model keeps the default.
+
+    LitellmModel declares abort_exceptions as a mutable CLASS attribute. If
+    install() appended to it in place, every model in the process would
+    inherit this run's additions.
+    """
+    class SharedAbortModel(FakeModel):
+        abort_exceptions = [KeyboardInterrupt]
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            del self.abort_exceptions  # fall back to the class attribute
+
+    before = list(SharedAbortModel.abort_exceptions)
+    installed = SharedAbortModel()
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(installed)
+
+    assert ResearchModelMismatch in installed.abort_exceptions
+    assert SharedAbortModel.abort_exceptions == before
+    assert ResearchModelMismatch not in SharedAbortModel().abort_exceptions
+
+
+def test_response_digest_is_stable_for_one_response(tmp_path):
+    """A response row's digest must not depend on when it was computed."""
+    model = FakeModel()
+    observer = RunReceiptObserver(
+        tmp_path, requested_model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+    )
+    observer.install(model)
+    response = model._query([])
+    digests = {
+        hashlib.sha256(
+            _canonical(RunReceiptObserver._response_payload(response))
+        ).hexdigest()
+        for _ in range(20)
+    }
+    assert len(digests) == 1
+
+
+def _patch_matrix_repo(tmp_path):
+    """A repository with a base commit, ready to be put into any of four states."""
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    env = dict(os.environ)
+    env.update({
+        "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    })
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True, env=env)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, text=True,
+        capture_output=True,
+    ).stdout.strip()
+    return repo, env, baseline
+
+
+def _official_patch(repo, env, baseline):
+    """What the TASK collects and what is graded: committed work only.
+
+    This mirrors the collector the fixture installs, `git diff --binary
+    <baseline> HEAD`, rather than the supervisor's worktree export.
+    """
+    return subprocess.run(
+        ["git", "diff", "--binary", baseline, "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True, env=env,
+    ).stdout
+
+
+def _recovery_patch(repo, baseline, tmp_path, name):
+    """What the SUPERVISOR exports for diagnosis: the whole workspace."""
+    output = tmp_path / name
+    _write_model_patch(repo, baseline, output)
+    return output.read_text(encoding="utf-8")
+
+
+def test_official_and_recovery_patches_separate_across_every_commit_state(tmp_path):
+    """Only the task-collected patch is graded, and the two must never be swapped.
+
+    The supervisor's export conserves the workspace so an interrupted run can
+    still be diagnosed; the task's collector records what the agent actually
+    committed. Substituting the recovery artifact for the official one would
+    grade work the agent never committed, which is why eval/miniswe_agent.py
+    writes the supervisor artifact to agent/gt-worktree.patch and never to
+    artifacts/model.patch.
+    """
+    # 1. COMMITTED ONLY -- both see it, because HEAD moved.
+    repo, env, baseline = _patch_matrix_repo(tmp_path / "committed")
+    (repo / "tracked.txt").write_text("committed change\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-aqm", "work"], cwd=repo, check=True, env=env)
+    official = _official_patch(repo, env, baseline)
+    recovery = _recovery_patch(repo, baseline, tmp_path, "committed.patch")
+    assert "committed change" in official
+    assert "committed change" in recovery
+
+    # 2. UNCOMMITTED ONLY -- the graded patch is EMPTY and the recovery one is not.
+    # This is the whole reason they are separate artifacts.
+    repo, env, baseline = _patch_matrix_repo(tmp_path / "uncommitted")
+    (repo / "tracked.txt").write_text("uncommitted change\n", encoding="utf-8")
+    official = _official_patch(repo, env, baseline)
+    recovery = _recovery_patch(repo, baseline, tmp_path, "uncommitted.patch")
+    assert official.strip() == ""
+    assert "uncommitted change" in recovery
+
+    # 3. MIXED -- the graded patch carries the committed half only.
+    repo, env, baseline = _patch_matrix_repo(tmp_path / "mixed")
+    (repo / "tracked.txt").write_text("committed half\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-aqm", "half"], cwd=repo, check=True, env=env)
+    (repo / "later.txt").write_text("uncommitted half\n", encoding="utf-8")
+    official = _official_patch(repo, env, baseline)
+    recovery = _recovery_patch(repo, baseline, tmp_path, "mixed.patch")
+    assert "committed half" in official
+    assert "uncommitted half" not in official
+    assert "committed half" in recovery
+    assert "uncommitted half" in recovery
+
+    # 4. INTERRUPTED -- an untracked file and no commit at all. The supervisor
+    # still conserves it; grading still sees nothing, which is correct because
+    # nothing was committed.
+    repo, env, baseline = _patch_matrix_repo(tmp_path / "interrupted")
+    (repo / "scratch.txt").write_text("interrupted work\n", encoding="utf-8")
+    official = _official_patch(repo, env, baseline)
+    recovery = _recovery_patch(repo, baseline, tmp_path, "interrupted.patch")
+    assert official.strip() == ""
+    assert "interrupted work" in recovery
+
+
+def test_the_supervisor_artifact_is_never_written_to_the_graded_path():
+    """The path split is the enforcement; assert it at the source."""
+    from pathlib import Path as _Path
+
+    agent = (_Path(__file__).resolve().parents[1] / "eval" / "miniswe_agent.py").read_text(
+        encoding="utf-8"
+    )
+    assert "gt-worktree.patch" in agent
+    graded = [
+        line for line in agent.splitlines()
+        if "artifacts/model.patch" in line and not line.lstrip().startswith("#")
+    ]
+    assert graded == [], graded
+
+
+def test_union_alpha_route_forwards_stealth_only(monkeypatch) -> None:
+    """The functional-verification route pins its single provider the same
+    way the benchmark route pins relace."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
+    monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "16384")
+    monkeypatch.setenv(
+        "GT_PROVIDER_ROUTING_JSON",
+        json.dumps(
+            {
+                "only": ["stealth"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            }
+        ),
+    )
+
+    model, kwargs = _model_and_kwargs("stealth/union-alpha", 1.0)
+
+    assert model == "openai/stealth/union-alpha"
+    assert kwargs["extra_body"] == {
+        "provider": {
+            "only": ["stealth"],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+        }
+    }
+
+
+def test_union_alpha_route_refuses_foreign_routing(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
+    monkeypatch.setenv(
+        "GT_PROVIDER_ROUTING_JSON",
+        json.dumps({"only": ["relace"], "allow_fallbacks": False}),
+    )
+    with pytest.raises(ValueError, match="provider_routing_env_not_allowed"):
+        _model_and_kwargs("stealth/union-alpha", 1.0)

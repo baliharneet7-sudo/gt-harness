@@ -82,6 +82,19 @@ var (
 	namedReExportRe = regexp.MustCompile(`export\s*\{[^}]*\}\s*from\s*["']([^"']+)["']`)
 	// JS/TS: export * from "./module"
 	starReExportRe = regexp.MustCompile(`export\s*\*\s*from\s*["']([^"']+)["']`)
+
+	// Data-access / dependency-injection edges (parity target: GitNexus QUERIES
+	// and INJECTS). These resolve the *target* symbol — the model class a query
+	// reads, or the service type a constructor injects — so the edge lands only
+	// when the target is a graph node (never a bare annotation string).
+	pyDependsRe    = regexp.MustCompile(`Depends\(\s*([A-Z]\w*|get_\w+)\s*\)`)
+	injectAnnoRe   = regexp.MustCompile(`@(?:Inject|Autowired|Injectable)\s*(?:\(\s*([A-Z]\w*)\s*\))?`)
+	tsCtorInjectRe = regexp.MustCompile(`constructor\s*\([^)]*(?:private|protected|public|readonly)\s+\w+\s*:\s*([A-Z]\w*)`)
+	// ORM / query-builder reads: Django `M.objects.x(...)`, SQLAlchemy
+	// `session.query(M)`, ActiveRecord/Mongoose `M.find|where|create|...`.
+	ormQueryRe  = regexp.MustCompile(`\b([A-Z]\w*)\.objects\.(?:filter|get|all|create|exclude|annotate|values)\s*\(`)
+	ormQuery2Re = regexp.MustCompile(`\.query\(\s*([A-Z]\w*)\s*\)`)
+	ormARRe     = regexp.MustCompile(`\b([A-Z]\w*)\.(?:find|where|create|save|insert|update|delete|destroy)\s*\(`)
 )
 
 // ResolveRelationships runs 5 extraction passes over already-indexed source
@@ -178,11 +191,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 						if idx := strings.Index(base, "["); idx > 0 {
 							base = base[:idx]
 						}
-						// RS9: abstain on a cross-file AMBIGUOUS base name (>1 same-named class in
-						// other files) rather than wiring inheritance to an arbitrary global
-						// first-match — a wrong parent contaminates CHA (lookupMethodWithInheritance)
-						// for every method call on the subclass.
-						baseID := resolveClassNodeSameFileOrUnique(base, sf.Path, classIndex)
+						baseID := resolveClassNode(base, sf.Path, classIndex)
 						if baseID != 0 && childID != 0 {
 							addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 						}
@@ -224,8 +233,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					childName := m[1]
 					baseName := m[2]
 					childID := resolveClassNode(childName, sf.Path, classIndex)
-					// RS9: abstain on a cross-file ambiguous base (see Python EXTENDS above).
-					baseID := resolveClassNodeSameFileOrUnique(baseName, sf.Path, classIndex)
+					baseID := resolveClassNode(baseName, sf.Path, classIndex)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -277,10 +285,29 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					}
 				}
 
-				// P4: Re-exports — RETIRED. RE_EXPORTS edges are now emitted by
-				// resolver.ResolveReExports from the parser's ReExportRef AST (all 5
-				// languages), replacing this JS/TS-only line-regex that resolved to ~0
-				// on real repos and double-emitted on the cases it did match.
+				// P4: Re-exports
+				if m := namedReExportRe.FindStringSubmatch(line); m != nil {
+					sourceModule := m[1]
+					targetFile := resolveModuleToFile(sourceModule, sf.Path, files)
+					if targetFile != "" {
+						sourceID := fileNodeMap[sf.Path]
+						targetID := fileNodeMap[targetFile]
+						if sourceID != 0 && targetID != 0 {
+							addEdge(sourceID, targetID, "RE_EXPORTS", sf.Path, lineNum, "re_export", 1.0)
+						}
+					}
+				}
+				if m := starReExportRe.FindStringSubmatch(line); m != nil {
+					sourceModule := m[1]
+					targetFile := resolveModuleToFile(sourceModule, sf.Path, files)
+					if targetFile != "" {
+						sourceID := fileNodeMap[sf.Path]
+						targetID := fileNodeMap[targetFile]
+						if sourceID != 0 && targetID != 0 {
+							addEdge(sourceID, targetID, "RE_EXPORTS", sf.Path, lineNum, "re_export", 1.0)
+						}
+					}
+				}
 
 			case "java", "kotlin":
 				// P0: Java/Kotlin extends
@@ -288,8 +315,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					childName := m[1]
 					baseName := m[2]
 					childID := resolveClassNode(childName, sf.Path, classIndex)
-					// RS9: abstain on a cross-file ambiguous base (see Python EXTENDS above).
-					baseID := resolveClassNodeSameFileOrUnique(baseName, sf.Path, classIndex)
+					baseID := resolveClassNode(baseName, sf.Path, classIndex)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -446,6 +472,37 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					}
 				}
 			}
+
+			// Data-access + dependency-injection edges. Language-agnostic: the
+			// source is the enclosing function; the target resolves through the
+			// class index so the edge only lands when the symbol is a graph node.
+			if sf.Language != "markdown" && sf.Language != "toml" && sf.Language != "yaml" {
+				srcFunc := findEnclosingFunc(sf.Path, lineNum, funcRangeIndex)
+				if srcFunc != 0 {
+					if m := pyDependsRe.FindStringSubmatch(line); m != nil {
+						if tgt := resolveClassOrFuncNode(m[1], sf.Path, classIndex, funcFileIndex); tgt != 0 {
+							addEdge(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "depends_injection", 0.85)
+						}
+					}
+					if m := injectAnnoRe.FindStringSubmatch(line); m != nil && m[1] != "" {
+						if tgt := resolveClassNode(m[1], sf.Path, classIndex); tgt != 0 {
+							addEdge(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "annotation_injection", 0.8)
+						}
+					}
+					if m := tsCtorInjectRe.FindStringSubmatch(line); m != nil {
+						if tgt := resolveClassNode(m[1], sf.Path, classIndex); tgt != 0 {
+							addEdge(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "ctor_injection", 0.85)
+						}
+					}
+					for _, re := range []*regexp.Regexp{ormQueryRe, ormQuery2Re, ormARRe} {
+						for _, m := range re.FindAllStringSubmatch(line, -1) {
+							if tgt := resolveClassNode(m[1], sf.Path, classIndex); tgt != 0 {
+								addEdge(srcFunc, tgt, "QUERIES", sf.Path, lineNum, "orm_data_access", 0.85)
+							}
+						}
+					}
+				}
+			}
 		}
 		// Flush an interface whose body was still open at EOF (no closing brace seen).
 		if inInterface && currentIface.Name != "" {
@@ -478,7 +535,11 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 type classNodeEntry struct {
 	Name     string
 	FilePath string
-	ID       int64
+	// Line is the declaration's start_line — part of the CONTENT key
+	// (file_path, start_line, id) that disambiguates same-named classes without
+	// riding the AUTOINCREMENT id space a batch amend renumbers.
+	Line int
+	ID   int64
 }
 
 // funcRange carries a function/method node's source line span so an enclosing-scope
@@ -861,18 +922,21 @@ func buildRelationshipIndexes(db *store.DB) (
 	}
 	defer tx.Rollback()
 
-	// Class/Struct nodes
-	rows, err := tx.Query(`SELECT id, name, file_path, label FROM nodes WHERE label IN ('Class', 'Struct', 'Interface', 'Enum', 'Type')`)
+	// Class/Struct nodes — start_line rides along so same-name picks can be made
+	// on the CONTENT key (file_path, start_line, id), not the AUTOINCREMENT id
+	// space a batch amend renumbers.
+	rows, err := tx.Query(`SELECT id, name, file_path, COALESCE(start_line, 0), label FROM nodes WHERE label IN ('Class', 'Struct', 'Interface', 'Enum', 'Type')`)
 	if err != nil {
 		return
 	}
 	for rows.Next() {
 		var id int64
 		var name, filePath, label string
-		if err := rows.Scan(&id, &name, &filePath, &label); err != nil {
+		var line int
+		if err := rows.Scan(&id, &name, &filePath, &line, &label); err != nil {
 			continue
 		}
-		entry := classNodeEntry{Name: name, FilePath: filePath, ID: id}
+		entry := classNodeEntry{Name: name, FilePath: filePath, Line: line, ID: id}
 		if label == "Interface" {
 			interfaceIndex[name] = append(interfaceIndex[name], entry)
 		} else {
@@ -911,20 +975,65 @@ func buildRelationshipIndexes(db *store.DB) (
 // Resolution helpers
 // ---------------------------------------------------------------------------
 
+// classEntryLess orders same-named class/interface candidates by the CONTENT key
+// (file_path, start_line, id). The index scan has no ORDER BY and the ids it
+// reads are AUTOINCREMENT artifacts — a batch amend re-inserts the edited file's
+// nodes at the TOP of the id space — so a scan-order or raw-id pick names a
+// different declaration under an amend than under a full rebuild. Content order
+// is insertion-order-invariant; the raw id is only a within-(file,line) tiebreak.
+func classEntryLess(a, b classNodeEntry) bool {
+	if a.FilePath != b.FilePath {
+		return a.FilePath < b.FilePath
+	}
+	if a.Line != b.Line {
+		return a.Line < b.Line
+	}
+	return a.ID < b.ID
+}
+
+// minClassEntry returns the content-smallest entry (see classEntryLess).
+func minClassEntry(entries []classNodeEntry) classNodeEntry {
+	best := entries[0]
+	for _, e := range entries[1:] {
+		if classEntryLess(e, best) {
+			best = e
+		}
+	}
+	return best
+}
+
+// sameFileMinEntry returns the content-smallest same-file entry — the earliest
+// declaration by (start_line, id) — so the pick is stable across both the
+// unordered index scan and the id renumbering a batch amend produces.
+func sameFileMinEntry(entries []classNodeEntry, file string) (classNodeEntry, bool) {
+	var best classNodeEntry
+	found := false
+	for _, e := range entries {
+		if e.FilePath != file {
+			continue
+		}
+		if !found || e.Line < best.Line || (e.Line == best.Line && e.ID < best.ID) {
+			best, found = e, true
+		}
+	}
+	return best, found
+}
+
 // resolveClassNode finds a Class/Struct node by name, preferring same-file.
 func resolveClassNode(name, currentFile string, classIndex map[string][]classNodeEntry) int64 {
 	entries := classIndex[name]
 	if len(entries) == 0 {
 		return 0
 	}
-	// Prefer same-file match
-	for _, e := range entries {
-		if e.FilePath == currentFile {
-			return e.ID
-		}
+	// Prefer a same-file match — the content-smallest (start_line, id) one.
+	if e, ok := sameFileMinEntry(entries, currentFile); ok {
+		return e.ID
 	}
-	// Fall back to first match
-	return entries[0].ID
+	// Cross-file fallback: the content-smallest (file_path, start_line, id)
+	// match, not entries[0] — a scan-order pick rides the unordered index scan
+	// AND the id space a batch amend renumbers, flipping the chosen class
+	// between an amend and a full rebuild.
+	return minClassEntry(entries).ID
 }
 
 // resolveClassNodeSameFileOrUnique resolves a class/struct name SAME-FILE-FIRST, and
@@ -938,10 +1047,8 @@ func resolveClassNodeSameFileOrUnique(name, currentFile string, classIndex map[s
 	if len(entries) == 0 {
 		return 0
 	}
-	for _, e := range entries {
-		if e.FilePath == currentFile {
-			return e.ID // same-file is unambiguous by construction
-		}
+	if e, ok := sameFileMinEntry(entries, currentFile); ok {
+		return e.ID // same-file is unambiguous by construction
 	}
 	if len(entries) == 1 {
 		return entries[0].ID // cross-file but globally unique — safe
@@ -949,59 +1056,63 @@ func resolveClassNodeSameFileOrUnique(name, currentFile string, classIndex map[s
 	return 0 // cross-file AND ambiguous — abstain (fail closed)
 }
 
-// resolveInterfaceNode finds an Interface node by name, SAME-FILE-FIRST and abstaining
-// on a cross-file AMBIGUOUS name (RS9: an IMPLEMENTS/impl-trait edge to an arbitrary
-// same-named interface in another file contaminates CHA the same way a wrong base does).
+// resolveInterfaceNode finds an Interface node by name.
 func resolveInterfaceNode(name, currentFile string, interfaceIndex map[string][]classNodeEntry) int64 {
 	entries := interfaceIndex[name]
 	if len(entries) == 0 {
 		return 0
 	}
-	for _, e := range entries {
-		if e.FilePath == currentFile {
-			return e.ID // same-file is unambiguous by construction
-		}
+	if e, ok := sameFileMinEntry(entries, currentFile); ok {
+		return e.ID
 	}
-	if len(entries) == 1 {
-		return entries[0].ID // cross-file but globally unique — safe
-	}
-	return 0 // cross-file AND ambiguous — abstain (fail closed)
+	// Cross-file fallback: content-smallest (file_path, start_line, id), not
+	// entries[0] — same batch-amend id renumbering hazard as resolveClassNode.
+	return minClassEntry(entries).ID
 }
 
-// resolveInterfaceOrClassNode tries interface first, then class. Both legs abstain on a
-// cross-file ambiguous name (RS9): an IMPLEMENTS/impl-trait target is inheritance provenance
-// and must never be an arbitrary global first-match.
+// resolveInterfaceOrClassNode tries interface first, then class.
 func resolveInterfaceOrClassNode(name, currentFile string, interfaceIndex, classIndex map[string][]classNodeEntry) int64 {
 	if id := resolveInterfaceNode(name, currentFile, interfaceIndex); id != 0 {
 		return id
 	}
-	return resolveClassNodeSameFileOrUnique(name, currentFile, classIndex)
+	return resolveClassNode(name, currentFile, classIndex)
 }
 
-// resolveClassOrFuncNode tries class index first, then function.
+// resolveClassOrFuncNode resolves a JSX component name across the union of
+// class and function declarations. A same-file declaration wins only when it
+// is the sole same-file target across both declaration kinds. Otherwise a
+// cross-file target must be globally unique across both kinds. Syntax alone
+// cannot justify preferring a class over a function (or vice versa), so every
+// mixed-kind ambiguity fails closed.
 func resolveClassOrFuncNode(name, currentFile string, classIndex map[string][]classNodeEntry, funcFileIndex map[string]map[string]int64) int64 {
-	if id := resolveClassNode(name, currentFile, classIndex); id != 0 {
+	sameFile := make(map[int64]struct{})
+	all := make(map[int64]struct{})
+	for _, entry := range classIndex[name] {
+		all[entry.ID] = struct{}{}
+		if entry.FilePath == currentFile {
+			sameFile[entry.ID] = struct{}{}
+		}
+	}
+	for file, funcs := range funcFileIndex {
+		id, ok := funcs[name]
+		if !ok {
+			continue
+		}
+		all[id] = struct{}{}
+		if file == currentFile {
+			sameFile[id] = struct{}{}
+		}
+	}
+	if len(sameFile) == 1 {
+		for id := range sameFile {
+			return id
+		}
+	}
+	if len(sameFile) > 1 || len(all) != 1 {
+		return 0
+	}
+	for id := range all {
 		return id
-	}
-	// DETERMINISM (B0) + correctness: prefer the CURRENT file, then search the remaining
-	// files in SORTED key order. The old `range funcFileIndex` returned the first same-
-	// named function from a RANDOMIZED map iteration, so the COMPOSES edge target flipped
-	// run-to-run when the name existed in >1 file (the P1-5 nondeterminism class; mirrors
-	// resolveByName content-order + the findEnclosingFunc same-scope preference below).
-	if funcs, ok := funcFileIndex[currentFile]; ok {
-		if id, ok := funcs[name]; ok {
-			return id
-		}
-	}
-	files := make([]string, 0, len(funcFileIndex))
-	for f := range funcFileIndex {
-		files = append(files, f)
-	}
-	sort.Strings(files)
-	for _, f := range files {
-		if id, ok := funcFileIndex[f][name]; ok {
-			return id
-		}
 	}
 	return 0
 }

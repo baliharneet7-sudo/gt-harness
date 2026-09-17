@@ -1,0 +1,620 @@
+{
+ "schema": "gt.capability_coverage.v1",
+ "purpose": "Every GT capability and its known failure modes, mapped to the offline tests that cover them. A capability or failure mode with no covering test is a benchmark-readiness blocker - meta-test enforces.",
+ "benchmarks": {
+  "deepswe": "in-container GT via pier_gt_harness_adapter; cargo/rust workspace churn; matrix parallelism shares one provider route",
+  "swelive_lite": "in-container GT via harbor; gate-one then cohort; same adapter surface as deepswe",
+  "tb2": "host-owned GT (eval.gt_central_agent); container sees only bash commands; no in-container journal/LSP - separate coverage track in gt-harness repo"
+ },
+ "capabilities": [
+  {
+   "id": "delivery_lanes",
+   "surface": "evidence_delivery/context_addition_delivery/delivery_prepared/delivery_refused/provider_delivery",
+   "failure_modes": [
+    {
+     "id": "redelivery_after_graph_recovery",
+     "observed": "smoke20 oxvg - same payload_sha256 delivered at iter 27-28 and 68-69 across graph_recovery; audit keyed delivery_material by identity only - per-occurrence delivery_material keying",
+     "covering_tests": [
+      "tests/test_smoke20_recorded.py",
+      "tests/fixtures/smoke20_recorded/"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "duplicate_identity_same_boundary",
+     "observed": "duplicate GT delivery identity must still be flagged - distinct from legitimate redelivery after recovery",
+     "covering_tests": [
+      "tests/test_runtime_receipts.py"
+     ],
+     "status": "covered"
+    },
+    {
+     "id": "boundary_join_break",
+     "observed": "delivery not joined to immediate boundary when occurrence map collides - per-occurrence delivery_material keying",
+     "covering_tests": [
+      "tests/test_smoke20_recorded.py",
+      "tests/fixtures/smoke20_recorded/"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "ceiling_frontload_starve",
+     "observed": "smoke20 bandit-taint: localization_task_ceiling refused 113 deliveries; evidence front-loaded then starved; run 34932393298 dynaconf: MAX_LOCALIZATION_DELIVERIES=3 consumed by seq 209, then 43 distinct semantic-localization units refused localization_task_ceiling and never re-admitted (refusals through iter 66, only 4 deliveries after). Root cause: delivery_identity is the payload hash, so fire-once already dedups identical content and the flat cap only ever fired on NOVEL payloads - blocking exactly the shifted-information-need re-localization the design comment permits. Fixed: soft cap of 3 now refuses only same-top churn (delivered top-ranked targets tracked); a novel top-ranked target admits as a genuine information-need shift; MAX_LOCALIZATION_HARD_DELIVERIES=6 bounds even novel-top rotation. Refusal rows now carry target for post-hoc audit. Run 34932393298 solved+verified regardless - starvation impact on solve rate remains unproven.",
+     "covering_tests": [
+      "tests/test_delivery_payload.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "byte_budget_exceeded",
+     "observed": "delivery_context_budget_exceeded",
+     "covering_tests": [
+      "tests/test_runtime_receipts.py",
+      "tests/test_delivery_payload.py"
+     ],
+     "status": "covered"
+    },
+    {
+     "id": "gtbridge_owned_features_unwired",
+     "observed": "swelive remaining run 34996816912 feature accounting: covering_red STARVED (eligible 1x on source-edit -> failing-test ordering, delivered nothing); recovery, def_partition, GT_HYPOTHESIS NO_DELIVERY (boundaries reached test_result x10 / tool_result x46 / search_result x20, zero producer_invocation rows for those feature_ids). Eligibility rows (feature.evaluated) are emitted only by GTBridge._trace_record; GTBridge is constructed solely by create_bridge (gt_engine/__init__.py), whose only caller is the nano dev CLI - never the Mini-SWE shipping path. RESOLVED (audit-side): _run_evidence now emits feature_evaluated (layout gt.feature_evaluation.v1) for the covering_red and recovery local lanes on every failing-test boundary - eligible flag + attributed/no_edited_file_link/no_prior_edit or steer_due/tracked_no_steer - and feature_accounting reads those rows before the ordering proxy. def_partition turned out to be WIRED all along: _produce_def_ref_partition dispatches unconditionally on AMBIGUOUS_HIT/FLOOD in the wheel's outcome lattice, so on witnessed search boundaries a missing invocation row IS the eligibility fact (never eligible -> declined correctly); accounting now derives that and run 35016130850 reads DECLINED_CORRECTLY where it previously read NO_DELIVERY. GT_HYPOTHESIS resolves through owner recovery. REMAINING GAP: feature_evaluated rows only exist on journals produced after this fix - earlier runs still audit under the ordering proxy.",
+     "covering_tests": [
+      "tests/test_miniswe_runtime.py",
+      "tests/test_feature_accounting.py"
+     ],
+     "status": "fixed - observability closed for covering_red/recovery/def_partition; earlier runs audit under the ordering proxy (honest STARVED/NO_DELIVERY)"
+    },
+    {
+     "id": "submit_refusal_delivery_invisible",
+     "observed": "run 35016130850 dynaconf-1241: submit_refusal + its GT_SS_SUBMIT_RED/GT_CERT_DELIVERY caps audited STARVED - '1 of 1 submit_decision rows carry active_red and no refusal was delivered' - while the refusal was in fact enforced: session.suppress journals action_suppressed rows (reason=submit_refused, executed=false) and the suppressed action result is what the model sees. The rows carry no delivery_identity so the identity pass could never attribute them. Fixed: account() counts action_suppressed reason=submit_refused as the submit_refusal delivery",
+     "covering_tests": [
+      "tests/test_feature_accounting.py"
+     ],
+     "status": "fixed"
+    }
+   ]
+  },
+  {
+   "id": "provider_pipeline",
+   "surface": "provider_delivery/provider_response/provider_admission/provider_wait",
+   "failure_modes": [
+    {
+     "id": "rate_limit_mid_run",
+     "observed": "smoke20 boa: ApiRateLimitError at 20-way parallelism; typed correctly, bind step crashed after",
+     "covering_tests": [
+      "tests/test_provider_fault_injection.py",
+      "tests/test_miniswe_provider_error_mapping.py",
+      "tests/test_provider_failure_rehearsal.py",
+      "tests/test_provider_pacing.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "orphaned_provider_request",
+     "observed": "smoke20 fd run_terminal: orphaned_provider_requests + api_calls != provider_requests; run 34932393298 dynaconf: provider_admission seq 467 superseded by context re-assembly (BadGatewayError, retried at 469) - provider_events.jsonl held the typed provider_failure terminal but events.jsonl admission had no terminal counterpart. provider_attempt_failed now journals on transport raise.",
+     "covering_tests": [
+      "tests/test_miniswe_repro.py",
+      "tests/test_miniswe_runtime.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "transport_timeout",
+     "observed": "classified provider_failure, typed outcome",
+     "covering_tests": [
+      "tests/test_provider_fault_injection.py",
+      "tests/test_run_diagnostics.py",
+      "tests/test_provider_failure_rehearsal.py"
+     ],
+     "status": "covered"
+    },
+    {
+     "id": "cohort_throttle",
+     "observed": "20-way matrix on one relace route: jitterless tenacity schedule meant synchronized retry waves; now paced per attempt inside the loop plus declared dispatch stagger",
+     "covering_tests": [
+      "tests/test_provider_pacing.py",
+      "tests/test_paid_workflow_gates.py"
+     ],
+     "status": "fixed - in-loop jitter + Retry-After cap + ordinal dispatch stagger (b2b5fc05)"
+    },
+    {
+     "id": "disconnect_billing_badrequest_malformed_rehearsal",
+     "observed": "scripted-failure rehearsal: disconnect/billing/bad-request/unclassifiable exceptions through the real wrapped query must each emit typed provider_failure + classified diagnostic with correct retryability; recovery must still bind a response; a failed query must not feed the governor",
+     "covering_tests": [
+      "tests/test_provider_failure_rehearsal.py"
+     ],
+     "status": "fixed"
+    }
+   ]
+  },
+  {
+   "id": "persistent_plan",
+   "surface": "persistent_plan_inputs/built/delivered/predicates/checks/gate",
+   "failure_modes": [
+    {
+     "id": "unbindable_checks_parens",
+     "observed": "smoke20 fd: 39/40 plan_check_binding_pending on unsupported_shell_operator:(",
+     "covering_tests": [
+      "tests/test_plan_check_composite.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "blind_baseline",
+     "observed": "smoke20 bandit-taint+claude-code: no_tests_observed; fd: baseline_failing 0/241 ambient - plan can't see f2p signal; run 34932393298 BOTH tasks: bare `pytest` baseline captured counts but zero names (parser only matches verbose per-test lines) -> test_file_digests empty -> rechecks status=unknown forever; dynaconf additionally errored-only (4 errors, 0 verdicts, exit 2) yet recorded captured. Regression detection dead cohort-wide. unknown/incomplete/new_failures_unattributed escaped the gate blind set (enumeration leaked) -> now sighted-whitelist intact|regressed.",
+     "covering_tests": [
+      "tests/test_persistent_plan_baseline.py",
+      "tests/test_persistent_plan_gate.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "vacuous_proof",
+     "observed": "smoke20 bandit-taint: all_rows_verified + completion_proven true, verifier failed - proof against proxy not contract",
+     "covering_tests": [
+      "tests/test_persistent_plan_gate.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "plan_static_frontloaded",
+     "observed": "delivered once at t~0, never re-delivered across 140-210 calls; gate decided 1-3 times total; REFUTED in 34932393298: dynaconf re-prepared verification_plan x5 (seq 429-1467), obligation_invalidation+reverify x5, plan_baseline_recheck at seq 1139+1527 (end-of-run), plan_request_rejected gate enforced on malformed agent update. context_contract still delivers once (by design - the requirement set is stable); the verification machinery is now dynamic.",
+     "covering_tests": [
+      "tests/test_obligation_reverify.py",
+      "tests/test_persistent_plan_gate.py"
+     ],
+     "status": "covered - run 34932393298 refuted the signature"
+    },
+    {
+     "id": "blocking_evidence_refuses_unconditionally",
+     "observed": "smoke20 claude-code + union-alpha 35141054074: gate wanted refuse, conceded on budget/stall, dirty submit shipped and failed attestation anyway - concession removed; budget/stall facts are journaled as evidence (budget_allows_refusal, escape_available, stalled_refusals), never spent",
+     "covering_tests": [
+      "tests/test_persistent_plan_gate.py",
+      "tests/test_audit_plan_submit.py",
+      "tests/test_persistent_plan_integration.py"
+     ],
+     "status": "covered - contract-first redesign"
+    },
+    {
+     "id": "behavioral_program_checks_unbindable",
+     "observed": "fd's 39 acceptance checks were shell programs (mktemp/cd/touch/test \"$(fd --sort)\" = ...) - not test-runner argv, so every CheckSpec gate refused them; rows sat pending until the gate conceded and the task closed submitted_unverified while the official verifier ran those exact programs",
+     "covering_tests": [
+      "tests/test_program_check_channel.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "vacuous_program_verdict",
+     "observed": "a program whose last command is not an assertion (pytest x | tail -1 -> tail owns rc; fd | sort | head -> no verdict) would manufacture CHECK_PASSED if bound; the channel binds only programs ending in an assertion head or test-runner",
+     "covering_tests": [
+      "tests/test_program_check_channel.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "stale_evidence_at_seal",
+     "observed": "run 34907273607 solved the task but verified=false: 4 bound checks last passed at an earlier revision and the lenient submit gate accepted on no_blocking_evidence with insufficient reserve to re-run them; fixed by bounded seal_plan_recheck inside completion_state (1af406b0)",
+     "covering_tests": [
+      "tests/test_plan_verification_boundary.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "stale_red_semantic_veto",
+     "observed": "run 34914512942 solved (reward=1) but verified=False: lexically-associated RED receipts observed at an earlier revision kept vetoing the GREEN receipts that current-revision bound-check passes should have emitted; a stale failure was treated with live-failure precedence",
+     "covering_tests": [
+      "tests/test_plan_verification_boundary.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "uncollectable_check_argv",
+     "observed": "run 34919574013 dynaconf-1241 solved (reward=1) but verified=False: 3 of 5 seal-rechecked bound checks failed at EVERY revision with pytest 'import file mismatch' - same-basename tests_functional/**/app_test.py modules cannot collect in one invocation and bare pytest over a duplicate-basename tree errors before running; the declared argv was physically uncollectable so no assertion ever ran and no tree could verify. Fixed by a journaled one-shot --import-mode=importlib accommodation retry inside the same capture window in drain_plan_checks and run_baseline",
+     "covering_tests": [
+      "tests/test_plan_verification_boundary.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "non_requirement_rows_gate_verified",
+     "observed": "run 34919574013 dynaconf-1241: the ledger minted rows from bare-word section markers ('Expected', 'Result') and harness preamble ('You are working in the ... repository', 'Investigate the issue described above ...') - 3 of 5 plan rows were document fragments; default_check bound the whole suite (uncollectable) or a mismatched multi-file argv to them, and verified requires every authored row proven so a fragment row could block a solved task permanently",
+     "covering_tests": [
+      "tests/test_persistent_plan_ledger.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "section_marker_obligation_undischargable",
+     "observed": "run 34925475946 dynaconf-1241 solved (reward=1), plan gate all_rows_verified, seal recheck already_current - yet verified=False on product_unmet_predicates: extract_spec_v2's normative region fed the bare-word section marker 'Expected' to extract_task_contract, which minted obligation obl-cea23dd4b87e -> behavior predicate with no expected_relation, a kind no observation can ever satisfy; it stayed unmet for all 99 iterations and was listed active_red at submit. The e370054b ledger fix covered only the plan side; the two extractors now share one section-marker definition in task_contract and the central candidate filter drops markers from every source",
+     "covering_tests": [
+      "tests/test_gt_task_contract.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "baseline_noise_chase",
+     "observed": "swelive remaining run 34996816912 dynaconf-1241: verifier-SOLVED worktree died as typed timeout. Trajectory: @merge fix landed mid-run; agent then burned ~40% of the 3060s budget editing its own test assertions (tests/test_base.py [64][72]) and chasing test_get_item KeyError 'DOTENV_INT' - a fixture-ordering artifact that fails isolated file runs [61][77] but passes in the full suite [78] (375/375 green). Instead of submitting at all-green, the agent went back to investigate the ghost ([79][80] grep test_get_item) and was SIGKILLed mid-command at elapsed 3077s. Root cause: no baseline-vs-current failure classification - a check failure unrelated to the diff reads identically to a regression the agent introduced. FIXED (provider-free): SuiteVerdictLedger joins baseline name sets with the agent's own suite-scope observations; classify_failures_vs_baseline emits unverified_scope/scope_artifact/baseline_noise/regression_new/suite_failing/untracked per failing name into execution_evidence rows (layout_schema gt.baseline_classification.v1) and the GT_EXECUTION_EVIDENCE model line. Conservative direction held: a scoped run never writes a suite FAILURE (that asymmetry is the incident) though a green one promotes inside its own coverage; zero-failure promotion requires an affirmative aggregate - a positive pass count AND the runner's own terminal summary line (pytest '<n> passed ... in <t>s', or unittest 'Ran <n> tests' followed by OK/FAILED) - because a single parsed PASSED row from a '| tail -20' of a verbose run otherwise promoted the entire baseline and opened the submit window; a missing baseline no longer disables the classifier but runs it on a suite_observed basis. Quantified postmortem: 0 plan_gate_decision rows (the agent never once requested submit); last green full-suite run at +2880s of a 3061s budget; baseline capture status no_test_verdicts (pytest collection interrupted, 4 errors, 0 names) so plan_inputs.baseline.captured was False; 10/10 test commands compound ('cd /testbed && python -m pytest ... 2>&1 | tail -N'), which the scope parser read as unknown for all ten, so the classifier ran zero times in 3061s. Covering node ids include test_truncated_verbose_tail_does_not_promote_or_open_window, test_action_45_promotes_under_coverage_but_not_ignored_files, test_scoped_failure_never_becomes_suite_truth and test_pristine_probe_makes_later_failures_read_baseline_noise. NOT YET proven online.",
+     "covering_tests": [
+      "tests/test_baseline_classification.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "submit_window_no_nudge",
+     "observed": "same trajectory tail: suite all-green at [78] but nothing pushed the agent toward submit - the plan gate can refuse submits but never surfaces 'checks green vs baseline, submit window open' as a positive advisory. FIXED (provider-free): record_execution_evidence now appends a gt.submit_window.v1 advisory on suite-scope observations with zero effective failures - 'suite green vs baseline; N plan requirement(s) still unverified' while rows are outstanding, 'submit window is open' only when bound rows verify and regression_count is zero. Advisory only; gate authority unchanged. No-plan case surfaces the suite fact without a vacuous 'verified' claim. H3 tightened the claim: 'submit window is open' now requires unmet_plan_rows() AND unverified_plan_rows() both empty - gate one submitted with all 28 rows UNVERIFIED while the run's own verified flag read True - and the advisory does not fire from verdicts a later edit made stale, nor before a whole-suite run has actually come back green. Covering node ids in tests/test_baseline_classification.py: test_green_suite_advisory_without_plan, test_green_suite_advisory_reports_unmet_plan_rows, test_green_suite_advisory_opens_window_when_plan_verified, test_advisory_refuses_window_while_plan_rows_are_unverified, test_advisory_wording_on_suite_observed_basis, test_advisory_consults_latest_run_failing_set, test_advisory_does_not_fire_from_stale_verdicts, test_no_advisory_when_regression_present, test_scoped_green_run_does_not_open_the_submit_window. NOT YET proven online.",
+     "covering_tests": [
+      "tests/test_baseline_classification.py"
+     ],
+     "status": "fixed"
+    }
+   ]
+  },
+  {
+   "id": "submit_gate",
+   "surface": "submit_advisory/submit_decision/plan_submit_gate",
+   "failure_modes": [
+    {
+     "id": "advisory_accept_with_red",
+     "observed": "smoke20 claude-code: submit_decision accepted with 14 active_red predicates - advisory mode journals but cannot block",
+     "covering_tests": [
+      "tests/test_persistent_plan_gate.py"
+     ],
+     "status": "covered-by-design; visibility gap noted"
+    },
+    {
+     "id": "gate_refuse_then_prove",
+     "observed": "smoke20 bandit-taint: refused twice, agent proved rows, accepted - machinery worked, target was wrong",
+     "covering_tests": [
+      "tests/test_persistent_plan_gate.py"
+     ],
+     "status": "covered"
+    }
+   ]
+  },
+  {
+   "id": "graph_pipeline",
+   "surface": "graph_publication/sync_amend/invalidated/recovery/recovery_failed/refresh/pin_refused",
+   "failure_modes": [
+    {
+     "id": "rust_workspace_churn_storm",
+     "observed": "smoke20 oxvg: invalidated x7 recovery_failed x3 + 180s rust-analyzer readiness stall; bandit-taint (python): recovery_failed x16 all GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT, gt_index OOM-killed exit=-9 -> consecutive-obsolete backoff (defer 60s doubling to 300s) + memory-refusal defer 120s gate _maybe_schedule_lsp_promotion; churn simulator tests",
+     "covering_tests": [
+      "tests/test_miniswe_integration.py",
+      "tests/test_miniswe_integration.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "obsolete_promotions",
+     "observed": "smoke20 oxvg/pest 13-14/17-18 obsolete; bandit-taint 15/36 obsolete - live graph_revision re-mints every 35-60s under agent edits+sibling publishes+recovery adoptions, faster than ~30-60s leg latency -> _note_lsp_churn_outcome backoff on obsolete/obsolete_after_certification; salvage merges surviving mutations (policy: never publish stale, salvage what proved)",
+     "covering_tests": [
+      "tests/test_miniswe_integration.py",
+      "tests/test_miniswe_integration.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "readiness_stall",
+     "observed": "fd: rust-analyzer ready=False 180s at project-readiness barrier; bandit-taint pyright project_ready=false on all 23 probing legs inside 20s cap - cold-index probes return failed_empty, zero LSP edges ever -> pyright-langserver/pyright added to _READY_BUDGET_S_BY_SERVER at 150s in wheel (was 20s default; every leg cold-starts fresh server); sha e3b82b1c",
+     "covering_tests": [
+      "tests/test_miniswe_integration.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "salvage_merge_integrity_error",
+     "observed": "smoke20 bandit-taint: lsp_salvage failed IntegrityError UNIQUE constraint failed: edges.id x2 - sibling publish landed identical lineage row at same id, or intra-merge remap collision",
+     "covering_tests": [
+      "tests/test_scoped_merge.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "l1_brief_witnessless_outranks_witnessed",
+     "observed": "RESOLVED-NOT-REPRODUCING on pinned wheel 1e893f63: 30+ PYTHONHASHSEED sweep on the synthetic beets fixture AND the real beets-5495 graph.db produces byte-identical result.files order with importer.py (VERIFIED, witnessed) above all witness-less candidates every run. Closed by the verified-witness ranking repair + B5-3/B5-4/DET-CAP/Fable-L9 determinism patches; entry likely recorded against a pre-rebuild wheel. Acceptance run 34985500743 confirmed at the localize() layer in-container: loc_order=[importer.py, db.py, library.py, pipeline.py] - witnessed first. The same run's empty .files was NOT a delivery defect: test_miniswe_smoke calls apply_profile_env() with no env isolation, leaking the Profile-2 brief flags (GT_BRIEF_MINIMAL/GT_LOC_RESLOT/GT_BRIEF_NATIVE) into the serial suite's os.environ; under that production posture the wheel honestly ships the minimal brief (files==[], delivered_candidate_count=None = C15 reduction-emptied NOT_EVALUABLE marker). Fixed harness-side: per-phase env posture pinning in test_wheel_l1_localizer_ranking.py, env scrub + strict non-empty asserts in test_wheel_l1_brief_determinism.py (previously passed vacuously on all-empty orders), env-isolation fixture in test_miniswe_smoke.py. Audit surfaced+fixed the adjacent silent-kill class: foreign-model embedder masquerading as the configured identity in the shared passage cache (dim collision -> localize() raise -> `_loc=None` swallow -> witness path dead, zero trace). Wheel commits 835c680f + 4e346402: model_identity truthful foreign identity, np.dot wrong-width guard, [GT_WARN] marker on the localize swallow, sorted() on the _stem_files set. Regression-locked by wheel test tests/pretask/test_brief_determinism.py (4-seed subprocess order sweep).",
+     "covering_tests": [
+      "tests/test_wheel_l1_localizer_ranking.py",
+      "tests/test_wheel_l1_brief_determinism.py"
+     ],
+     "status": "fixed"
+    }
+   ]
+  },
+  {
+   "id": "lsp_promotion",
+   "surface": "lsp_promotion_scheduled/terminal/salvage/lsp_receipts",
+   "failure_modes": [
+    {
+     "id": "missing_toolchain",
+     "observed": "typescript@7 ships no lib/tsserver.js - install succeeds, server cannot run",
+     "covering_tests": [
+      "tests/test_gt_session.py"
+     ],
+     "status": "fixed (pin 5.9.3 + file assert)"
+    },
+    {
+     "id": "server_crash_after_launch",
+     "observed": "smoke20: --tsserver-path unknown option on TLS 6.0.0 - staged files exist, server exits code 1 - flag removed + real LSP initialize probe gates staging",
+     "covering_tests": [
+      "scripts/lsp_initialize_probe.mjs"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "serviceable_zero_edges",
+     "observed": "READINESS LEG ONLY. smoke20 bandit-taint pyright (run 34801009507): server_launched+probe_answered on all 36 legs but zero resolved calls - every probing leg ran cold, project_ready never reached inside the 20s default cap; decomposition: revision churn dominant + memory exhaustion + unproven resolution gap. Fixed FOR THAT LEG: the wheel gives pyright-langserver a 150s readiness budget (resolve.py:1194), revision-churn backoff damps the churn component, and a leg whose project never became ready now classifies environment-bound (project_not_ready:readiness_budget_exhausted, required=False) instead of failing the strict gate on edges no leg could have made; zero-mutation legs still land no_edge_mutations honestly. NOT COVERED HERE: readiness is no longer the cause of zero edges. Run 34996816912 measured 926 empty answers of 2,447 selected units with project_ready=true and probe_answered_ok=true on every leg, so the original 'fixed by a 150s readiness budget' claim over-stated the scope; that remainder is tracked as pyright_empty_answers_project_ready and is open.",
+     "covering_tests": [
+      "tests/test_miniswe_integration.py",
+      "tests/test_gt_session.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "pyright_empty_answers_project_ready",
+     "observed": "swelive run 34996816912: pyright returned an EMPTY definition result for 926 of 2,447 selected units while project_ready=true and probe_answered_ok=true on every leg - neither the readiness barrier nor the transport explains it, so the 150s budget that closed the readiness leg of serviceable_zero_edges cannot close this. Corroborated offline on the retained task-1 artifacts of the same run (dynaconf__dynaconf-1241, 4 distinct receipts): 861 empty of 1,893 selected units, identical all-ready shape, and the two receipts whose candidate set covers the src/ layout (446 and 447 units) converted ZERO edges while returning 243 empties each. CAUSE UNPROVEN: the receipt aggregates failed_empty per leg and keeps no per-unit record, so a wrong document URI, a workspace root that excludes src/, an unresolvable import, and a genuine no-definition answer are indistinguishable in the artifact. The CLASSIFICATION is covered - a project_ready=true leg with zero edges stays required=True and is never laundered as environment-bound - but the defect itself is not fixed. CLOSING EVIDENCE: a per-unit request/response capture for pyright-langserver on a src/ layout repository - the exact textDocument/definition params sent and the raw result for each empty unit, plus the resolved workspace root and the server's reported project files - which separates a localization/URI defect from a real no-definition answer.",
+     "covering_tests": [
+      "tests/test_gt_session.py"
+     ],
+     "status": "open - no per-unit LSP request/response capture exists for pyright on a src/ layout, so the 926/2447 empty answers have no proven cause; readiness and transport are already excluded by the receipt"
+    },
+    {
+     "id": "unserviceable_leg_classification",
+     "observed": "env-bound legs must not block strict diagnose",
+     "covering_tests": [
+      "tests/test_gt_session.py"
+     ],
+     "status": "covered"
+    },
+    {
+     "id": "seal_freeze_on_churn",
+     "observed": "gate-one 34904339448 + fleet scan: final adopted graph sealed while a churn defer was armed or never received a leg - 616/1819 legs obsolete (34%), 34 partial-salvage events, 11 task-runs sealed on a leg-less final graph; fixed by bounded seal-time convergence on the quiescent tree (66cf2ecb) plus convergence-leg scheduling on salvage adoption (b1367f85)",
+     "covering_tests": [
+      "tests/test_workload_simulation.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "enrichment_cited_base_pruned",
+     "observed": "swelive run 35016130850 dynaconf-1241: verifier-SOLVED submission sealed as typed ERROR - receipt_issuance_failed: semantic_localization_graph_integrity_failed:derivation_base_manifest_unreadable. _referenced_revisions scanned only revisions/*/graph.manifest.json, so a revision cited ONLY by an enrichment manifest (enrichments/lsp-*/merge-* derivations use ../../revisions/<rev>/graph.manifest.json refs) was invisible to the pruner and deleted while load-bearing - 8 of 11 cited bases missing in the sealed tree, including nested lsp-on-lsp derivations. Fixed: the scan now walks every graph.manifest.json under the graph root and resolves each derivation ref against the citing manifest's own directory; only refs whose ancestor's parent is the revisions/ root protect revisions (enrichment-to-enrichment cites do not pin revisions); an UNREADABLE manifest conservatively freezes pruning entirely (revisions-root sentinel) rather than guessing which bases are load-bearing",
+     "covering_tests": [
+      "tests/test_revision_pinning.py"
+     ],
+     "status": "fixed"
+    }
+   ]
+  },
+  {
+   "id": "churn_governor",
+   "surface": "churn_steer/churn_abort",
+   "failure_modes": [
+    {
+     "id": "probe_exploration_false_positive",
+     "observed": "smoke20 fd: /tmp probe writes + cargo run/build counted as stall (no repo mutation, no *test) - killed a working 3/4 run",
+     "covering_tests": [
+      "tests/test_churn_governor.py",
+      "tests/test_agent_loop_soak.py",
+      "tests/fixtures/smoke20_recorded/fd_churn_abort_commands.json"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "quiet_non_convergence",
+     "observed": "smoke20 pest(282)/bandit-taint(210)/claude-code(144)/testem-pl(218) calls unsolved - failing-verification streaks earned no signal; now verify_steer on consecutive failed checks (steer-only, never abort); deeper contract-blindness (verifying substitute harness) remains a plan-boundary item",
+     "covering_tests": [
+      "tests/test_churn_governor.py",
+      "tests/test_agent_loop_soak.py"
+     ],
+     "status": "fixed - steer-level; contract-blindness tracked under persistent_plan blind_baseline"
+    },
+    {
+     "id": "archaeology_churn",
+     "observed": "run 34656860834: 54% GT-internal reads, 2 edits/840 cmds - real churn",
+     "covering_tests": [
+      "tests/test_churn_governor.py",
+      "tests/test_agent_loop_soak.py"
+     ],
+     "status": "covered"
+    },
+    {
+     "id": "binder_runner_drift_false_stall",
+     "observed": "governor kept its own narrow runner regex - commands the plan binder binds (./mvnw test, vendor/bin/phpunit, node_modules/.bin/jest, bazel test, sbt testOnly, turbo run test, gradle test) counted as stall turns. _VERIFICATION now aliases canonical TEST_RUNNER_RE; invariant test locks parity.",
+     "covering_tests": [
+      "tests/test_churn_governor.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "build_commands_no_engineering_credit",
+     "observed": "non-test build/package/compile commands (./mvnw package, dotnet build, sbt compile, bazel build, turbo run build, composer/bundle install, deno task) earned no productivity credit - same fd-class blind spot on the build side",
+     "covering_tests": [
+      "tests/test_churn_governor.py"
+     ],
+     "status": "fixed"
+    }
+   ]
+  },
+  {
+   "id": "receipts_attestation",
+   "surface": "runtime_receipts/gt_audit/capability rows/diagnostics/standardize",
+   "failure_modes": [
+    {
+     "id": "missing_diagnostics",
+     "observed": "smoke20: 8/20 tasks missing diagnostics artifacts incl. solved - collection defect - emit_task_diagnostics synthesizes honest UNEXERCISED trio when absent",
+     "covering_tests": [
+      "tests/test_run_diagnostics.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "run_scoped_identity_assumption",
+     "observed": "smoke20 oxvg duplicate delivery identity - per-occurrence delivery_material keying",
+     "covering_tests": [
+      "tests/test_smoke20_recorded.py",
+      "tests/fixtures/smoke20_recorded/"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "env_bound_false_required",
+     "observed": "gate-one 34790375793: unserviceable leg required=True blocked attestation",
+     "covering_tests": [
+      "tests/test_gt_session.py"
+     ],
+     "status": "covered"
+    },
+    {
+     "id": "positional_refusal_readmission_flagged",
+     "observed": "run 34925475946 gitingest-94 submitted_verified in-journal (seal recheck converged) but receipt issuance raised refused_then_delivered -> status ERROR -> product_not_completed + treatment_delivery_refusal_invalid on a solved task: a cochange unit refused at candidate_ordinal 5 for boundary_claim_ceiling was legitimately re-admitted at delivery_ordinal 4 when a sibling candidate dropped between boundary scans; the receipt's identity arm ignored ordinals and treated refusal as binding within the window. The identity arm is now ordinal-aware only for window-positional reasons (boundary_claim_ceiling, request_delivery_byte_ceiling); payload-intrinsic and task-scoped refusals still flag at any ordinal, and _validate_delivery_boundaries proves the committed window's invariants independently",
+     "covering_tests": [
+      "tests/test_runtime_receipts.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "shared_tmp_spool_external_delete",
+     "observed": "swelive run 35016130850 gitingest-94: gt_degraded_fail_open at action 22 - FileNotFoundError /tmp/gt-history-v10qbbkl. store_history_evidence spooled provider request-history payloads via NamedTemporaryFile in shared system /tmp; an external sweeper (task image or the gitingest workload itself, which demonstrates temp cleanup) deleted the spool in the microsecond window between create and EvidenceStore.publish's open; the unguarded raise disabled the engine mid-run -> supervisor internal_error -> typed ERROR, verifier never ran. Fixed: the spool now lives inside the task-owned evidence namespace (NamedTemporaryFile(dir=store.root)), matching publish()'s own frozen-copy convention - an external /tmp policy can no longer reach it",
+     "covering_tests": [
+      "tests/test_gt_session.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "verifier_solved_with_receipt_error_split",
+     "observed": "run 35016130850 dynaconf-1241 joined an official GRADED solved=True reward=1 verdict to a same-task product ERROR (receipt_issuance crash) - the attester must keep both facts: FAIL the product attestation AND preserve the official solve. Verified the split already holds and regression-locked it",
+     "covering_tests": [
+      "tests/test_attest_deepswe.py"
+     ],
+     "status": "fixed"
+    }
+   ]
+  },
+  {
+   "id": "verifier_reward_binding",
+   "surface": "result.json/reward/typed outcomes/model.patch",
+   "failure_modes": [
+    {
+     "id": "missing_patch_bind_crash",
+     "observed": "smoke20 boa+fd: docker cp model.patch RuntimeError killed job instead of typed ERROR receipt; run 35016130850 then showed the quiet half - the collector's artifacts/manifest.json carried {source:/logs/artifacts/model.patch, status:failed} beside a null verifier_result and _failure_class never read the manifest, so the failed copy reported as missing_verifier/official_verifier_missing",
+     "covering_tests": [
+      "tests/test_standardize_benchmark_result.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "typed_error_vs_graded",
+     "observed": "provider_failure/governor_abort must keep reward:null, never fabricate",
+     "covering_tests": [
+      "tests/test_standardize_benchmark_result.py"
+     ],
+     "status": "covered"
+    }
+   ]
+  },
+  {
+   "id": "tb2_host_side",
+   "surface": "eval.gt_central_agent exec transport + host-only probes (gt-harness repo)",
+   "failure_modes": [
+    {
+     "id": "exec_transport_failure",
+     "observed": "container exec fails/timeouts host-side",
+     "covering_tests": [],
+     "status": "open - separate repo track"
+    },
+    {
+     "id": "no_incontainer_journal",
+     "observed": "receipt surface differs - host-side state only",
+     "covering_tests": [],
+     "status": "open - separate repo track"
+    }
+   ]
+  },
+  {
+   "id": "runtime_observation",
+   "surface": "TEST_RUNNER_RE / TEST_PASS_RE / TEST_FAIL_RE / STATIC_CHECK_RE / COMPILER_CHECK_RE / COMPILE_FAIL_RE / ENV_FAIL_RE / classify_test_observation / classify_validation_observation / obligations behavioral proof / repo_adapters test_commands",
+   "failure_modes": [
+    {
+     "id": "runner_pattern_language_drift",
+     "observed": "three divergent runner regexes (patterns.py canonical, obligations.py narrow copy, governor local copy) - mvn/gradle/dotnet/sbt/mix/bazel/nx/turbo/phpunit/rspec commands bound nowhere or proved nowhere; obligations+trajectory_state consolidated onto canonical imports, governor aliases canonical",
+     "covering_tests": [
+      "tests/test_churn_governor.py",
+      "tests/test_wheel_language_matrix.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "adapter_emits_unbindable_command",
+     "observed": "JavaRepoAdapter emits ./mvnw test / ./gradlew test verbatim but TEST_RUNNER_RE anchored at ^ and lacked path prefixes - adapter output could never bind. Cross-surface invariant test: every adapter-emitted command must match TEST_RUNNER_RE",
+     "covering_tests": [
+      "tests/test_wheel_language_matrix.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "pass_fail_marker_language_drift",
+     "observed": "TEST_PASS_RE/TEST_FAIL_RE lacked .NET Passed:/Failed:, RSpec N examples 0 failures, Bun N pass/N fail, sbt [success], pytest N errors - green output on non-Python ecosystems could never prove",
+     "covering_tests": [
+      "tests/test_wheel_language_matrix.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "validation_observation_uncovered_surface",
+     "observed": "classify_validation_observation had ZERO tests; STATIC_CHECK_RE missed vendor/bin/ and node_modules/.bin/ path forms plus rubocop/phpstan/checkstyle/detekt/credo/clang-tidy/dotnet-format-verify families; COMPILER_CHECK_RE missed ./mvnw//gradlew/dotnet/sbt/mix/bazel/swift/kotlinc and g++ boundary bug (g\\+\\+\b never matched 'g++ <args>')",
+     "covering_tests": [
+      "tests/test_wheel_language_matrix.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "wrapper_prefix_drift",
+     "observed": "TEST_RUNNER_RE prefix list and _SEGMENT_HEAD were separate copies - sudo/nice/command/bundle exec/poetry run/uv run diverged; now shared _WRAPPER_ALTERNATIVES constant",
+     "covering_tests": [
+      "tests/test_wheel_language_matrix.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "compile_fail_language_drift",
+     "observed": "COMPILE_FAIL_RE knew only rust/TS/python shapes - file:line:col error diagnostics (gcc/clang/javac/swift), coded errors (CS/C/LNK/MSB), BUILD FAILED invisible; fatal error: stays in ENV_FAIL_RE by design (missing headers = env truth)",
+     "covering_tests": [
+      "tests/test_wheel_language_matrix.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "prose_counterfeit_verification",
+     "observed": "echo pytest / cat pytest.log must never reset a stall counter or prove behavior - canonical pattern anchors runners at command boundaries only",
+     "covering_tests": [
+      "tests/test_churn_governor.py",
+      "tests/test_wheel_language_matrix.py"
+     ],
+     "status": "covered"
+    },
+    {
+     "id": "count_only_baseline_conservation_unknown",
+     "observed": "smoke20 fd: cargo `test NAME ... ok` name lines went unparsed (only pytest/unittest forms known) -> passing_names:[] -> compare_results could never prove conservation -> unknown forever. _detect_runner lacked dotnet/sbt/mix/phpunit/bazel entirely; name/count parsers extended per language; identity_paths_for resolves rust ::-modules, bare rust names, and dotnet FQ names",
+     "covering_tests": [
+      "tests/test_wheel_language_matrix.py",
+      "tests/test_persistent_plan_baseline.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "compound_test_unknown_outcome",
+     "observed": "swelive run 35016130850 dynaconf-1241: 23 observed pass/fail outcomes produced ZERO test_result semantic events. _classify_test went through classify_execution_outcome, whose _execution_outcome_guard returns 'unknown' for EVERY compound/piped command - and `cd /testbed && python -m pytest ... 2>&1 | tail -20` is the shape benchmark agents actually write. Consequence cascade: no test_result events -> _produce_covering never dispatched, failure fingerprints never tracked, the covering/fingerprint local lanes' returncode gate rejected tail's exit-0. Fixed: _classify_test now runs the unguarded textual _classify_test_output parse (the same parse observed_test_outcome stores) and the single computed outcome feeds semantic-event derivation, attribute_test_failure (observed= kwarg), fingerprint tracking and feature_evaluated rows. The evidence row's `outcome` field keeps the guarded value - 'cannot attribute the exit code' and 'a test observation occurred' are different facts and stay separate",
+     "covering_tests": [
+      "tests/test_miniswe_runtime.py"
+     ],
+     "status": "fixed"
+    },
+    {
+     "id": "suite_equivalent_scoped_undercredit",
+     "observed": "swelive run 35016130850 dynaconf-1241: the agent ran `pytest tests/` - the entire suite for that layout - but test_command_coverage reads positional paths as `scoped`, so no suite verdicts were ever recorded and the submit-window advisory stayed silent for the whole run. Fixed: SuiteVerdictLedger.covers_known_suite promotes a scoped run to unrestricted when it has directory prefixes, no exclusions, a nonempty known test universe, and every known test lies under the covered prefixes; file and ::nodeid selections never qualify. record_suite_run and the Mini-SWE adapter's suite_scope both consult it",
+     "covering_tests": [
+      "tests/test_baseline_classification.py"
+     ],
+     "status": "fixed"
+    }
+   ]
+  }
+ ]
+}

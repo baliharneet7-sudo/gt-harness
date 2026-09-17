@@ -70,6 +70,21 @@ def test_harbor_uses_nested_official_verifier_reward(tmp_path: Path) -> None:
     assert receipt["tasks"][0]["official_verifier"] is True
 
 
+def test_harbor_receipt_preserves_run_identity_metadata(tmp_path: Path) -> None:
+    receipt = emit_harbor(
+        tmp_path,
+        "task-a",
+        model="stealth/union-alpha",
+        effective_model="openai/stealth/union-alpha",
+        treatment_sha="treatment",
+        gt_source_sha="source",
+    )
+    assert receipt["model"] == "stealth/union-alpha"
+    assert receipt["effective_model"] == "openai/stealth/union-alpha"
+    assert receipt["treatment_sha"] == "treatment"
+    assert receipt["gt_source_sha"] == "source"
+
+
 def test_harbor_uses_completed_official_verifier_artifacts_when_summary_is_null(
     tmp_path: Path,
 ) -> None:
@@ -148,9 +163,10 @@ def test_tb2_workflow_publishes_harbor_verifier_receipts_to_live_monitor() -> No
     assert "expected_tasks_json: ${{ needs.plan.outputs.tasks }}" in workflow
     assert "Passed (official reward 1)" in monitor
     assert "Successful task jobs" not in monitor
-    assert workflow.index("Pull task image before agent execution on cache miss") < workflow.index(
-        "Run harbor - task"
+    run_marker = "Run one official Harbor TB2 trial"
+    assert workflow.index("Pull the existing GHCR mirror only on cache miss") < workflow.index(
+        run_marker
     )
-    assert workflow.index("Require the task image before Harbor starts") < workflow.index(
-        "Run harbor - task"
+    assert workflow.index("Require the exact task image before paid execution") < workflow.index(
+        run_marker
     )

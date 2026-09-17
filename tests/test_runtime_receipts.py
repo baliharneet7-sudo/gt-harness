@@ -1,0 +1,1473 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+
+from gt_harness.runtime_receipts import (
+    issue_runtime_receipt_failure,
+    issue_runtime_receipts,
+    verify_runtime_receipt,
+)
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+
+@pytest.mark.parametrize("synthetic_transport", [False, True])
+def test_successful_miniswe_run_issues_bound_product_and_adapter_receipts(
+    tmp_path: Path, synthetic_transport: bool,
+) -> None:
+    state = tmp_path / "gt-state"
+    task_state = state / "task-hash"
+    trajectory = tmp_path / "miniswe_trajectory.json"
+    report = tmp_path / "miniswe_report.json"
+    product = tmp_path / "gt-run.json"
+    adapter = tmp_path / "benchmark-adapter.json"
+    _write_json(
+        trajectory,
+        {
+            "messages": [{"role": "assistant", "content": "done"}],
+            "info": {
+                "model_stats": {"api_calls": 3},
+                "exit_status": "Submitted",
+            },
+        },
+    )
+    _write_json(
+        report,
+        {
+            "synthetic_transport": synthetic_transport,
+            "model": "meta/muse-spark-1.2-contributor",
+            "terminal": "submitted_unverified",
+            "exit_code": 0,
+            "gt_mode": "advisory",
+            "research_valid": True,
+            "gt": {
+                "contract_shipped": True,
+                "terminal_requests": 3,
+                "delivered_evidence": 1,
+                "requested_model": "meta/muse-spark-1.2-contributor",
+                "provider_reported_model": "meta/muse-spark-1.2-contributor",
+                "resolved_model": "openai/meta/muse-spark-1.2-contributor",
+                "event_journal": {"event_count": 3, "event_head": "a" * 64},
+                "usage": {
+                    "prompt_tokens": 40,
+                    "completion_tokens": 5,
+                    "prompt_cache_hit_tokens": 11,
+                },
+                "verified": False,
+                "unmet_predicates": ["pred-1"],
+                "unverified_predicates": ["pred-1"],
+            },
+        },
+    )
+    events = [
+        {
+            "event": "context_addition_delivery",
+            "event_hash": "1" * 64,
+            "sequence": 1,
+            "lane": "prompt",
+            "kind": "context_contract",
+            "evidence_type": "context_contract",
+            "dedup_key": "prompt-contract-1",
+            "target": "provider_prompt",
+            "payload_sha256": "a" * 64,
+            "action_index": 0,
+            "iteration": 0,
+            "delivery_ordinal": 1,
+            "rendered_bytes": 100,
+        },
+        {
+            "event": "receipt",
+            "event_hash": "2" * 64,
+            "sequence": 2,
+            "transition": "delivered",
+            "dedup_key": "prompt-contract-1",
+            "evidence_type": "context_contract",
+            "iteration": 0,
+            "payload_hash": "a" * 64,
+        },
+        {
+            "event": "provider_delivery",
+            "event_hash": "3" * 64,
+            "sequence": 3,
+            "iteration": 1,
+            "request_id": "request-1",
+            "delivery_ids": ["a" * 64],
+        },
+        {
+            "event": "provider_admission", "event_hash": "c" * 64, "sequence": 4,
+            "status": "admitted", "reason": "within_provider_window",
+            "request_tokens": 100, "request_bytes": 400,
+            "context_window_tokens": 131072, "reserved_output_tokens": 16384,
+            "input_budget_tokens": 114688, "metadata_source": "openrouter:/models",
+        },
+        {
+            "event": "provider_response",
+            "event_hash": "4" * 64,
+            "sequence": 4,
+            "usage": {
+                "prompt_tokens": 17,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 4},
+                "cost": 0.01,
+            },
+        },
+        {
+            "event": "evidence_delivery",
+            "event_hash": "5" * 64,
+            "sequence": 5,
+            "lane": "sealed",
+            "kind": "localization",
+            "evidence_type": "localization",
+            "dedup_key": "localization-1",
+            "artifact_sha256": "c" * 64,
+            "payload_sha256": "9" * 64,
+            "action_index": 0,
+            "iteration": 1,
+            "delivery_ordinal": 1,
+            "rendered_bytes": 123,
+        },
+        {
+            "event": "receipt",
+            "event_hash": "6" * 64,
+            "sequence": 6,
+            "transition": "delivered",
+            "dedup_key": "localization-1",
+            "evidence_type": "localization",
+            "iteration": 1,
+            "payload_hash": "9" * 64,
+        },
+        {
+            "event": "provider_delivery",
+            "event_hash": "7" * 64,
+            "sequence": 7,
+            "iteration": 2,
+            "request_id": "request-2",
+            "delivery_ids": ["9" * 64],
+        },
+        {
+            "event": "provider_admission", "event_hash": "e" * 64, "sequence": 8,
+            "status": "admitted", "reason": "within_provider_window",
+            "request_tokens": 200, "request_bytes": 800,
+            "context_window_tokens": 131072, "reserved_output_tokens": 16384,
+            "input_budget_tokens": 114688, "metadata_source": "openrouter:/models",
+        },
+        {
+            "event": "provider_response",
+            "event_hash": "8" * 64,
+            "sequence": 8,
+            "usage": {
+                "prompt_tokens": 23,
+                "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 7},
+                "cost": 0.02,
+            },
+        },
+        {
+            "event": "delivery_refused",
+            "event_hash": "0" * 64,
+            "sequence": 9,
+            "lane": "prompt",
+            "kind": "context_delta",
+            "dedup_key": "prompt-delta-refused",
+            "reason": "delivery_byte_ceiling",
+            "candidate_ordinal": 3,
+            "rendered_bytes": 1_401,
+            "payload_sha256": "f" * 64,
+            "admitted_count": 2,
+            "admitted_bytes": 223,
+        },
+        {
+            # The iteration-7 twin shape from run 34790375793: a same-key
+            # sibling is refused by fire-once AFTER the survivor was admitted
+            # (delivery_ordinal 1 < candidate_ordinal 2) but BEFORE its
+            # commit-side evidence_delivery row lands. Journal order is the
+            # wrong axis for this check; admission order is the right one.
+            "event": "delivery_refused",
+            "event_hash": "e" * 63 + "0",
+            "sequence": 10,
+            "lane": "sealed",
+            "kind": "localization",
+            "dedup_key": "localization-1",
+            "reason": "localization_fire_once",
+            "candidate_ordinal": 2,
+            "iteration": 1,
+            "rendered_bytes": 117,
+            "payload_sha256": "7" * 64,
+            "admitted_count": 1,
+            "admitted_bytes": 123,
+        },
+        {
+            "event": "dense_index_ready",
+            "event_hash": "b" * 64,
+            "sequence": 11,
+            "query_ready": True,
+            "model_sha256": "5" * 64,
+            "tokenizer_sha256": "4" * 64,
+            "dimension": 768,
+            "document_count": 4,
+            "query_result_count": 4,
+            "index_sha256": "3" * 64,
+        },
+        {
+            "event": "provider_admission", "event_hash": "f" * 64, "sequence": 12,
+            "status": "admitted", "reason": "within_provider_window",
+            "request_tokens": 300, "request_bytes": 1200,
+            "context_window_tokens": 131072, "reserved_output_tokens": 16384,
+            "input_budget_tokens": 114688, "metadata_source": "openrouter:/models",
+        },
+        {
+            "event": "session_closed",
+            "event_hash": "d" * 64,
+            "sequence": 13,
+            "terminal": "submitted_unverified",
+        },
+    ]
+    task_state.mkdir(parents=True)
+    (task_state / "events.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in events), encoding="utf-8"
+    )
+    _write_json(
+        task_state / "reproducibility_manifest.json",
+        {
+            "schema": "gt.repro.v1",
+            "research_valid": True,
+            "gt_mode": "advisory",
+            "engine_integrity": {"schema": "gt.engine_integrity.v1", "valid": True,
+                                 "mode": "advisory", "issues": [], "disabled_stage": ""},
+            "provider_receipts": {"request_count": 3, "valid": True},
+            "model": {"match": True},
+            "event_journal": {
+                "event_count": 15,
+                "event_head": "d" * 64,
+                "valid": True,
+                "issues": [],
+            },
+        },
+    )
+    graph_state = state / "repo-hash"
+    graph_state.mkdir(parents=True)
+    graph_db = graph_state / "graph.db"
+    with sqlite3.connect(graph_db) as db:
+        db.execute("CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT)")
+        db.execute("CREATE TABLE cochanges (id INTEGER)")
+        db.executemany("INSERT INTO cochanges VALUES (?)", [(1,), (2,)])
+    from gt_engine.indexer import _graph_phase_metadata, _sealed_json
+    from gt_harness.product import groundtruth_release
+
+    binding = {"repository_root_sha256": "b" * 64, "source_manifest_sha256": "c" * 64,
+               "task_id": "task-a", "product_source_sha": "f" * 40,
+               "identity_scope": "benchmark_bound"}
+    producer = groundtruth_release()["producer_sha256"]
+    resource_path = graph_state / "index-resource.json"
+    _sealed_json(resource_path, {"schema": "gt.index_resource.v1", **binding,
+                 "status": "completed", "exit_code": 0, "error_code": "", "memory_evidence": False,
+                 "producer_binary_sha256": producer}, "evidence_sha256")
+    graph_digest = hashlib.sha256(graph_db.read_bytes()).hexdigest()
+    _write_json(
+        graph_state / "graph.manifest.json",
+        {
+            "schema": "gt.graph_certification.v1",
+            **binding, **_graph_phase_metadata(graph_db),
+            "binary_certified": True,
+            "binary_sha256": producer,
+            "graph_sha256": graph_digest,
+            "graph_bytes": graph_db.stat().st_size,
+            "index_resource_sha256": hashlib.sha256(resource_path.read_bytes()).hexdigest(),
+            "sqlite_quick_check": "ok",
+            "cochange_rows": 2,
+        },
+    )
+    # Language servers are mandatory capability and the receipt layer enforces
+    # it, so a run without this seal is one that measured GT with the
+    # highest-precision edge tier off.
+    _sealed_json(
+        graph_state / "lsp-promotion.json",
+        {"schema": "gt.lsp_promotion.v1", **binding,
+         "graph_sha256": graph_digest, "status": "promotion_not_scheduled",
+         "servers_detected": ["gopls", "pyright-langserver"], "server_count": 2},
+        "promotion_sha256",
+    )
+
+    issued = issue_runtime_receipts(
+        report_path=report,
+        trajectory_path=trajectory,
+        state_dir=state,
+        product_receipt_path=product,
+        adapter_receipt_path=adapter,
+        task_id="task-a",
+        product_source_sha="f" * 40,
+        treatment="groundtruth",
+        requested_model="meta/muse-spark-1.2-contributor",
+        scaffold_version="2.4.6",
+        time_budget_seconds=3600,
+    )
+
+    product_row = json.loads(product.read_text(encoding="utf-8"))
+    adapter_row = json.loads(adapter.read_text(encoding="utf-8"))
+    copied = product.with_name("gt-run.trajectory.json")
+    assert issued == product_row
+    assert product_row["schema"] == "gt.run_receipt.v1"
+    assert product_row["status"] == "COMPLETED"
+    assert product_row["provider_calls"] == 3
+    assert product_row["provider_completed_calls"] == 2
+    assert product_row["provider_failed_calls"] == 1
+    assert product_row["input_tokens"] == 40
+    assert product_row["cached_tokens"] == 11
+    assert product_row["output_tokens"] == 5
+    assert product_row["total_cost"] == 0.03
+    assert product_row["treatment_receipt"]["schema"] == "gt.miniswe_treatment_receipt.v1"
+    treatment = product_row["treatment_receipt"]
+    assert treatment["delivery_count"] == 2
+    assert treatment["prompt_delivery_count"] == 1
+    assert treatment["sealed_delivery_count"] == 1
+    assert treatment["prompt_context_deliveries"][0]["kind"] == "context_contract"
+    assert treatment["evidence_deliveries"][0]["event_hash"] == "5" * 64
+    assert treatment["refused_deliveries"][0]["reason"] == "delivery_byte_ceiling"
+    assert treatment["refused_deliveries"][0]["event_sequence"] == 9
+    assert treatment["refused_deliveries"][1]["reason"] == "localization_fire_once"
+    assert treatment["refused_deliveries"][1]["dedup_key"] == "localization-1"
+    assert treatment["refused_deliveries"][1]["candidate_ordinal"] == 2
+    assert [row["request_tokens"] for row in treatment["provider_admissions"]] == [100, 200, 300]
+    assert treatment["provider_delivery_receipts"][0]["event_sequence"] == 1
+    assert treatment["provider_delivery_receipts"][0]["delivery_ordinal"] == 1
+    assert treatment["provider_delivery_receipts"][1]["event_sequence"] == 5
+    assert treatment["provider_delivery_receipts"][1]["delivery_ordinal"] == 1
+    assert treatment["delivery_budget"] == {
+        "schema": "gt.delivery_budget.v2",
+        "scope": "provider_decision",
+        "boundary_claim_limit": 4,
+        "unit": "utf8_bytes",
+        "conversion_from_legacy_tokens": "4_bytes_per_token",
+        "sealed_limit": 1_400,
+        "prompt_contract_limit": 2_000,
+        "prompt_delta_limit": 1_400,
+        "total_limit": 9_600,
+        "total_observed": 223,
+        "task_delivery_limit": None,
+        "admitted_count": 2,
+        "refused_count": 2,
+    }
+    assert product_row["treatment_receipt"]["graph_certification"]["graph_sha256"] == graph_digest
+    assert product_row["treatment_receipt"]["graph_utilisation"]["cochange_rows"] == 2
+    assert (
+        product_row["integrity"]["trajectory_sha256"]
+        == hashlib.sha256(trajectory.read_bytes()).hexdigest()
+    )
+    assert copied.read_bytes() == trajectory.read_bytes()
+    assert adapter_row == {
+        "synthetic_transport": synthetic_transport,
+        "schema": "gt.benchmark_adapter_receipt.v1",
+        "task_id": "task-a",
+        "product_command": "gt-miniswe-run",
+        "attempt": 1,
+        "treatment": "groundtruth",
+        "requested_model": "meta/muse-spark-1.2-contributor",
+        "effective_model": "openai/meta/muse-spark-1.2-contributor",
+        "agent_scaffold_version": "2.4.6",
+        "product_source_sha": "f" * 40,
+        "time_budget_seconds": 3600,
+    }
+    assert product_row["synthetic_transport"] is synthetic_transport
+    assert verify_runtime_receipt(product) == (
+        ["synthetic_transport_not_paid_evidence"] if synthetic_transport else []
+    )
+    # Language servers are mandatory capability, so a run that reports none
+    # must not be accepted. Driven through the real validator on the real
+    # receipt: a gate nothing exercises is the defect it exists to prevent.
+    intact = product.read_text(encoding="utf-8")
+    degraded = json.loads(intact)
+    degraded["treatment_receipt"]["lsp_promotion"] = {
+        "schema": "gt.lsp_promotion.v1", "status": "promotion_no_servers",
+        "servers_detected": [], "server_count": 0,
+    }
+    product.write_text(json.dumps(degraded), encoding="utf-8")
+    assert "treatment_lsp_servers_absent" in verify_runtime_receipt(product)
+    product.write_text(intact, encoding="utf-8")
+    assert "treatment_lsp_servers_absent" not in verify_runtime_receipt(product)
+    original_resource = resource_path.read_bytes()
+    resource_path.unlink()
+    assert "treatment_graph_artifact_invalid:index_resource_mismatch" in verify_runtime_receipt(product)
+    resource_path.write_bytes(original_resource)
+    original_adapter = adapter.read_bytes()
+    adapter.unlink()
+    assert "product_adapter_receipt_missing_or_invalid" in verify_runtime_receipt(product)
+    adapter.write_bytes(original_adapter)
+    # request_count is the manifest's census of admitted ATTEMPTS; a transport
+    # retry raises it above logical provider_calls without any receipt being
+    # absent. Comparing it to provider_calls false-flagged abs-stepped in run
+    # 34701523365 (253 attempts vs 250 calls); the check runs against
+    # provider_attempts, falling back to provider_calls on legacy receipts.
+    retried = deepcopy(product_row)
+    # One call retried then completed: 3 logical calls, 4 admitted attempts,
+    # conservation intact (3 completed + 1 failed = 4).
+    retried["provider_attempts"] = product_row["provider_calls"] + 1
+    retried["provider_completed_calls"] = product_row["provider_completed_calls"] + 1
+    retried["treatment_receipt"]["reproducibility_manifest"]["provider_receipts"][
+        "request_count"
+    ] = product_row["provider_calls"] + 1
+    _write_json(product, retried)
+    assert "treatment_provider_receipt_count_mismatch" not in (
+        retried_errors := verify_runtime_receipt(product)
+    ), retried_errors
+    # A genuine gap -- an admitted attempt with no request receipt -- still fires.
+    retried["treatment_receipt"]["reproducibility_manifest"]["provider_receipts"][
+        "request_count"
+    ] = product_row["provider_calls"] + 2
+    _write_json(product, retried)
+    assert "treatment_provider_receipt_count_mismatch" in verify_runtime_receipt(product)
+    legacy = deepcopy(product_row)
+    legacy.pop("provider_attempts", None)
+    legacy["treatment_receipt"]["reproducibility_manifest"]["provider_receipts"][
+        "request_count"
+    ] = product_row["provider_calls"] + 1
+    _write_json(product, legacy)
+    assert "treatment_provider_receipt_count_mismatch" in verify_runtime_receipt(product)
+    product.write_text(intact, encoding="utf-8")
+    if synthetic_transport:
+        concealed = {**product_row, "synthetic_transport": False}
+        _write_json(product, concealed)
+        errors = verify_runtime_receipt(product)
+        assert "product_transport_report_mismatch" in errors
+        assert "synthetic_transport_not_paid_evidence" in errors
+        _write_json(product, product_row)
+
+    refused_admission = {
+        "event": "provider_admission",
+        "event_hash": "9" * 64,
+        "sequence": 12,
+        "status": "refused",
+        "reason": "GT_PROVIDER_REQUEST_TOO_LARGE",
+        "request_tokens": 114_689,
+        "request_bytes": 458_756,
+        "context_window_tokens": 131_072,
+        "reserved_output_tokens": 16_384,
+        "input_budget_tokens": 114_688,
+        "metadata_source": "openrouter:/models",
+    }
+    events_with_refusal = [*events, refused_admission]
+    (task_state / "events.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in events_with_refusal),
+        encoding="utf-8",
+    )
+    completed_with_refusal = deepcopy(product_row)
+    completed_with_refusal["integrity"]["events_sha256"] = hashlib.sha256(
+        (task_state / "events.jsonl").read_bytes()
+    ).hexdigest()
+    completed_with_refusal["treatment_receipt"]["event_journal"].update(
+        event_count=len(events_with_refusal),
+        event_head=refused_admission["event_hash"],
+    )
+    completed_with_refusal["treatment_receipt"]["provider_admissions"].append(
+        {
+            "event_hash": refused_admission["event_hash"],
+            "event_sequence": refused_admission["sequence"],
+            "status": refused_admission["status"],
+            "reason": refused_admission["reason"],
+            "request_tokens": refused_admission["request_tokens"],
+            "request_bytes": refused_admission["request_bytes"],
+            "context_window_tokens": refused_admission["context_window_tokens"],
+            "reserved_output_tokens": refused_admission["reserved_output_tokens"],
+            "input_budget_tokens": refused_admission["input_budget_tokens"],
+            "metadata_source": refused_admission["metadata_source"],
+        }
+    )
+    _write_json(product, completed_with_refusal)
+    assert "treatment_provider_admission_count_mismatch" in verify_runtime_receipt(
+        product
+    )
+
+    (task_state / "events.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in events), encoding="utf-8"
+    )
+    _write_json(product, product_row)
+
+    # Admission-order violations at ISSUANCE: the twin refusal is honest only
+    # because the surviving sibling was admitted first (delivery_ordinal 1 <
+    # candidate_ordinal 2). Rewriting the refusal so its candidate ordinal
+    # reaches the sibling's, or so it claims the delivered payload's identity,
+    # turns the same journal into refused-then-delivered and issuance must
+    # refuse the run - the check the commit-sequence comparison could not
+    # express in either direction.
+    for corrupt in (
+        lambda row: row.update(candidate_ordinal=1),
+        lambda row: row.update(payload_sha256="9" * 64),
+    ):
+        corrupted = deepcopy(events)
+        for row in corrupted:
+            if row.get("event") == "delivery_refused" and row.get(
+                "reason"
+            ) == "localization_fire_once":
+                corrupt(row)
+        (task_state / "events.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in corrupted), encoding="utf-8"
+        )
+        try:
+            issue_runtime_receipts(
+                report_path=report,
+                trajectory_path=trajectory,
+                state_dir=state,
+                product_receipt_path=product,
+                adapter_receipt_path=adapter,
+                task_id="task-a",
+                product_source_sha="f" * 40,
+                treatment="groundtruth",
+                requested_model="meta/muse-spark-1.2-contributor",
+                scaffold_version="2.4.6",
+                time_budget_seconds=3600,
+            )
+        except ValueError as exc:
+            assert str(exc) == "refused_then_delivered"
+        else:
+            raise AssertionError("admission-order violation was accepted")
+
+    (task_state / "events.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in events), encoding="utf-8"
+    )
+    _write_json(product, product_row)
+
+    mutations = [
+        (
+            "treatment_engine_integrity_invalid",
+            lambda row: row["treatment_receipt"]["reproducibility_manifest"].pop(
+                "engine_integrity"
+            ),
+        ),
+        (
+            "treatment_engine_integrity_invalid",
+            lambda row: row["treatment_receipt"]["reproducibility_manifest"][
+                "engine_integrity"
+            ].update(mode="off"),
+        ),
+        (
+            "treatment_engine_integrity_invalid",
+            lambda row: row["treatment_receipt"]["reproducibility_manifest"][
+                "engine_integrity"
+            ].update(disabled_stage="global_kill_switch"),
+        ),
+        (
+            "treatment_delivery_boundary_invalid:duplicate_delivery_identity",
+            lambda row: row["treatment_receipt"]["provider_delivery_receipts"].extend(
+                deepcopy(row["treatment_receipt"]["provider_delivery_receipts"]) * 12
+            ),
+        ),
+        (
+            "treatment_delivery_late",
+            lambda row: row["treatment_receipt"]["provider_delivery_receipts"][0].update(
+                same_observation=False
+            ),
+        ),
+        (
+            "treatment_delivery_context_budget_exceeded",
+            lambda row: row["treatment_receipt"]["provider_delivery_receipts"][1].update(
+                context_byte_count=1_401
+            ),
+        ),
+        (
+            "treatment_prompt_context_budget_exceeded",
+            lambda row: row["treatment_receipt"]["provider_delivery_receipts"][0].update(
+                delivery_kind="localization"
+            ),
+        ),
+        (
+            "treatment_delivery_context_budget_exceeded",
+            lambda row: row["treatment_receipt"]["provider_delivery_receipts"][0].update(
+                context_byte_count=2_001,
+                byte_limit=2_000,
+            ),
+        ),
+        (
+            "treatment_provider_delivery_census_mismatch",
+            lambda row: row["treatment_receipt"]["provider_delivery_receipts"][1].update(
+                context_sha256=row["treatment_receipt"]["provider_delivery_receipts"][0][
+                    "context_sha256"
+                ],
+                delivery_identity=row["treatment_receipt"]["provider_delivery_receipts"][0][
+                    "delivery_identity"
+                ],
+            ),
+        ),
+        (
+            # Key arm: claiming candidate_ordinal 1 makes the refusal read as
+            # preceding the prompt-contract-1 admission (delivery_ordinal 1),
+            # i.e. the same key was admitted at-or-after the refusal.
+            "treatment_delivery_refusal_invalid",
+            lambda row: row["treatment_receipt"]["refused_deliveries"][0].update(
+                dedup_key="prompt-contract-1",
+                candidate_ordinal=1,
+            ),
+        ),
+        (
+            # Identity arm: the exact payload the journal claims it refused
+            # shows up delivered in the same iteration. Fires regardless of
+            # ordinals - a refusal of already-pending content is impossible.
+            "treatment_refused_then_delivered",
+            lambda row: row["treatment_receipt"]["refused_deliveries"][0].update(
+                delivery_identity=row["treatment_receipt"]["provider_delivery_receipts"][0][
+                    "delivery_identity"
+                ],
+            ),
+        ),
+        (
+            # Ordinal arm: the localization sibling delivered at ordinal 1 is
+            # rewritten to ordinal 2, at-or-after the twin's refusal
+            # (candidate_ordinal 2) - the admission-order violation the
+            # commit-sequence check could not express.
+            "treatment_refused_then_delivered",
+            lambda row: row["treatment_receipt"]["provider_delivery_receipts"][1].update(
+                delivery_ordinal=2
+            ),
+        ),
+        (
+            "treatment_dense_index_not_ready",
+            lambda row: row["treatment_receipt"]["dense_index_receipt"].update(query_ready=False),
+        ),
+        (
+            "treatment_graph_utilisation_mismatch",
+            lambda row: row["treatment_receipt"]["graph_utilisation"].update(
+                cochange_rows=99
+            ),
+        ),
+    ]
+    for expected_error, mutate in mutations:
+        changed = deepcopy(product_row)
+        mutate(changed)
+        _write_json(product, changed)
+        assert expected_error in verify_runtime_receipt(product)
+
+
+def test_runtime_receipt_rejects_provider_count_disagreement(tmp_path: Path) -> None:
+    report = tmp_path / "report.json"
+    trajectory = tmp_path / "trajectory.json"
+    _write_json(
+        report,
+        {
+            "exit_code": 0,
+            "terminal": "submitted_unverified",
+            "research_valid": True,
+            "gt": {"terminal_requests": 3, "usage": {}},
+        },
+    )
+    _write_json(trajectory, {"messages": [], "info": {"model_stats": {"api_calls": 2}}})
+
+    try:
+        issue_runtime_receipts(
+            report_path=report,
+            trajectory_path=trajectory,
+            state_dir=tmp_path / "state",
+            product_receipt_path=tmp_path / "gt-run.json",
+            adapter_receipt_path=tmp_path / "adapter.json",
+            task_id="task-a",
+            product_source_sha="f" * 40,
+            treatment="groundtruth",
+            requested_model="meta/muse-spark-1.2-contributor",
+            scaffold_version="2.4.6",
+            time_budget_seconds=3600,
+        )
+    except ValueError as exc:
+        assert str(exc) == "provider_call_count_mismatch"
+    else:
+        raise AssertionError("provider-call disagreement was accepted")
+
+
+def test_benchmark_arms_match_what_the_writers_produce():
+    """The arm domain crosses four modules; the writers are the authority.
+
+    Five hand-typed copies agreed, which is why no sweep flagged them - two of
+    them raise, and project_task_environment runs per task inside the paid
+    window, so a third arm would have raised during setup on every task with
+    spend committed. Same defect class as the refusal allow-list, caught before
+    it was wrong instead of after.
+
+    Scope is stated rather than assumed: this asserts the literals in every
+    `treatment=` conditional across the two supervisor entry points, not that
+    no other producer exists.
+    """
+    import ast
+    from pathlib import Path as _Path
+
+    from gt_harness.product import BENCHMARK_ARMS
+
+    root = _Path(__file__).resolve().parent.parent
+    produced = set()
+    sites = 0
+    for name in ("scripts/miniswe_gt_run.py", "scripts/miniswe_supervisor.py"):
+        tree = ast.parse((root / name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.keyword) or node.arg != "treatment":
+                continue
+            # Only the BRANCHES of a conditional, never its test. Walking the
+            # whole node collected "off" from
+            # `"bare" if args.gt_off or args.gt_mode == "off" else "groundtruth"`
+            # - a string that is compared, not produced. An extraction wider
+            # than the thing it claims to extract is the same error as a
+            # domain restated instead of derived.
+            def _values(expr):
+                if isinstance(expr, ast.IfExp):
+                    return _values(expr.body) | _values(expr.orelse)
+                if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+                    return {expr.value}
+                return set()
+
+            literals = _values(node.value)
+            if not literals:
+                continue
+            sites += 1
+            produced |= literals
+
+    assert sites >= 3, f"expected the three treatment writers, found {sites}"
+    assert produced == set(BENCHMARK_ARMS), (
+        f"writers produce {sorted(produced)} but every validator keyed on "
+        f"BENCHMARK_ARMS allows {sorted(BENCHMARK_ARMS)}"
+    )
+
+
+def test_the_same_prompt_content_twice_in_a_run_is_rejected():
+    """GT is a context provider; not repeating itself is its central claim.
+
+    The runtime enforces this run-scoped - _model_visible_delivery_identities
+    is initialised once and never cleared - but acceptance only ever checked
+    uniqueness within a single decision, and treatment_refused_then_delivered
+    cannot cover the gap either: it inspects content that WAS refused, and a
+    dedup miss produces no refusal row at all. So the strongest property in the
+    path had no check that would notice it breaking.
+    """
+    import pytest
+
+    from gt_harness.runtime_receipts import _validate_delivery_boundaries
+
+    # Same identity, DIFFERENT decisions: legal per-boundary, illegal per run.
+    repeated = [
+        {"lane": "prompt", "delivery_identity": "a" * 64, "observed_iteration": 1},
+        {"lane": "prompt", "delivery_identity": "a" * 64, "observed_iteration": 5},
+    ]
+    with pytest.raises(ValueError, match="prompt_delivery_repeated_in_run"):
+        _validate_delivery_boundaries(repeated)
+
+
+def test_sealed_evidence_may_recur_across_decisions():
+    """The sealed lane is decision-scoped by design and must not be caught here.
+
+    _decision_delivery_identities is cleared on every iteration change, so the
+    same sealed bytes recurring across decisions is intended behaviour. A
+    run-scoped check that caught it would fire on correct runs.
+    """
+    from gt_harness.runtime_receipts import _validate_delivery_boundaries
+
+    _validate_delivery_boundaries([
+        {"lane": "sealed", "delivery_identity": "b" * 64, "observed_iteration": 1},
+        {"lane": "sealed", "delivery_identity": "b" * 64, "observed_iteration": 5},
+    ])
+
+
+def _lsp_seal(state, digest, graph_sha, servers):
+    d = state / "graph" / "revisions" / digest
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "lsp-promotion.json").write_text(json.dumps({
+        "schema": "gt.lsp_promotion.v1", "graph_sha256": graph_sha,
+        "status": "promotion_not_scheduled",
+        "servers_detected": servers, "server_count": len(servers),
+    }), encoding="utf-8")
+
+
+def test_the_lsp_seal_is_read_from_the_published_graph_not_by_uniqueness(tmp_path):
+    """Every real task has more than one seal, and requiring one was fatal.
+
+    With a runtime layout the indexer seals lsp-promotion.json beside each
+    graph revision - graph_root/revisions/<reuse-key-digest>/ - and the
+    benchmark rebuilds at every edit boundary. So any run that edits anything
+    has two or more, and _single_optional raises duplicate_runtime_artifact on
+    the second. That turned receipt issuance into a failure receipt on every
+    real task: the smoke goes red after the spend.
+
+    The multiplicity is not new and was harmless for as long as nothing read
+    the seal. Adding the reader is what made it fatal.
+    """
+    from gt_harness.runtime_receipts import _lsp_promotion_receipt
+
+    _lsp_seal(tmp_path, "aa" * 32, "11" * 32, ["go"])
+    _lsp_seal(tmp_path, "bb" * 32, "22" * 32, ["go", "python", "rust", "typescript"])
+    assert len(list(tmp_path.rglob("lsp-promotion.json"))) == 2
+
+    receipt = _lsp_promotion_receipt(
+        tmp_path, [{"event": "graph_publication", "graph_sha256": "22" * 32}]
+    )
+
+    # The seal for the graph that was actually published, not the first found.
+    assert receipt["server_count"] == 4
+    assert receipt["servers_detected"] == ["go", "python", "rust", "typescript"]
+
+
+
+def test_killed_run_receipt_reconstructs_accounting_from_sealed_journal(
+    tmp_path: Path,
+) -> None:
+    """A timeout/killed run must still carry a conserved, attestable receipt.
+
+    Run 34656860834 hit the wall: the worker never reached final_state(), so
+    report["gt"] was empty and the failure receipt carried none of the
+    conservation fields the sealed journal already contained. The failure
+    path now rebuilds them journal-side. This fixture mirrors the real
+    census shape: 2 agent turns + 1 catalog bootstrap + 1 plan bootstrap =
+    4 logical calls; 6 attempts = 4 agent admissions (2 turns + 1 retry +
+    1 killed in flight) + 2 bootstrap wire requests; 4 responses + 1
+    typed failure. Bootstrap calls pass the same admission gate as agent
+    turns -- native_query dispatches through the wrapped model._query --
+    so they emit provider_admission rows like every other wire attempt,
+    plus their lifecycle events and a provider_response bound to a
+    namespaced GT-internal request id. The catalog bootstrap also binds
+    its own offer: the internal request carries the select_catalog
+    delivery under the namespaced request id and the response echoes it.
+    """
+    state = tmp_path / "gt-state"
+    task_state = state / "task-hash"
+    trajectory = tmp_path / "miniswe_trajectory.json"
+    report = tmp_path / "miniswe_report.json"
+    product = tmp_path / "gt-run.json"
+    adapter = tmp_path / "benchmark-adapter.json"
+    _write_json(
+        trajectory,
+        {
+            "messages": [{"role": "assistant", "content": "still working"}],
+            "info": {"model_stats": {"api_calls": 2}, "exit_status": ""},
+        },
+    )
+    # The report shape the supervisor produces after killing the child: the
+    # gt section is rebuilt from the sealed journal (resolved model, summed
+    # usage, bootstrap census) — never fabricated as a completed state.
+    _write_json(
+        report,
+        {
+            "synthetic_transport": False,
+            "terminal": "timeout",
+            "exit_code": 3,
+            "gt_mode": "advisory",
+            "gt": {
+                "verified": False,
+                "reconstructed_from_journal": True,
+                "resolved_model": "openai/meta/muse-spark-1.2-contributor",
+                "select_catalog_bootstrap_calls": 1,
+                "persistent_plan_bootstrap_calls": 1,
+                "contract_shipped": True,
+                "usage": {"prompt_tokens": 40, "completion_tokens": 5},
+            },
+        },
+    )
+
+    admission = {
+        "status": "admitted",
+        "reason": "within_provider_window",
+        "context_window_tokens": 131072,
+        "reserved_output_tokens": 16384,
+        "input_budget_tokens": 114688,
+        "metadata_source": "openrouter:/models",
+    }
+
+    def admitted(seq: int, tokens: int) -> dict:
+        return {
+            "event": "provider_admission",
+            "event_hash": f"{seq:064x}",
+            "sequence": seq,
+            "request_tokens": tokens,
+            "request_bytes": tokens * 4,
+            **admission,
+        }
+
+    events = [
+        {   # 1: the catalog offer is delivered BY its own internal request --
+            #    kind-scoped pending evaluation binds it under the namespaced
+            #    request id (carry_pending=False orphaned it into the next
+            #    agent request's unmatched_delivery_ids, rehearsal 34756335688)
+            "event": "evidence_delivery",
+            "event_hash": "1" * 64,
+            "sequence": 1,
+            "lane": "sealed",
+            "kind": "select_catalog",
+            "evidence_type": "select_catalog",
+            "dedup_key": "select_catalog:catalog-1",
+            "target": "service.py",
+            "payload_sha256": "c" * 64,
+            "delivery_identity": "c" * 64,
+            "request_id": "task-a-gt-internal-select-catalog",
+            "action_index": 0,
+            "iteration": 0,
+            "rendered_bytes": 120,
+        },
+        {   # 2: sealed receipt for the catalog delivery
+            "event": "receipt",
+            "event_hash": "2" * 64,
+            "sequence": 2,
+            "transition": "delivered",
+            "dedup_key": "select_catalog:catalog-1",
+            "evidence_type": "select_catalog",
+            "iteration": 0,
+            "payload_hash": "c" * 64,
+        },
+        admitted(3, 100),  # 3: the catalog bootstrap is admitted on the wire
+        {   # 4: the catalog bootstrap's own request row, bound to its
+            #    namespaced request id and carrying its own delivery
+            "event": "provider_delivery",
+            "event_hash": "4" * 64,
+            "sequence": 4,
+            "iteration": 1,
+            "request_id": "task-a-gt-internal-select-catalog",
+            "delivery_ids": ["c" * 64],
+            "resolved_model": "openai/meta/muse-spark-1.2-contributor",
+        },
+        {   # 5: select-catalog bootstrap spends its provider call; the
+            #    lifecycle row is its admission-side classification
+            "event": "select_catalog_lifecycle",
+            "event_hash": "5" * 64,
+            "sequence": 5,
+            "reason": "provider_request_admitted",
+        },
+        {   # 6: the catalog bootstrap response binds to its own namespaced
+            #    request id and echoes the request's delivery ids
+            "event": "provider_response",
+            "event_hash": "6" * 64,
+            "sequence": 6,
+            "request_id": "task-a-gt-internal-select-catalog",
+            "delivery_ids": ["c" * 64],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {"cached_tokens": 2},
+                "cost": 0.01,
+            },
+        },
+        admitted(7, 100),  # 7: the plan bootstrap is admitted on the wire
+        {   # 8: persistent-plan bootstrap also spends a provider call; its
+            #    request carries no GT delivery of its own
+            "event": "provider_delivery",
+            "event_hash": "8" * 64,
+            "sequence": 8,
+            "iteration": 2,
+            "request_id": "task-a-gt-internal-persistent-plan",
+            "delivery_ids": [],
+            "resolved_model": "openai/meta/muse-spark-1.2-contributor",
+        },
+        {   # 9
+            "event": "persistent_plan_built",
+            "event_hash": "9" * 64,
+            "sequence": 9,
+            "finish_reason": "tool_calls",
+        },
+        {   # 10
+            "event": "provider_response",
+            "event_hash": "0a" * 32,
+            "sequence": 10,
+            "request_id": "task-a-gt-internal-persistent-plan",
+            "delivery_ids": [],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {"cached_tokens": 3},
+                "cost": 0.01,
+            },
+        },
+        {   # 11: task contract ships prompt-lane on the agent's first turn
+            "event": "context_addition_delivery",
+            "event_hash": "0b" * 32,
+            "sequence": 11,
+            "lane": "prompt",
+            "kind": "context_contract",
+            "evidence_type": "context_contract",
+            "dedup_key": "prompt-contract-1",
+            "target": "provider_prompt",
+            "payload_sha256": "a" * 64,
+            "delivery_identity": "a" * 64,
+            "request_id": "request-1",
+            "action_index": 0,
+            "iteration": 2,
+            "rendered_bytes": 100,
+        },
+        {   # 12: sealed receipt for the contract delivery
+            "event": "receipt",
+            "event_hash": "0c" * 32,
+            "sequence": 12,
+            "transition": "delivered",
+            "dedup_key": "prompt-contract-1",
+            "evidence_type": "context_contract",
+            "iteration": 2,
+            "payload_hash": "a" * 64,
+        },
+        {   # 13: agent turn 1 carries the contract delivery
+            "event": "provider_delivery",
+            "event_hash": "0d" * 32,
+            "sequence": 13,
+            "iteration": 3,
+            "request_id": "request-1",
+            "delivery_ids": ["a" * 64],
+            "resolved_model": "openai/meta/muse-spark-1.2-contributor",
+        },
+        admitted(14, 300),
+        {   # 15
+            "event": "provider_response",
+            "event_hash": "0e" * 32,
+            "sequence": 15,
+            "request_id": "request-1",
+            "usage": {
+                "prompt_tokens": 18,
+                "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 6},
+                "cost": 0.02,
+            },
+        },
+        {   # 16: a sealed localization lands before agent turn 2
+            "event": "evidence_delivery",
+            "event_hash": "10" * 32,
+            "sequence": 16,
+            "lane": "sealed",
+            "kind": "localization",
+            "evidence_type": "localization",
+            "dedup_key": "localization-1",
+            "payload_sha256": "9" * 64,
+            "delivery_identity": "9" * 64,
+            "request_id": "request-2",
+            "action_index": 0,
+            "iteration": 3,
+            "rendered_bytes": 123,
+        },
+        {   # 17
+            "event": "receipt",
+            "event_hash": "11" * 32,
+            "sequence": 17,
+            "transition": "delivered",
+            "dedup_key": "localization-1",
+            "evidence_type": "localization",
+            "iteration": 3,
+            "payload_hash": "9" * 64,
+        },
+        {   # 18: agent turn 2 carries the localization
+            "event": "provider_delivery",
+            "event_hash": "12" * 32,
+            "sequence": 18,
+            "iteration": 4,
+            "request_id": "request-2",
+            "delivery_ids": ["9" * 64],
+            "resolved_model": "openai/meta/muse-spark-1.2-contributor",
+        },
+        admitted(19, 400),
+        {   # 20: typed failure closes request-2's first attempt
+            "event": "provider_failure",
+            "event_hash": "14" * 32,
+            "sequence": 20,
+            "request_id": "request-2",
+            "error_type": "FormatError",
+        },
+        admitted(21, 400),  # 21: the transport retries inside the same call
+        {   # 22
+            "event": "provider_response",
+            "event_hash": "16" * 32,
+            "sequence": 22,
+            "request_id": "request-2",
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "cost": 0.0,
+            },
+        },
+        admitted(23, 500),  # 23: admitted, killed in flight by the supervisor
+    ]
+    task_state.mkdir(parents=True)
+    (task_state / "events.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in events), encoding="utf-8"
+    )
+
+    issued = issue_runtime_receipt_failure(
+        report_path=report,
+        trajectory_path=trajectory,
+        product_receipt_path=product,
+        adapter_receipt_path=adapter,
+        task_id="task-a",
+        product_source_sha="f" * 40,
+        treatment="groundtruth",
+        requested_model="meta/muse-spark-1.2-contributor",
+        scaffold_version="2.4.6",
+        time_budget_seconds=3600,
+        terminal="timeout",
+        exit_code=3,
+        error=RuntimeError("provider_manifest_count_mismatch"),
+    )
+
+    product_row = json.loads(product.read_text(encoding="utf-8"))
+    assert issued == product_row
+    assert product_row["status"] == "ERROR"
+    assert product_row["terminal"] == "timeout"
+    assert product_row["agent_turn_calls"] == 2
+    assert product_row["select_catalog_bootstrap_calls"] == 1
+    assert product_row["persistent_plan_bootstrap_calls"] == 1
+    assert product_row["provider_calls"] == 4
+    # Attempts, not logical calls: 4 deliveries + 1 retry + 1 in-flight kill.
+    assert product_row["provider_attempts"] == 6
+    assert product_row["provider_completed_calls"] == 4
+    assert product_row["provider_failed_calls"] == 2
+    assert product_row["input_tokens"] == 40
+    assert product_row["output_tokens"] == 5
+    assert product_row["cached_tokens"] == 11
+    assert product_row["total_cost"] == 0.04
+    assert product_row["effective_model"] == "openai/meta/muse-spark-1.2-contributor"
+    assert product_row["integrity"]["events_sha256"] == hashlib.sha256(
+        (task_state / "events.jsonl").read_bytes()
+    ).hexdigest()
+    assert product_row["research_valid"] is False
+    assert product_row["receipt_issuance"]["type"] == "RuntimeError"
+
+    treatment = product_row["treatment_receipt"]
+    assert treatment["schema"] == "gt.miniswe_treatment_receipt.v1"
+    assert treatment["treatment_status"] == "ACTIVE"
+    assert treatment["reconstructed_from_journal"] is True
+    assert treatment["verified"] is False
+    assert treatment["contract_shipped"] is True
+    assert treatment["delivery_count"] == 3
+    assert treatment["prompt_delivery_count"] == 1
+    assert treatment["sealed_delivery_count"] == 2
+    assert treatment["event_journal"]["event_count"] == len(events)
+    assert treatment["event_journal"]["event_head"] == events[-1]["event_hash"]
+    # Every wire attempt emits an admission -- the two bootstrap calls are
+    # rows 3 and 7 alongside the four agent-boundary attempts.
+    assert [row["request_tokens"] for row in treatment["provider_admissions"]] == [
+        100, 100, 300, 400, 400, 500,
+    ]
+
+    # Attestation of a killed run must surface only honest terminal errors —
+    # the run ISN'T completed — never the conservation cascade the missing
+    # fields used to produce.
+    errors = verify_runtime_receipt(product)
+    assert "product_not_completed" in errors
+    forbidden = {
+        "product_provider_calls_missing",
+        "product_provider_calls_mismatch",
+        "product_provider_call_conservation_failed",
+        "product_input_token_conservation_failed",
+        "product_output_token_conservation_failed",
+        "product_effective_model_report_mismatch",
+        "product_event_journal_digest_mismatch",
+        "product_event_journal_conservation_failed",
+        "treatment_receipt_missing",
+        "treatment_provider_admission_census_mismatch",
+        "treatment_prompt_delivery_census_mismatch",
+        "treatment_sealed_delivery_census_mismatch",
+        "treatment_provider_delivery_census_mismatch",
+        "product_report_digest_mismatch",
+        "product_trajectory_digest_mismatch",
+    }
+    assert forbidden.isdisjoint(errors), errors
+
+
+def test_killed_run_receipt_survives_without_a_journal(tmp_path: Path) -> None:
+    """No journal -> the minimal honest ERROR receipt, never a crash."""
+    trajectory = tmp_path / "miniswe_trajectory.json"
+    report = tmp_path / "miniswe_report.json"
+    product = tmp_path / "gt-run.json"
+    adapter = tmp_path / "benchmark-adapter.json"
+    _write_json(
+        trajectory,
+        {"messages": [], "info": {"model_stats": {"api_calls": 5}}},
+    )
+    _write_json(report, {"terminal": "timeout", "exit_code": 3})
+
+    product_row = issue_runtime_receipt_failure(
+        report_path=report,
+        trajectory_path=trajectory,
+        product_receipt_path=product,
+        adapter_receipt_path=adapter,
+        task_id="task-a",
+        product_source_sha="f" * 40,
+        treatment="groundtruth",
+        requested_model="meta/muse-spark-1.2-contributor",
+        scaffold_version="2.4.6",
+        time_budget_seconds=3600,
+        terminal="timeout",
+        exit_code=3,
+        error=RuntimeError("boom"),
+    )
+
+    assert product_row["status"] == "ERROR"
+    assert product_row["provider_calls"] == 5
+    assert "provider_attempts" not in product_row
+    assert "treatment_receipt" not in product_row
+    assert product_row["integrity"]["report_sha256"] == hashlib.sha256(
+        report.read_bytes()
+    ).hexdigest()
+
+
+def _assembly_row(seq, raw, active, pointers=0):
+    return {
+        "event": "context_assembly",
+        "sequence": seq,
+        "raw_message_chars": raw,
+        "active_message_chars": active,
+        "model_facing_pointer_count": pointers,
+        "event_hash": "a" * 64,
+        "schema": "gt.event.v1",
+    }
+
+
+def _journal_with(rows, task_state):
+    task_state.mkdir(parents=True, exist_ok=True)
+    path = task_state / "events.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+def test_starved_context_is_attested_as_defective(tmp_path):
+    """A run whose provider view kept ~1% of its history is not valid GT-on
+    evidence even when every byte was conserved - the starvation must show
+    up in attestation, not just in telemetry."""
+    state_dir = tmp_path / "gt-state"
+    task_state = state_dir / "task-x"
+    rows = [
+        {"event": "context_addition_delivery", "lane": "prompt",
+         "kind": "context_contract", "evidence_type": "context_contract",
+         "dedup_key": "k", "payload_sha256": "a" * 64, "iteration": 0,
+         "sequence": 1, "event_hash": "1" * 64, "schema": "gt.event.v1"},
+        {"event": "provider_admission", "sequence": 2, "status": "admitted",
+         "reason": "within_provider_window", "request_id": "r1",
+         "iteration": 1, "metadata_source": "test",
+         "request_tokens": 6, "request_bytes": 24,
+         "context_window_tokens": 1000, "reserved_output_tokens": 10,
+         "input_budget_tokens": 990,
+         "event_hash": "a" * 64, "schema": "gt.event.v1"},
+        {"event": "provider_delivery", "sequence": 3, "iteration": 1,
+         "request_id": "r1", "resolved_model": "openai/m",
+         "event_hash": "2" * 64, "schema": "gt.event.v1"},
+        {"event": "provider_response", "sequence": 4, "request_id": "r1",
+         "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+         "event_hash": "3" * 64, "schema": "gt.event.v1"},
+    ]
+    rows += [
+        _assembly_row(5 + i, raw=1_000_000, active=7_000)
+        for i in range(30)
+    ]
+    _journal_with(rows, task_state)
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({
+        "model": "m", "gt_mode": "advisory", "terminal": "timeout",
+        "exit_code": 3, "model_stats": {"api_calls": 1},
+    }), encoding="utf-8")
+    (tmp_path / "traj.json").write_text("{}", encoding="utf-8")
+    product = tmp_path / "gt-run.json"
+
+    issue_runtime_receipt_failure(
+        report_path=report, trajectory_path=tmp_path / "traj.json",
+        product_receipt_path=product, adapter_receipt_path=tmp_path / "ad.json",
+        task_id="task-x", product_source_sha="f" * 40,
+        treatment="groundtruth", requested_model="m",
+        scaffold_version="2.4.6", time_budget_seconds=60,
+        terminal="timeout", exit_code=3, error=RuntimeError("killed"),
+    )
+    receipt = json.loads(product.read_text(encoding="utf-8"))
+    health = receipt["treatment_receipt"]["context_health"]
+    assert health["assemblies"] == 30
+    assert health["starved"] is True
+    assert health["median_active_retention"] < 0.02
+
+    errors = verify_runtime_receipt(product)
+    assert "treatment_context_starvation_detected" in errors
+
+
+def test_anchor_pointer_emission_is_attested(tmp_path):
+    """A control-plane pointer emitted into the model's context is the exact
+    regression that starved the paid run; attestation must trip on it."""
+    state_dir = tmp_path / "gt-state"
+    task_state = state_dir / "task-x"
+    rows = [
+        {"event": "provider_admission", "sequence": 1, "status": "admitted",
+         "reason": "within_provider_window", "request_id": "r1",
+         "iteration": 1, "metadata_source": "test",
+         "request_tokens": 6, "request_bytes": 24,
+         "context_window_tokens": 1000, "reserved_output_tokens": 10,
+         "input_budget_tokens": 990,
+         "event_hash": "a" * 64, "schema": "gt.event.v1"},
+        {"event": "provider_delivery", "sequence": 2, "iteration": 1,
+         "request_id": "r1", "resolved_model": "openai/m",
+         "event_hash": "1" * 64, "schema": "gt.event.v1"},
+        {"event": "provider_response", "sequence": 3, "request_id": "r1",
+         "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+         "event_hash": "2" * 64, "schema": "gt.event.v1"},
+        _assembly_row(4, raw=100_000, active=50_000, pointers=2),
+    ]
+    _journal_with(rows, task_state)
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({
+        "model": "m", "gt_mode": "advisory", "terminal": "timeout",
+        "exit_code": 3, "model_stats": {"api_calls": 1},
+    }), encoding="utf-8")
+    (tmp_path / "traj.json").write_text("{}", encoding="utf-8")
+    product = tmp_path / "gt-run.json"
+
+    issue_runtime_receipt_failure(
+        report_path=report, trajectory_path=tmp_path / "traj.json",
+        product_receipt_path=product, adapter_receipt_path=tmp_path / "ad.json",
+        task_id="task-x", product_source_sha="f" * 40,
+        treatment="groundtruth", requested_model="m",
+        scaffold_version="2.4.6", time_budget_seconds=60,
+        terminal="timeout", exit_code=3, error=RuntimeError("killed"),
+    )
+    errors = verify_runtime_receipt(product)
+    assert "context_anchor_pointer_emitted" in errors
+
+
+def test_churn_events_flow_into_treatment_receipt(tmp_path):
+    state_dir = tmp_path / "gt-state"
+    task_state = state_dir / "task-x"
+    rows = [
+        {"event": "provider_admission", "sequence": 1, "status": "admitted",
+         "reason": "within_provider_window", "request_id": "r1",
+         "iteration": 1, "metadata_source": "test",
+         "request_tokens": 6, "request_bytes": 24,
+         "context_window_tokens": 1000, "reserved_output_tokens": 10,
+         "input_budget_tokens": 990,
+         "event_hash": "a" * 64, "schema": "gt.event.v1"},
+        {"event": "provider_delivery", "sequence": 2, "iteration": 1,
+         "request_id": "r1", "resolved_model": "openai/m",
+         "event_hash": "1" * 64, "schema": "gt.event.v1"},
+        {"event": "provider_response", "sequence": 3, "request_id": "r1",
+         "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+         "event_hash": "2" * 64, "schema": "gt.event.v1"},
+        {"event": "churn_steer", "sequence": 3, "delivered": True,
+         "request_id": "r1", "delivery_identity": "d" * 64,
+         "event_hash": "3" * 64, "schema": "gt.event.v1"},
+        {"event": "churn_abort", "sequence": 4, "turns_observed": 49,
+         "stall_turns": 50, "steers_issued": 1,
+         "event_hash": "4" * 64, "schema": "gt.event.v1"},
+    ]
+    _journal_with(rows, task_state)
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({
+        "model": "m", "gt_mode": "advisory", "terminal": "churn_abort",
+        "exit_code": 7, "model_stats": {"api_calls": 1},
+    }), encoding="utf-8")
+    (tmp_path / "traj.json").write_text("{}", encoding="utf-8")
+    product = tmp_path / "gt-run.json"
+
+    issue_runtime_receipt_failure(
+        report_path=report, trajectory_path=tmp_path / "traj.json",
+        product_receipt_path=product, adapter_receipt_path=tmp_path / "ad.json",
+        task_id="task-x", product_source_sha="f" * 40,
+        treatment="groundtruth", requested_model="m",
+        scaffold_version="2.4.6", time_budget_seconds=60,
+        terminal="churn_abort", exit_code=7, error=RuntimeError("churn"),
+    )
+    receipt = json.loads(product.read_text(encoding="utf-8"))
+    churn = receipt["treatment_receipt"]["churn_governor"]
+    assert churn == {
+        "steers_delivered": 1, "aborted": True,
+        "turns_observed": 49, "stall_turns": 50, "steers_issued": 1,
+    }
+    assert receipt["terminal"] == "churn_abort"
+
+
+def test_redelivered_dedup_key_pairs_by_delivery_identity():
+    """Smoke-20 join crash: refreshed evidence in one iteration is legitimate.
+
+    abs-module shipped caller_contract_view for evaluator/functions.go at
+    action 7, refreshed it at action 8, and joined both to the same request --
+    two evidence_delivery rows sharing dedup_key and iteration, each followed
+    by its own receipt. Joining on dedup_key alone saw two candidates and
+    raised delivery_receipt_evidence_join_failed, which then cascaded through
+    the fallback path into every product_* conservation error on the task.
+    The pair key is the rendered payload's own identity.
+    """
+    from gt_harness.runtime_receipts import _provider_delivery_receipts
+
+    def delivery(seq, identity):
+        return {
+            "event": "evidence_delivery", "event_hash": f"{seq:064x}",
+            "sequence": seq, "dedup_key": "caller-x", "iteration": 6,
+            "kind": "caller_contract_view", "evidence_type": "caller_contract_view",
+            "lane": "sealed", "delivery_identity": identity,
+            "payload_sha256": identity, "rendered_bytes": 50, "action_index": seq,
+        }
+
+    def receipt(seq, identity):
+        return {
+            "event": "receipt", "event_hash": f"{seq:064x}", "sequence": seq,
+            "transition": "delivered", "dedup_key": "caller-x", "iteration": 6,
+            "payload_hash": identity,
+        }
+
+    first, second = "a" * 64, "b" * 64
+    rows = [
+        delivery(10, first), receipt(11, first),
+        delivery(12, second), receipt(13, second),
+        {
+            "event": "provider_delivery", "event_hash": "9" * 64, "sequence": 20,
+            "iteration": 7, "delivery_ids": [first, second],
+        },
+    ]
+    receipts = _provider_delivery_receipts(rows)
+    assert [row["delivery_identity"] for row in receipts] == [first, second]
+
+
+def test_ambiguous_delivery_identity_still_raises():
+    """Two byte-identical deliveries in one iteration is a real journal defect."""
+    import pytest
+
+    from gt_harness.runtime_receipts import _provider_delivery_receipts
+
+    same = "a" * 64
+    rows = [
+        {"event": "evidence_delivery", "event_hash": "1" * 64, "sequence": 1,
+         "dedup_key": "k", "iteration": 0, "kind": "x", "lane": "sealed",
+         "delivery_identity": same, "payload_sha256": same, "rendered_bytes": 5},
+        {"event": "evidence_delivery", "event_hash": "2" * 64, "sequence": 2,
+         "dedup_key": "k", "iteration": 0, "kind": "x", "lane": "sealed",
+         "delivery_identity": same, "payload_sha256": same, "rendered_bytes": 5},
+        {"event": "receipt", "event_hash": "3" * 64, "sequence": 3,
+         "transition": "delivered", "dedup_key": "k", "iteration": 0,
+         "payload_hash": same},
+        {"event": "provider_delivery", "event_hash": "4" * 64, "sequence": 4,
+         "iteration": 1, "delivery_ids": [same]},
+    ]
+    with pytest.raises(ValueError, match="delivery_receipt_identity_join_failed"):
+        _provider_delivery_receipts(rows)
+def test_positional_refusal_readmitted_below_candidate_is_not_a_violation():
+    """Run 34925475946 (gitingest-94): a cochange unit was refused at
+    candidate_ordinal 5 twice for boundary_claim_ceiling, then a later scan in
+    the same decision window admitted the identical payload at
+    delivery_ordinal 4 after a sibling candidate dropped - the committed
+    window respected the ceiling and _validate_delivery_boundaries proves it.
+    The unconditional identity arm read that legitimate re-admission as
+    refused_then_delivered and aborted receipt issuance on a submitted_verified
+    run. Positional refusals flag only at-or-after the refused position;
+    payload- and task-intrinsic refusals still flag at any ordinal."""
+    from gt_harness.runtime_receipts import _delivery_rescinds_refusal
+
+    identity = "a" * 64
+    refusal = {
+        "reason": "boundary_claim_ceiling",
+        "candidate_ordinal": 5,
+        "delivery_identity": identity,
+        "dedup_key": "cochange-x",
+    }
+    base = {"delivery_identity": identity, "dedup_key": "cochange-x"}
+    # The production case: identical payload re-admitted below the refused
+    # position is a freed slot, not a rescinded refusal.
+    assert not _delivery_rescinds_refusal(refusal, dict(base, delivery_ordinal=4))
+    # Same payload admitted at or after the refused position: the ceiling was
+    # bypassed - still a violation.
+    assert _delivery_rescinds_refusal(refusal, dict(base, delivery_ordinal=5))
+    # A refusal whose reason is not positional cannot be laundered by ordinal:
+    # the payload is still too big no matter which slot it took.
+    intrinsic = dict(refusal, reason="delivery_byte_ceiling")
+    assert _delivery_rescinds_refusal(intrinsic, dict(base, delivery_ordinal=1))
+    task_scoped = dict(refusal, reason="localization_fire_once")
+    assert _delivery_rescinds_refusal(task_scoped, dict(base, delivery_ordinal=1))
+    # Key arm unchanged: a different identity sharing the dedup key flags only
+    # at-or-after the refused position (the sibling that caused the refusal
+    # sits below it).
+    sibling_low = dict(base, delivery_identity="b" * 64, delivery_ordinal=4)
+    assert not _delivery_rescinds_refusal(refusal, sibling_low)
+    sibling_high = dict(base, delivery_identity="b" * 64, delivery_ordinal=5)
+    assert _delivery_rescinds_refusal(refusal, sibling_high)

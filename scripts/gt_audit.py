@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """gt_audit - deterministic Tier-2 auditor for a Terminal-Bench run artifact.
 
-Reads a harbor output tree (one dir per task, each with ``agent/nano.txt`` +
-``result.json``) and grades GroundTruth's CONDUCT per task - the mechanical
+Reads a Harbor output tree and schema-dispatches each task to either the
+canonical Mini-SWE artifacts (``agent/miniswe_trajectory.json`` plus the GT
+event journal) or the legacy Nano transcript (``agent/nano.txt``). It grades
+GroundTruth's CONDUCT per task - the mechanical
 half of GT's own audit methodology (fired != delivered != consumed; this tool
 grades what was DELIVERED into observations, the model-facing surface).
 
@@ -86,6 +88,7 @@ import hashlib
 import json
 import re
 import sys
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -94,13 +97,19 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from gt_engine.attribution import (  # noqa: E402
+    feature_for_evidence,
     feature_provider_iterations,
     summarize_features,
     verify_lifecycle_rows,
     verify_sdlc_timing_rows,
     verify_trace_rows,
 )
+from gt_engine.event_journal import (  # noqa: E402
+    read_verified_events,
+    verify_event_journal,
+)
 from gt_engine.replay import build_iteration_replay  # noqa: E402
+from gt_engine.request_history import load_provider_request  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # transcript parsing (nano CLI rich-panel format, tee'd without ANSI)
@@ -656,11 +665,26 @@ def check_ledger_integrity(rows: list[LedgerRow]) -> tuple[list[str], list[str]]
 # --------------------------------------------------------------------------- #
 # per-task audit
 # --------------------------------------------------------------------------- #
+def _canonical_task_name(raw: object, task_dir: Path) -> str:
+    """Bind the audit row to the plan's task identity.
+
+    The runner's result.json reports the benchmark's namespaced dataset id
+    (``datacurve/aiomonitor-task-snapshots-diff``) while the plan, the bundle
+    manifest, the official verifier's ``task_id`` and the trial directory all
+    use the bare id (``aiomonitor-task-snapshots-diff``). Attestation compares
+    audit task names to plan task ids, so the namespace must be stripped here —
+    keeping it made every audit row name a task the plan never declared.
+    """
+    name = str(raw or "").rsplit("/", 1)[-1].strip()
+    return name or task_dir.name.split("__", 1)[0]
+
+
 @dataclass
 class TaskAudit:
     task_name: str
     trial_dir: str
     verdict: str = "UNKNOWN"
+    synthetic_transport: bool = False
     verdict_reasons: list[str] = field(default_factory=list)
     # run health
     stop_reason: str | None = None
@@ -677,6 +701,8 @@ class TaskAudit:
     gt_deliveries: int = 0
     gt_delivery_kinds: dict[str, int] = field(default_factory=dict)
     gt_overhead_chars: int = 0
+    delivery_consumption: list[dict] = field(default_factory=list)
+    delivery_consumption_summary: dict[str, int] = field(default_factory=dict)
     gt_blocks_observed: int = 0  # heuristic count, always reported
     # ledger join
     ledger_present: bool = False
@@ -742,6 +768,11 @@ class TaskAudit:
     graph_refresh_count: int = 0
     graph_refresh_failure_count: int = 0
     graph_refresh_recovered_count: int = 0
+    # Which surface refreshed, by the event name that recorded it. The totals
+    # above cannot distinguish an amend chain that keeps landing from a graph
+    # rebuilt from scratch at every boundary, and the two are different health
+    # stories at identical counts.
+    graph_refresh_breakdown: dict[str, int] = field(default_factory=dict)
     capsule_expired_count: int = 0
     capsule_unique_exposed_count: int = 0
     capsule_exposure_count: int = 0
@@ -849,9 +880,1126 @@ def load_attribution(path: Path) -> tuple[list[dict], list[str]]:
     return rows, issues
 
 
+def _native_miniswe_paths(
+    task_dir: Path,
+) -> tuple[Path | None, Path | None, list[str]]:
+    """Locate the one trajectory/journal pair owned by a Mini-SWE trial."""
+    agent = task_dir / "agent"
+    trajectories = sorted(agent.glob("miniswe_trajectory.json"))
+    journals = sorted((agent / "gt-state").glob("*/events.jsonl"))
+    issues: list[str] = []
+    if len(trajectories) > 1:
+        issues.append(f"multiple Mini-SWE trajectories found ({len(trajectories)})")
+    if len(journals) > 1:
+        issues.append(f"multiple GT event journals found ({len(journals)})")
+    return (
+        trajectories[0] if len(trajectories) == 1 else None,
+        journals[0] if len(journals) == 1 else None,
+        issues,
+    )
+
+
+def _read_json_object(path: Path, label: str) -> tuple[dict, list[str]]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, [f"{label} unreadable: {type(exc).__name__}"]
+    if not isinstance(value, dict):
+        return {}, [f"{label} is not a JSON object"]
+    return value, []
+
+
+def _verify_native_blob(
+    state_dir: Path,
+    row: dict,
+    *,
+    path_key: str,
+    digest_key: str,
+    label: str,
+) -> list[str]:
+    relative = str(row.get(path_key) or "")
+    expected = str(row.get(digest_key) or "")
+    if not relative or not expected:
+        return [f"{label} event missing {path_key}/{digest_key}"]
+    path = state_dir / relative
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(state_dir.resolve())
+        payload = resolved.read_bytes()
+    except (OSError, ValueError):
+        return [f"{label} blob missing or outside state directory: {relative}"]
+    actual = hashlib.sha256(payload).hexdigest()
+    if actual != expected:
+        return [f"{label} blob hash mismatch: expected {expected}, got {actual}"]
+    return []
+
+
+def _native_plan_projection(rows: list[dict], state_dir: Path) -> tuple[list[dict], list[str]]:
+    """Verify task-message plan bytes independently of evidence-dose admission.
+
+    This is audit-only: it neither adds prompt bytes nor changes the delivery
+    budget. A matching response proves linkage, not semantic use of the plan.
+    """
+    synthetic: list[dict] = []
+    issues: list[str] = []
+    for index, row in enumerate(rows):
+        feature_id = {
+            "persistent_plan_delivered": "persistent_plan",
+            "plan_gate_directive_prepared": "plan_gate",
+        }.get(row.get("event"))
+        if feature_id is None:
+            continue
+        identity = str(row.get("rendered_sha256") or "")
+        synthetic.append({"event_type": "decision.committed", "payload": {
+            "decision": "delivered", "feature_id": feature_id,
+            "delivery_id": identity, "reason": "plan_rendered_without_verified_provider_join",
+        }})
+        failures = _verify_native_blob(state_dir, row, path_key="rendered_blob",
+                                       digest_key="rendered_sha256", label="persistent plan")
+        if failures:
+            issues.extend(failures)
+            continue
+        boundaries = [other for other in rows[index + 1:]
+                      if other.get("event") in {"provider_delivery", "provider_response"}][:2]
+        if (len(boundaries) != 2 or boundaries[0].get("event") != "provider_delivery"
+                or boundaries[1].get("event") != "provider_response"
+                or not boundaries[0].get("request_id")
+                or boundaries[0].get("request_id") != boundaries[1].get("request_id")
+                or boundaries[0].get("iteration") != boundaries[1].get("iteration")):
+            issues.append("persistent plan: immediate provider request/response pair missing")
+            continue
+        request_row, response_row = boundaries
+        failures = _verify_native_blob(state_dir, response_row, path_key="response_blob",
+                                        digest_key="response_sha256", label="plan provider response")
+        if failures:
+            issues.extend(failures)
+            continue
+        try:
+            rendered = (state_dir / row["rendered_blob"]).read_bytes()
+            if not rendered or len(rendered) != row.get("rendered_bytes"):
+                raise ValueError("plan rendering size mismatch")
+            text = rendered.decode("utf-8")
+            if not request_row.get("payload_sha256"):
+                raise ValueError("plan provider request digest missing")
+            request = load_provider_request(state_dir, request_row)
+            response = json.loads((state_dir / response_row["response_blob"]).read_text(encoding="utf-8"))
+            if not isinstance(response, dict):
+                raise ValueError("plan provider response object required")
+            messages = request.get("messages", [])
+            if not any(isinstance(message, dict) and message.get("role") == "user"
+                       and isinstance(message.get("content"), str)
+                       and text in message["content"] for message in messages):
+                raise ValueError("plan bytes absent from immediate task message")
+        except (OSError, KeyError, UnicodeError, ValueError, TypeError, AttributeError) as exc:
+            issues.append(f"persistent plan: {exc}")
+            continue
+        synthetic.extend([
+            {"event_type": "provider.request", "payload": {"delivery_ids": [identity]}},
+            {"event_type": "model.response", "payload": {"delivery_ids": [identity]}},
+        ])
+    return synthetic, issues
+
+
+def _native_feature_projection(rows: list[dict], *, plan_projection: list[dict] | None = None) -> dict[str, dict]:
+    """Project native events conservatively into the canonical feature identities.
+
+    Audit-owned delivery IDs are populated only after locating the sealed exact
+    bytes in the immediate provider request and joining its response. Direct
+    callers may pass raw event rows for projection-only unit tests.
+    """
+    synthetic: list[dict] = list(plan_projection or ())
+    for row in rows:
+        event = str(row.get("event") or "")
+        if event == "provider_delivery":
+            delivery_ids = row.get("_audited_delivery_ids", row.get("delivery_ids"))
+            synthetic.append({
+                "event_type": "provider.request",
+                "payload": {
+                    "iteration": int(row.get("iteration") or 0),
+                    "delivery_ids": list(delivery_ids or ()),
+                    "matches": list(row.get("matches") or ()),
+                },
+            })
+            continue
+        if event == "provider_response":
+            delivery_ids = row.get("_audited_delivery_ids", row.get("delivery_ids"))
+            synthetic.append({
+                "event_type": "model.response",
+                "payload": {
+                    "iteration": int(row.get("iteration") or 0),
+                    "delivery_ids": list(delivery_ids or ()),
+                },
+            })
+            continue
+        evidence_type = str(row.get("evidence_type") or row.get("kind") or "")
+        feature_id = feature_for_evidence(evidence_type)
+        if evidence_type == "context_contract":
+            feature_id = "obligations"
+        delivery_id = str(
+            row.get("delivery_identity") or row.get("payload_sha256") or ""
+        )
+        if event in {"evidence_delivery", "context_addition_delivery"} and feature_id:
+            synthetic.append({
+                "event_type": "decision.committed",
+                "payload": {
+                    "decision": "delivered",
+                    "feature_id": feature_id,
+                    "evidence_type": evidence_type,
+                    "delivery_id": delivery_id,
+                    "reason": "native_seal_without_provider_identity_join",
+                },
+            })
+        elif event == "delivery_refused" and feature_id:
+            reason = str(row.get("reason") or "delivery_refused")
+            # A duplicate/cap refusal after a successful seal is suppression,
+            # not evidence that the feature went dark.
+            synthetic.append({
+                "event_type": "feature.evaluated",
+                "payload": {
+                    "feature_id": feature_id,
+                    "eligible": reason not in {
+                        "duplicate_delivery_identity", "task_delivery_ceiling",
+                        "task_byte_ceiling",
+                    },
+                    "outcome": reason,
+                },
+            })
+    return summarize_features(synthetic)
+
+
+# --------------------------------------------------------------------------- #
+# delivery-content token matching (module level so scripts/gt_trajectory_eval
+# reuses the identical word-boundary policy; the per-task join below keeps
+# thin closures that delegate here)
+# --------------------------------------------------------------------------- #
+# Common code words: a bare identifier from this set is never evidence that
+# the agent consumed a delivery - ``handlers``, ``backend`` and ``service``
+# appear in every codebase, so word-boundary hits on them inflated the
+# consumption stats (finding 7).  The set is deliberately conservative:
+# language/runtime words plus common identifier nouns, singular and plural.
+GENERIC_DELIVERY_TOKENS = frozenset({
+    "python", "return", "import", "class", "function", "assert",
+    "pytest", "unittest", "self", "none", "true", "false", "result",
+    "handler", "handlers", "backend", "backends", "service", "services",
+    "manager", "managers", "util", "utils", "config", "configs",
+    "helper", "helpers", "wrapper", "wrappers", "factory", "factories",
+    "provider", "providers", "context", "contexts", "buffer", "buffers",
+    "parser", "parsers", "node", "nodes", "edge", "edges", "index",
+    "indexes", "query", "queries", "response", "responses", "request",
+    "requests", "error", "errors", "value", "values", "item", "items",
+    "entry", "entries", "field", "fields", "table", "tables", "file",
+    "files", "path", "paths", "name", "names", "type", "types", "data",
+    "test", "tests",
+})
+
+# A distinctive term is structural, not lexical: a path/path:line anchor, a
+# qualified dotted name, or a long verbatim payload snippet - never a bare
+# identifier.  File extensions recognized for the anchor rule; a dotted
+# token whose tail is NOT an extension is a qualified name (ClassName.method
+# is distinctive either way - the extension check only exists to spot the
+# generic-stem basename exception).
+_ANCHOR_LINE_RE = re.compile(r":\d+(?::\d+)?$")
+_ANCHOR_TOKEN_RE = re.compile(r"[\w./@-]+\.[A-Za-z]{1,6}\b(?::\d+){0,2}")
+_QUALIFIED_NAME_RE = re.compile(
+    r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b")
+_KNOWN_FILE_EXT_RE = re.compile(
+    r"\.(?:py|pyi|go|rs|js|jsx|ts|tsx|mjs|cjs|java|kt|kts|scala|c|h|cc|cpp|"
+    r"cxx|hh|hpp|rb|php|swift|sh|bash|zsh|fish|lua|pl|pm|ex|exs|erl|hrl|"
+    r"clj|cljs|hs|ml|mli|fs|fsx|cs|dart|r|jl|groovy|gradle|groovy|md|rst|"
+    r"txt|json|jsonl|toml|yaml|yml|cfg|ini|xml|html|css|scss|sql|proto|"
+    r"thrift|vue|svelte|patch|diff|lock|mod|sum|work|csv|tsv|cmake|mk|tf|"
+    r"hcl|nix|env|properties|plist|storyboard|dockerfile|gitignore|"
+    r"gitattributes|editorconfig)$",
+    re.IGNORECASE)
+
+# Snippet rule: a verbatim payload substring long enough to be non-generic.
+# Whole stripped lines and 4-8 word shingles >= 24 chars both qualify; an
+# agent quoting payload text verbatim is consumption a token set cannot see.
+_SNIPPET_MIN_CHARS = 24
+_SNIPPET_MIN_WORDS = 4
+_SNIPPET_SHINGLE_WORDS = (4, 5, 6, 7, 8)
+_SNIPPET_MAX = 200
+_WS_RE = re.compile(r"\s+")
+
+
+def delivery_content_tokens(identity: str, target: str,
+                            rendered: str | None = None) -> set[str]:
+    """Word-boundary candidate tokens identifying a delivery's content.
+
+    ``target`` plus its basename are always candidates; when the sealed
+    rendered text is available, path-shaped and long identifier tokens are
+    drawn from it.  Tokens shorter than 4 chars are dropped so a bare
+    ``monitor`` can never credit ``aiomonitor``.
+
+    This is the CANDIDATE set.  Consumption credit requires the stricter
+    ``delivery_distinctive_terms`` - a bare common identifier from this set
+    is not distinctive even when it word-matches an agent command.
+    """
+    tokens: set[str] = set()
+    if target:
+        tokens.add(target)
+        base = target.rsplit("/", 1)[-1]
+        if len(base) >= 4:
+            tokens.add(base)
+    if rendered:
+        for tok in re.findall(r"[\w./-]+\.[A-Za-z]{1,4}\b", rendered):
+            if "/" in tok or tok.startswith("."):
+                tokens.add(tok.strip())
+            else:
+                base = tok.rsplit("/", 1)[-1]
+                if len(base) >= 5:
+                    tokens.add(base)
+        for tok in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{6,}\b", rendered):
+            if tok.lower() not in GENERIC_DELIVERY_TOKENS:
+                tokens.add(tok)
+    return {t for t in tokens if len(t) >= 4}
+
+
+def is_distinctive_delivery_term(tok: str) -> bool:
+    """Structural distinctiveness for one consumption-match term.
+
+    Distinctive = (a) a path or ``path:line`` anchor, (b) a qualified/dotted
+    name, or (c) handled separately as a payload snippet.  A bare identifier
+    is never distinctive, and a bare basename with a generic stem
+    (``utils.py``, ``config.yaml``, ``index.js``) is a common code word in
+    disguise - also excluded.
+    """
+    if not tok or len(tok) < 4:
+        return False
+    if "/" in tok or "\\" in tok:
+        return True
+    if _ANCHOR_LINE_RE.search(tok):
+        return True
+    if "." not in tok:
+        return False
+    if _KNOWN_FILE_EXT_RE.search(tok):
+        stem = tok.rsplit(".", 1)[0].rsplit("/", 1)[-1].lower()
+        return stem not in GENERIC_DELIVERY_TOKENS
+    return bool(_QUALIFIED_NAME_RE.fullmatch(tok))
+
+
+def _payload_snippets(rendered: str | None) -> set[str]:
+    """Verbatim substrings of the payload long enough to be non-generic."""
+    out: set[str] = set()
+    if not rendered:
+        return out
+    for raw in rendered.splitlines():
+        line = _WS_RE.sub(" ", raw).strip()
+        words = line.split()
+        if len(line) >= _SNIPPET_MIN_CHARS and len(words) >= _SNIPPET_MIN_WORDS:
+            out.add(line)
+        for width in _SNIPPET_SHINGLE_WORDS:
+            for i in range(len(words) - width + 1):
+                shingle = " ".join(words[i:i + width])
+                if len(shingle) >= _SNIPPET_MIN_CHARS:
+                    out.add(shingle)
+    if len(out) > _SNIPPET_MAX:
+        out = set(sorted(out)[:_SNIPPET_MAX])
+    return out
+
+
+def delivery_distinctive_terms(identity: str, target: str,
+                               rendered: str | None = None,
+                               ) -> tuple[set[str], set[str]]:
+    """(distinctive_tokens, payload_snippets) for consumption credit.
+
+    The candidate set of ``delivery_content_tokens`` filtered by the
+    structural rule, plus qualified/dotted names and ``path:line`` anchors
+    the candidate extractor never produced, plus verbatim payload snippets.
+    Consumption credit requires a hit in one of the two returned sets.
+    """
+    candidates = delivery_content_tokens(identity, target, rendered)
+    if rendered:
+        candidates.update(_ANCHOR_TOKEN_RE.findall(rendered))
+        candidates.update(_QUALIFIED_NAME_RE.findall(rendered))
+    terms = {tok for tok in candidates if is_distinctive_delivery_term(tok)}
+    return terms, _payload_snippets(rendered)
+
+
+def token_word_hit(command: str, tokens) -> str:
+    """First token found inside ``command`` on word boundaries, else ""."""
+    for tok in sorted(tokens, key=lambda t: (-len(t), t)):
+        if re.search(r"(?<![\w])" + re.escape(tok) + r"(?![\w])", command):
+            return tok
+    return ""
+
+
+def distinctive_term_hit(command: str, terms, snippets) -> str:
+    """First distinctive term found in ``command``, else "".
+
+    Anchors and qualified names match on word boundaries; payload snippets
+    match as verbatim substrings after whitespace normalization (longest
+    first, so the reported match is the strongest evidence).
+    """
+    hit = token_word_hit(command, terms)
+    if hit:
+        return hit
+    norm = _WS_RE.sub(" ", command or "")
+    for snip in sorted(snippets, key=lambda s: (-len(s), s)):
+        if snip and snip in norm:
+            return snip
+    return ""
+
+
+# The journal names for one graph refresh, and for one that did not land.
+# `gt_engine/miniswe_integration.py` is the only writer: `graph_publication`
+# from `_record_graph_publication`, `graph_boundary_amend`/`graph_recovery`
+# from `_adopt_graph_receipt`, `graph_boundary_amend_refused` from the amend
+# boundary and `graph_recovery_failed` from `_recovery_build_inline`. Adding a
+# new one is a one-line change here; leaving it out only understates, never
+# invents. Deferrals (`graph_recovery_deferred`, `graph_refresh_deferred`) are
+# deliberately absent: a refresh that was postponed neither succeeded nor
+# failed, and counting it as either would misreport backpressure as breakage.
+_GRAPH_REFRESH_EVENTS = frozenset(
+    {"graph_publication", "graph_boundary_amend", "graph_recovery"}
+)
+_GRAPH_REFRESH_FAILURE_EVENTS = frozenset(
+    {"graph_boundary_amend_refused", "graph_recovery_failed"}
+)
+
+
+def _note_refresh(audit: TaskAudit, event_name: str) -> None:
+    """Record one refresh-ish event under the name that carried it."""
+    audit.graph_refresh_breakdown[event_name] = (
+        audit.graph_refresh_breakdown.get(event_name, 0) + 1
+    )
+
+
+def _audit_native_miniswe_task(
+    task_dir: Path,
+    rj: dict,
+    trajectory_path: Path,
+    journal_path: Path | None,
+    discovery_issues: list[str],
+) -> TaskAudit:
+    name = _canonical_task_name(rj.get("task_name"), task_dir)
+    a = TaskAudit(task_name=name, trial_dir=task_dir.name)
+    try:
+        a.reward = float(rj["verifier_result"]["rewards"]["reward"])
+    except (KeyError, TypeError, ValueError):
+        a.reward = None
+    exc = rj.get("exception_info")
+    if exc:
+        a.exception_info = json.dumps(exc, sort_keys=True)[:400]
+
+    trajectory, trajectory_issues = _read_json_object(
+        trajectory_path, "agent/miniswe_trajectory.json"
+    )
+    a.attribution_issues.extend(discovery_issues + trajectory_issues)
+    messages = trajectory.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+        a.attribution_issues.append("Mini-SWE trajectory messages missing")
+    elif any(not isinstance(message, dict) for message in messages):
+        a.attribution_issues.append("Mini-SWE trajectory messages contain non-objects")
+        messages = [message for message in messages if isinstance(message, dict)]
+    info = trajectory.get("info")
+    if not isinstance(info, dict):
+        a.attribution_issues.append("Mini-SWE trajectory info is not an object")
+        info = {}
+    model_stats = info.get("model_stats")
+    if not isinstance(model_stats, dict):
+        a.attribution_issues.append(
+            "Mini-SWE trajectory info.model_stats is not an object"
+        )
+        model_stats = {}
+    api_calls = model_stats.get("api_calls")
+    if not isinstance(api_calls, int) or isinstance(api_calls, bool) or api_calls < 0:
+        a.attribution_issues.append(
+            "Mini-SWE trajectory info.model_stats.api_calls is not a nonnegative integer"
+        )
+        api_calls = 0
+    a.iterations = api_calls
+    exit_status = info.get("exit_status", trajectory.get("exit_status"))
+    if ("exit_status" in info and "exit_status" in trajectory
+            and info["exit_status"] != trajectory["exit_status"]):
+        a.attribution_issues.append("Mini-SWE trajectory terminal fields disagree")
+    if not isinstance(exit_status, str):
+        a.attribution_issues.append(
+            "Mini-SWE trajectory exit_status is not a string"
+        )
+        exit_status = ""
+    a.stop_reason = exit_status or None
+    if exc and isinstance(exc, dict) and "Timeout" in str(exc.get("exception_type")):
+        a.stop_reason = "external_timeout"
+    a.tool_results = sum(1 for message in messages if message.get("role") == "tool")
+    tool_errors = 0
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        extra = message.get("extra", {})
+        if not isinstance(extra, dict):
+            a.attribution_issues.append("Mini-SWE tool message extra is not an object")
+            continue
+        returncode = extra.get("returncode", 0)
+        if not isinstance(returncode, int) or isinstance(returncode, bool):
+            a.attribution_issues.append(
+                "Mini-SWE tool message returncode is not an integer"
+            )
+        elif returncode != 0:
+            tool_errors += 1
+    a.tool_errors = tool_errors
+    a.code_task = any(
+        message.get("role") == "assistant" and message.get("tool_calls")
+        for message in messages
+    )
+
+    rows: list[dict] = []
+    if journal_path is None:
+        a.attribution_issues.append("missing agent/gt-state/*/events.jsonl")
+    else:
+        verification = verify_event_journal(journal_path)
+        if not verification.valid:
+            a.attribution_issues.extend(
+                f"GT event journal: {issue}" for issue in verification.issues
+            )
+        else:
+            rows = list(read_verified_events(journal_path))
+        a.attribution_present = True
+        a.attribution_rows = verification.event_count
+
+    for row in rows:
+        if row.get("event") == "execution_transport" and row.get("synthetic_transport") is True:
+            a.synthetic_transport = True
+        iteration = row.get("iteration", 0)
+        if (
+            not isinstance(iteration, int)
+            or isinstance(iteration, bool)
+            or iteration < 0
+        ):
+            a.attribution_issues.append(
+                f"GT event {row.get('sequence')}: iteration is not a nonnegative integer"
+            )
+            row["iteration"] = 0
+        if row.get("event") in {
+            "evidence_delivery", "context_addition_delivery",
+        }:
+            rendered_bytes = row.get("rendered_bytes")
+            if (
+                not isinstance(rendered_bytes, int)
+                or isinstance(rendered_bytes, bool)
+                or rendered_bytes < 0
+            ):
+                a.attribution_issues.append(
+                    f"GT event {row.get('sequence')}: rendered_bytes is not a nonnegative integer"
+                )
+                row["rendered_bytes"] = 0
+
+    counts = Counter(str(row.get("event") or "") for row in rows)
+    # COUNT THE EVENTS THE ENGINE ACTUALLY WRITES.
+    #
+    # This read `counts["graph_refreshed"]` / `counts["graph_refresh_failed"]`,
+    # the names the pre-adapter engine used (they survive only in the recorded
+    # HAR-81 renderer sources). Nothing has emitted either since: a refresh is
+    # journaled by `miniswe_integration._record_graph_publication` as
+    # `graph_publication`, and by `_adopt_graph_receipt` as
+    # `graph_boundary_amend` or `graph_recovery`; a failed one is
+    # `graph_boundary_amend_refused` or `graph_recovery_failed`. So every
+    # attestation reported `graph_refresh_count 0` and
+    # `graph_refresh_failure_count 0` no matter what the graph did - the shape
+    # HANDOFF-2026-09-06 recorded as "all literally true".
+    #
+    # An adopted amend writes its own row AND the `graph_publication` that
+    # follows adoption, so the total counts the adoption and the publication
+    # separately; the breakdown below is what lets a reader take them apart,
+    # and `graph_surface_counts["published_revisions"]` (computed further down)
+    # still reports distinct published artifacts.
+    for name in _GRAPH_REFRESH_EVENTS | _GRAPH_REFRESH_FAILURE_EVENTS:
+        if counts[name]:
+            a.graph_refresh_breakdown[name] = counts[name]
+    a.graph_refresh_count = sum(counts[name] for name in _GRAPH_REFRESH_EVENTS)
+    a.graph_refresh_failure_count = sum(
+        counts[name] for name in _GRAPH_REFRESH_FAILURE_EVENTS
+    )
+    # The native journal records the same contract lifecycle the bridge
+    # attribution stream does, under its own event names. Counting only the
+    # bridge file left predicate_compiled_count/observed_count at 0 for every
+    # Mini-SWE trial even when the channel was armed and producing receipts.
+    a.predicate_compiled_count += counts["contract.predicate_compiled"]
+    for row in rows:
+        if row.get("event") != "predicate_receipt_recorded":
+            continue
+        a.predicate_observed_count += 1
+        kind = str(row.get("evidence_kind") or "unknown")
+        a.predicate_observed_kinds[kind] = (
+            a.predicate_observed_kinds.get(kind, 0) + 1
+        )
+        if not row.get("semantic") or str(row.get("status")) != "GREEN":
+            a.predicate_invalid_receipt_count += 1
+    # The miniswe path records graph availability as `graph_publication` rows in
+    # the event journal — there is no bridge-path surface/projection receipt in
+    # a Mini-SWE trial, so attribution-file absence must not read as "no graph".
+    publications = [row for row in rows if row.get("event") == "graph_publication"]
+    if publications:
+        a.graph_available = True
+        a.graph_surface_counts = {
+            "published_revisions": len(
+                {str(row.get("artifact_sha256") or "")
+                 for row in publications} - {""}
+            )
+        }
+    a.bash_observation_count = counts["semantic_observation"]
+    a.gt_deliveries = counts["evidence_delivery"] + counts["context_addition_delivery"]
+    a.gt_overhead_chars = sum(
+        int(row.get("rendered_bytes") or 0)
+        for row in rows
+        if row.get("event") in {"evidence_delivery", "context_addition_delivery"}
+    )
+    a.gt_delivery_kinds = dict(sorted(Counter(
+        str(row.get("evidence_type") or row.get("kind") or "unknown")
+        for row in rows
+        if row.get("event") in {"evidence_delivery", "context_addition_delivery"}
+    ).items()))
+    a.provider_receipts_required = bool(counts["provider_delivery"])
+
+    state_dir = journal_path.parent if journal_path is not None else task_dir
+    # A delivery occurrence is (identity, boundary), not identity alone. The
+    # same sealed payload may legitimately be delivered again at a later
+    # decision boundary - e.g. a periodic advisory re-emitted under a new
+    # dedup key after the producer's dedup state was reset across graph
+    # recovery (run 34801009507 shipped identical churn_steer bytes at
+    # iterations 27 and 68, each joined to the request one iteration later).
+    # What stays forbidden is the same identity twice into ONE boundary - the
+    # runtime's per-observed-iteration uniqueness - and, for the prompt lane,
+    # the run-scoped at-most-once guarantee its dedup set enforces.
+    delivery_material: dict[str, dict[int, tuple[str, int, int]]] = {}
+    prompt_delivered: set[str] = set()
+    for row in rows:
+        if row.get("event") not in {
+            "evidence_delivery", "context_addition_delivery",
+        }:
+            continue
+        identity = str(row.get("delivery_identity") or "")
+        issues = _verify_native_blob(
+            state_dir, row, path_key="delivery_blob",
+            digest_key="delivery_identity", label="GT delivery",
+        )
+        a.attribution_issues.extend(issues)
+        if issues:
+            continue
+        lane = str(row.get("lane") or "sealed")
+        boundary = int(row.get("iteration") or 0)
+        occurrences = delivery_material.setdefault(identity, {})
+        if boundary in occurrences or (
+            lane == "prompt" and identity in prompt_delivered
+        ):
+            a.attribution_issues.append(
+                f"duplicate GT delivery identity: {identity}"
+            )
+            continue
+        try:
+            occurrences[boundary] = (
+                (state_dir / str(row["delivery_blob"])).read_text(encoding="utf-8"),
+                int(row.get("sequence") or 0),
+                boundary,
+            )
+            if lane == "prompt":
+                prompt_delivered.add(identity)
+        except (OSError, KeyError, UnicodeError):
+            a.attribution_issues.append(
+                f"GT delivery blob is not valid UTF-8: {identity}"
+            )
+
+    provider_requests: dict[str, dict] = {}
+    provider_responses: dict[str, dict] = {}
+    provider_failures: dict[str, dict] = {}
+    audited_request_ids: dict[str, set[str]] = {}
+    for row in rows:
+        event = row.get("event")
+        request_id = str(row.get("request_id") or "")
+        if event == "provider_delivery":
+            if request_id in provider_requests:
+                a.attribution_issues.append(
+                    f"duplicate provider request_id: {request_id}"
+                )
+            provider_requests[request_id] = row
+            raw_delivery_ids = row.get("delivery_ids")
+            if raw_delivery_ids is None:
+                raw_delivery_ids = []
+            elif not isinstance(raw_delivery_ids, list):
+                a.attribution_issues.append(
+                    f"provider request {request_id}: delivery_ids is not a list"
+                )
+                raw_delivery_ids = []
+                row["delivery_ids"] = []
+            delivery_ids = {str(value) for value in raw_delivery_ids}
+            match_ids: set[str] = set()
+            if row.get("unmatched_delivery_ids"):
+                raw_unmatched = row.get("unmatched_delivery_ids")
+                if not isinstance(raw_unmatched, list):
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: unmatched_delivery_ids is not a list"
+                    )
+                    raw_unmatched = []
+                a.attribution_issues.append(
+                    f"provider request {request_id}: admitted delivery bytes "
+                    f"not present in final messages: "
+                    f"{raw_unmatched}"
+                )
+            raw_matches = row.get("matches")
+            if raw_matches is None:
+                raw_matches = []
+            elif not isinstance(raw_matches, list):
+                a.attribution_issues.append(
+                    f"provider request {request_id}: matches is not a list"
+                )
+                raw_matches = []
+                row["matches"] = []
+            for match in raw_matches:
+                if not isinstance(match, dict):
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: malformed delivery match"
+                    )
+                    continue
+                if match.get("delivery_id") != match.get("rendered_sha256"):
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: delivery match hash mismatch"
+                    )
+                match_ids.add(str(match.get("delivery_id") or ""))
+            if delivery_ids != match_ids:
+                a.attribution_issues.append(
+                    f"provider request {request_id}: delivery_ids/matches mismatch"
+                )
+            if row.get("request_blob"):
+                a.attribution_issues.extend(_verify_native_blob(
+                    state_dir, row, path_key="request_blob",
+                    digest_key="payload_sha256", label="provider request",
+                ))
+            request: dict = {}
+            request_messages: list = []
+            try:
+                parsed_request = load_provider_request(state_dir, row)
+                if not isinstance(parsed_request, dict):
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: provider request JSON object required"
+                    )
+                else:
+                    request = parsed_request
+                raw_messages = request.get("messages")
+                if not isinstance(raw_messages, list):
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: messages is not a list"
+                    )
+                elif any(not isinstance(message, dict) for message in raw_messages):
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: messages contain non-objects"
+                    )
+                else:
+                    request_messages = raw_messages
+                visible = json.dumps(
+                    request_messages, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                if hashlib.sha256(visible).hexdigest() != row.get("model_visible_sha256"):
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: model-visible hash mismatch"
+                    )
+            except (OSError, KeyError, UnicodeError, ValueError) as exc:
+                if str(exc) == "provider_request_object_required":
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: provider request JSON object required"
+                    )
+                else:
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: unreadable JSON "
+                        f"({type(exc).__name__})"
+                    )
+
+            def contains_text(value: object, needle: str) -> bool:
+                if isinstance(value, str):
+                    return needle in value
+                if isinstance(value, dict):
+                    return any(contains_text(item, needle) for item in value.values())
+                if isinstance(value, list):
+                    return any(contains_text(item, needle) for item in value)
+                return False
+
+            audited_ids: set[str] = set()
+            for delivery_id in sorted(delivery_ids & match_ids):
+                occurrences = delivery_material.get(delivery_id)
+                if not occurrences:
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: no sealed bytes for delivery {delivery_id}"
+                    )
+                    continue
+                request_sequence = int(row.get("sequence") or 0)
+                request_iteration = int(row.get("iteration") or 0)
+                # Each occurrence joins the provider boundary one iteration
+                # after its own delivery: a redelivery at iteration 68 joins
+                # request 69 while the earlier occurrence stays joined to
+                # request 28. material is None when no occurrence immediately
+                # precedes this request - the same not-joined verdict the
+                # identity-keyed map produced for a stale or foreign claim.
+                material = occurrences.get(request_iteration - 1)
+                intervening_provider_boundary = material is not None and any(
+                    other.get("event") in {"provider_delivery", "provider_response"}
+                    and material[1] < int(other.get("sequence") or 0)
+                    < request_sequence
+                    for other in rows
+                )
+                if (
+                    material is None
+                    or request_sequence <= material[1]
+                    or intervening_provider_boundary
+                ):
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: delivery is not joined to its immediate boundary: {delivery_id}"
+                    )
+                elif not contains_text(request_messages, material[0]):
+                    a.attribution_issues.append(
+                        f"provider request {request_id}: delivery bytes absent from final messages: {delivery_id}"
+                    )
+                else:
+                    audited_ids.add(delivery_id)
+            audited_request_ids[request_id] = audited_ids
+        elif event == "provider_response":
+            if request_id in provider_responses:
+                a.attribution_issues.append(
+                    f"duplicate provider response request_id: {request_id}"
+                )
+            provider_responses[request_id] = row
+            raw_response_ids = row.get("delivery_ids")
+            if raw_response_ids is not None and not isinstance(raw_response_ids, list):
+                a.attribution_issues.append(
+                    f"provider response {request_id}: delivery_ids is not a list"
+                )
+                row["delivery_ids"] = []
+            a.attribution_issues.extend(_verify_native_blob(
+                state_dir, row, path_key="response_blob",
+                digest_key="response_sha256", label="provider response",
+            ))
+            try:
+                response_value = json.loads(
+                    (state_dir / str(row["response_blob"])).read_text(encoding="utf-8")
+                )
+                if not isinstance(response_value, dict):
+                    a.attribution_issues.append(
+                        f"provider response {request_id}: provider response JSON object required"
+                    )
+            except (OSError, KeyError, UnicodeError, json.JSONDecodeError) as exc:
+                a.attribution_issues.append(
+                    f"provider response {request_id}: unreadable JSON ({type(exc).__name__})"
+                )
+            usage = row.get("usage")
+            if not isinstance(usage, dict):
+                a.attribution_issues.append(
+                    f"provider response {request_id}: usage is not an object"
+                )
+                continue
+            required_usage = ("prompt_tokens", "completion_tokens")
+            if any(
+                not isinstance(usage.get(key), int)
+                or isinstance(usage.get(key), bool)
+                or usage[key] < 0
+                for key in required_usage
+            ):
+                a.attribution_issues.append(
+                    f"provider response {request_id}: incomplete token usage"
+                )
+                continue
+            a.in_tokens = (a.in_tokens or 0) + usage["prompt_tokens"]
+            a.out_tokens = (a.out_tokens or 0) + usage["completion_tokens"]
+            details = usage.get("prompt_tokens_details", {})
+            if not isinstance(details, dict):
+                a.attribution_issues.append(
+                    f"provider response {request_id}: prompt_tokens_details is not an object"
+                )
+                details = {}
+            cached_tokens = details.get("cached_tokens", 0)
+            if (
+                not isinstance(cached_tokens, int)
+                or isinstance(cached_tokens, bool)
+                or cached_tokens < 0
+                or cached_tokens > usage["prompt_tokens"]
+            ):
+                a.attribution_issues.append(
+                    f"provider response {request_id}: cached_tokens is invalid"
+                )
+            else:
+                a.cache_read = (a.cache_read or 0) + cached_tokens
+        elif event == "provider_failure":
+            if request_id in provider_failures:
+                a.attribution_issues.append(
+                    f"duplicate provider failure request_id: {request_id}"
+                )
+            provider_failures[request_id] = row
+    # A request is closed by a response OR by a typed provider_failure (e.g.
+    # the FormatError on run 34656860834 request-83, after which the transport
+    # retried inside the same agent call). Only requests with neither event
+    # are missing.
+    missing_responses = sorted(
+        set(provider_requests) - set(provider_responses) - set(provider_failures)
+    )
+    extra_responses = sorted(set(provider_responses) - set(provider_requests))
+    extra_failures = sorted(set(provider_failures) - set(provider_requests))
+    if missing_responses:
+        a.attribution_issues.append(
+            f"provider request(s) without response: {missing_responses}"
+        )
+    if extra_responses:
+        a.attribution_issues.append(
+            f"provider response(s) without request: {extra_responses}"
+        )
+    if extra_failures:
+        a.attribution_issues.append(
+            f"provider failure(s) without request: {extra_failures}"
+        )
+    ordered_request_iterations = [
+        int(row.get("iteration") or 0)
+        for row in sorted(
+            provider_requests.values(), key=lambda item: int(item.get("sequence") or 0)
+        )
+    ]
+    if ordered_request_iterations != list(range(1, len(provider_requests) + 1)):
+        a.attribution_issues.append(
+            "provider request iterations are not unique and strictly sequential"
+        )
+    for request_id in sorted(set(provider_requests) & set(provider_responses)):
+        requested_ids = {
+            str(value)
+            for value in provider_requests[request_id].get("delivery_ids") or ()
+        }
+        response_ids = {
+            str(value)
+            for value in provider_responses[request_id].get("delivery_ids") or ()
+        }
+        if requested_ids != response_ids:
+            a.attribution_issues.append(
+                f"provider response {request_id}: delivery identity mismatch"
+            )
+        request_row = provider_requests[request_id]
+        response_row = provider_responses[request_id]
+        response_is_immediate = (
+            int(response_row.get("sequence") or 0)
+            > int(request_row.get("sequence") or 0)
+            and int(response_row.get("iteration") or 0)
+            == int(request_row.get("iteration") or 0)
+            and not any(
+                other.get("event") in {"provider_delivery", "provider_response"}
+                and int(request_row.get("sequence") or 0)
+                < int(other.get("sequence") or 0)
+                < int(response_row.get("sequence") or 0)
+                for other in rows
+            )
+        )
+        if not response_is_immediate:
+            a.attribution_issues.append(
+                f"provider response {request_id}: not the immediate matching boundary"
+            )
+        verified = (
+            audited_request_ids.get(request_id, set()) & response_ids
+            if response_is_immediate else set()
+        )
+        provider_requests[request_id]["_audited_delivery_ids"] = sorted(verified)
+        provider_responses[request_id]["_audited_delivery_ids"] = sorted(verified)
+
+    # --- per-delivery consumption verdicts (helpfulness audit) --------------
+    # Chain per delivery: emitted (row exists) → SENT (admitted into a
+    # provider request) → VISIBLE (sealed bytes verified inside the
+    # model-visible messages) → SERVED (the provider returned a response for
+    # that request) → AGENT-DID (the response's own assistant turn emitted an
+    # action) → CONSUMED (that action, or the two turns after it, references
+    # what was delivered). prior_touches is the fairness counter — deliveries
+    # whose target the agent had already touched cannot claim causality.
+    response_by_pid: dict[str, tuple[int, dict]] = {}
+    assistant_positions = [
+        i for i, m in enumerate(messages)
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    ]
+    for pos, i in enumerate(assistant_positions):
+        resp = messages[i].get("extra", {}).get("response")
+        if isinstance(resp, dict) and resp.get("id"):
+            response_by_pid[str(resp["id"])] = (pos, messages[i])
+
+    def _action_commands(message: dict) -> list[str]:
+        out: list[str] = []
+        for call in message.get("tool_calls") or ():
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function")
+            if not isinstance(fn, dict):
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                out.append(args)
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            out.append(content)
+        return out
+
+    def _delivery_terms(identity: str, target: str,
+                        ) -> tuple[set[str], set[str]]:
+        occurrences = delivery_material.get(identity)
+        # Every occurrence of one identity seals the same bytes - the
+        # identity is the payload's own digest - so any occurrence's
+        # rendered text is the same document.
+        rendered = (
+            next(iter(occurrences.values()))[0] if occurrences else None
+        )
+        return delivery_distinctive_terms(identity, target, rendered)
+
+    def _token_hit(command: str, tokens: frozenset[str] | set[str]) -> str:
+        # Word-boundary match: a bare "monitor" must not credit "aiomonitor".
+        return token_word_hit(command, tokens)
+
+    def _distinctive_hit(command: str, terms: set[str],
+                         snippets: set[str]) -> str:
+        # Consumption credit needs an anchor/qualified term or a verbatim
+        # payload snippet - never a bare common identifier.
+        return distinctive_term_hit(command, terms, snippets)
+
+    for row in rows:
+        if row.get("event") not in {
+            "evidence_delivery", "context_addition_delivery",
+        }:
+            continue
+        delivery_id = str(row.get("delivery_identity") or "")
+        request_id = str(row.get("request_id") or "")
+        target = str(row.get("target") or "")
+        verdict = {
+            "delivery_id": delivery_id,
+            "evidence_type": str(row.get("evidence_type") or row.get("kind") or ""),
+            "feature_id": str(row.get("feature_id") or ""),
+            "iteration": int(row.get("iteration") or 0),
+            "request_id": request_id,
+            "target": target,
+            "sent": False,
+            "visible": False,
+            "served": False,
+            "agent_did": False,
+            "consumed": False,
+            "match": "",
+            "prior_touches": 0,
+            "verdict": "not_sent",
+        }
+        request_row = provider_requests.get(request_id)
+        if request_row is not None:
+            request_delivery_ids = {
+                str(v) for v in request_row.get("delivery_ids") or ()
+            }
+            verdict["sent"] = delivery_id in request_delivery_ids
+            verdict["visible"] = (
+                delivery_id in audited_request_ids.get(request_id, set())
+            )
+        response_row = provider_responses.get(request_id)
+        terms, snippets = _delivery_terms(delivery_id, target)
+        if response_row is not None:
+            verdict["served"] = True
+            pid = str(response_row.get("provider_response_id") or "")
+            located = response_by_pid.get(pid)
+            if located is not None:
+                pos, _msg = located
+                verdict["agent_did"] = True
+                if target:
+                    touch_tokens = {target, target.rsplit("/", 1)[-1]}
+                    for earlier in assistant_positions[:pos]:
+                        for cmd in _action_commands(messages[earlier]):
+                            if _token_hit(cmd, touch_tokens):
+                                verdict["prior_touches"] += 1
+                                break
+                window = assistant_positions[pos:pos + 3]
+                matched = ""
+                for wi in window:
+                    for cmd in _action_commands(messages[wi]):
+                        hit = _distinctive_hit(cmd, terms, snippets)
+                        if hit:
+                            matched = hit
+                            break
+                    if matched:
+                        break
+                verdict["consumed"] = bool(matched)
+                verdict["match"] = matched
+                verdict["verdict"] = (
+                    "consumed" if matched else "seen_no_action_on_content"
+                )
+            else:
+                verdict["verdict"] = "served_response_not_in_trajectory"
+        elif verdict["sent"] or verdict["visible"]:
+            verdict["verdict"] = (
+                "delivered_not_served" if verdict["sent"] else "not_served"
+            )
+        a.delivery_consumption.append(verdict)
+
+    consumption_counts = Counter(v["verdict"] for v in a.delivery_consumption)
+    a.delivery_consumption_summary = dict(sorted(consumption_counts.items()))
+    a.delivery_consumption_summary["total"] = len(a.delivery_consumption)
+    a.delivery_consumption_summary["consumed_fair"] = sum(
+        1
+        for v in a.delivery_consumption
+        if v["verdict"] == "consumed" and v["prior_touches"] == 0
+    )
+
+    plan_projection, plan_issues = _native_plan_projection(rows, state_dir)
+    a.attribution_issues.extend(plan_issues)
+    a.feature_attribution = _native_feature_projection(rows, plan_projection=plan_projection)
+    bootstrap_calls = 0
+    report_path = trajectory_path.parent / "miniswe_report.json"
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            gt = report.get("gt", {})
+            if not isinstance(gt, dict):
+                raise ValueError("GT state is not an object")
+            for field in ("select_catalog_bootstrap_calls", "persistent_plan_bootstrap_calls"):
+                count = gt.get(field, 0)
+                if type(count) is not int or count < 0:
+                    raise ValueError(f"{field} is not a nonnegative integer")
+                bootstrap_calls += count
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            a.attribution_issues.append(f"bootstrap accounting report invalid: {exc}")
+    if a.iterations + bootstrap_calls != len(provider_requests):
+        a.attribution_issues.append(
+            f"trajectory api_calls {a.iterations} + bootstrap calls {bootstrap_calls} != provider requests "
+            f"{len(provider_requests)}"
+        )
+
+    if a.exception_info:
+        a.verdict_reasons.append(
+            f"harness exception_info present: {a.exception_info}"
+        )
+    a.verdict_reasons.extend(a.attribution_issues)
+    attribution_red = sorted(
+        feature_id for feature_id, item in a.feature_attribution.items()
+        if item.get("status") in {
+            "TRIGGERED_DARK", "TELEMETRY_FAULT", "DELIVERED_UNEXPOSED", "EXPOSED",
+        }
+    )
+    if attribution_red:
+        a.verdict_reasons.append(
+            "attribution RED feature(s): " + ", ".join(attribution_red)
+        )
+    if not a.stop_reason:
+        a.verdict_reasons.append("Mini-SWE trajectory has no terminal exit_status")
+    terminal_failure = bool(
+        a.stop_reason and a.stop_reason.casefold() != "submitted"
+    )
+    if terminal_failure:
+        a.verdict_reasons.append(
+            f"Mini-SWE failure terminal: {a.stop_reason}"
+        )
+    if a.verdict_reasons:
+        a.verdict = "RED" if (
+            a.exception_info or a.attribution_issues or attribution_red
+            or terminal_failure
+        ) else "YELLOW"
+    elif a.gt_deliveries:
+        a.verdict = "GREEN-delivered"
+    else:
+        a.verdict = "GREEN-quiet" if a.code_task else "GREEN-dormant"
+        a.verdict_reasons.append(
+            "zero native GT deliveries observed (correct-or-quiet)"
+        )
+    return a
+
+
 def audit_task(task_dir: Path) -> TaskAudit:
     rj = _load_result_json(task_dir)
-    name = rj.get("task_name") or task_dir.name.split("__", 1)[0]
+    trajectory_path, journal_path, native_issues = _native_miniswe_paths(task_dir)
+    if trajectory_path is not None:
+        return _audit_native_miniswe_task(
+            task_dir, rj, trajectory_path, journal_path, native_issues
+        )
+    name = _canonical_task_name(rj.get("task_name"), task_dir)
     a = TaskAudit(task_name=name, trial_dir=task_dir.name)
 
     # result.json facts
@@ -997,11 +2145,14 @@ def audit_task(task_dir: Path) -> TaskAudit:
                     a.task_start_localization_response_iteration = int(
                         response.get("payload", {}).get("iteration") or 0
                     )
-        a.task_start_localization_eligible = any(
-            row.get("event_type") == "graph.evidence_need"
-            and row.get("boundary") == "task_start"
-            and int(row.get("payload", {}).get("ranked_count") or 0) > 0
-            for row in attribution_rows
+        a.task_start_localization_eligible = (
+            task_start_localization is not None
+            or any(
+                row.get("event_type") == "graph.evidence_need"
+                and row.get("boundary") == "task_start"
+                and int(row.get("payload", {}).get("ranked_count") or 0) > 0
+                for row in attribution_rows
+            )
         )
         replay = build_iteration_replay(attribution_rows)
         a.replay_iteration_count = int(replay["iteration_count"])
@@ -1152,10 +2303,13 @@ def audit_task(task_dir: Path) -> TaskAudit:
                     a.predicate_invalid_receipt_count += 1
             elif event_type == "graph.context_refreshed":
                 a.graph_refresh_count += 1
+                _note_refresh(a, event_type)
             elif event_type == "graph.context_refresh_failed":
                 a.graph_refresh_failure_count += 1
+                _note_refresh(a, event_type)
             elif event_type == "graph.context_refresh_recovered":
                 a.graph_refresh_recovered_count += 1
+                _note_refresh(a, event_type)
             elif event_type == "graph.evidence_need":
                 a.graph_evidence_need_count += 1
             elif event_type == "graph.evidence_ranked":
@@ -1612,19 +2766,20 @@ def audit_task(task_dir: Path) -> TaskAudit:
 # run-dir walking
 # --------------------------------------------------------------------------- #
 def find_task_dirs(run_dir: Path) -> list[Path]:
-    """Task dirs = dirs containing result.json AND agent/. Handles one level
-    of nesting (the downloaded artifact often wraps the run dir once)."""
-    def is_task(d: Path) -> bool:
-        return (d / "result.json").is_file() and (d / "agent").is_dir()
+    """Return every task directory in an artifact download tree.
 
-    found = sorted(d for d in run_dir.iterdir() if d.is_dir() and is_task(d))
-    if found:
-        return found
-    for sub in sorted(d for d in run_dir.iterdir() if d.is_dir()):
-        nested = sorted(d for d in sub.iterdir() if d.is_dir() and is_task(d))
-        if nested:
-            return nested
-    return []
+    ``actions/download-artifact`` with ``merge-multiple: true`` preserves each
+    task artifact's wrapper directory.  Returning after the first wrapper
+    silently reduced a 20-task run to one audited task.  Discover from the
+    task's two required anchors at any nesting depth and sort by relative path
+    so the census is exhaustive and deterministic.
+    """
+    found = {
+        result.parent
+        for result in run_dir.rglob("result.json")
+        if (result.parent / "agent").is_dir()
+    }
+    return sorted(found, key=lambda path: path.relative_to(run_dir).as_posix())
 
 
 def audit_run(run_dir: Path) -> list[TaskAudit]:
@@ -1632,6 +2787,31 @@ def audit_run(run_dir: Path) -> list[TaskAudit]:
     if not dirs:
         raise SystemExit(f"gt_audit: no task dirs (result.json + agent/) under {run_dir}")
     return [audit_task(d) for d in dirs]  # find_task_dirs is sorted -> deterministic
+
+
+def artifact_corpus_sha256(run_dir: Path) -> str:
+    """Digest every downloaded task artifact by relative identity and content."""
+    rows = []
+    for path in sorted(
+        (item for item in run_dir.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(run_dir).as_posix(),
+    ):
+        content = path.read_bytes()
+        rows.append(
+            {
+                "path": path.relative_to(run_dir).as_posix(),
+                "bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    encoded = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def audit_digest_sha256(payload: dict) -> str:
+    body = {key: value for key, value in payload.items() if key != "audit_digest_sha256"}
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -1668,6 +2848,11 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
             out.append(f"  - {r}")
         if a.gt_delivery_kinds:
             out.append(f"  - GT delivery kinds: {a.gt_delivery_kinds}")
+        if a.delivery_consumption_summary:
+            out.append(
+                "  - GT delivery consumption: "
+                f"{a.delivery_consumption_summary}"
+            )
         if a.gt_overhead_chars:
             src = "sealed (ledger)" if a.ledger_present else "observable"
             out.append(f"  - GT overhead {src}: {a.gt_overhead_chars} chars")
@@ -1752,7 +2937,7 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
         for feature_id in audit.feature_attribution
     })
     if feature_ids:
-        out.append("\n17-FEATURE ATTRIBUTION")
+        out.append(f"\n{len(feature_ids)}-FEATURE ATTRIBUTION")
         out.append("=" * 104)
         out.append(
             _fmt("feature", 25) + _fmt("kind", 7) + _fmt("W", 5)
@@ -1838,6 +3023,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="baseline run dir - adds the paired no-harm table")
     ap.add_argument("--json", dest="json_out", default=None,
                     help="write the full machine-readable audit to this path")
+    ap.add_argument("--source-sha", default="",
+                    help="exact product source revision bound to this audit")
+    ap.add_argument("--workflow-run-id", default="offline",
+                    help="workflow run identity bound to this audit")
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
@@ -1858,13 +3047,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json_out:
         payload: dict = {
+            "schema": "gt.audit.v1",
+            "source_sha": args.source_sha,
+            "workflow_run_id": args.workflow_run_id,
             "run_dir": str(run_dir),
+            "artifact_corpus_sha256": artifact_corpus_sha256(run_dir),
             "tasks": [asdict(a) | {"error_rate": a.error_rate} for a in audits],
         }
         if base_audits is not None:
             payload["baseline_dir"] = str(args.baseline)
             payload["baseline_tasks"] = [
                 asdict(a) | {"error_rate": a.error_rate} for a in base_audits]
+        payload["audit_digest_sha256"] = audit_digest_sha256(payload)
         Path(args.json_out).write_text(
             json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 

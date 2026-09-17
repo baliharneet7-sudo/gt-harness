@@ -9,7 +9,6 @@ detection, pairing - are pinned before a healthy artifact exists.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import shutil
 import subprocess
@@ -18,16 +17,13 @@ from pathlib import Path
 
 import pytest
 
+from gt_engine.event_journal import GENESIS_HASH, event_hash
+from scripts import gt_audit
+
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "scripts" / "gt_audit.py"
+SCRIPT = Path(gt_audit.__file__)
 CRASHED_RUN = Path(__file__).resolve().parent / "fixtures" / "gt_audit" / "crashed_run"
 SMOKE_RUN = Path(__file__).resolve().parent / "fixtures" / "gt_audit" / "smoke_run"
-
-_spec = importlib.util.spec_from_file_location("gt_audit", SCRIPT)
-gt_audit = importlib.util.module_from_spec(_spec)
-sys.modules["gt_audit"] = gt_audit  # dataclasses resolve types via sys.modules
-_spec.loader.exec_module(gt_audit)
-
 
 # --------------------------------------------------------------------------- #
 # synthetic transcript builders (nano CLI rich-panel shape)
@@ -64,6 +60,657 @@ def make_task_dir(root: Path, trial: str, task_name: str, transcript: str,
         "exception_info": None,
     }), encoding="utf-8")
     return d
+
+
+def make_native_miniswe_task(
+    root: Path,
+    *,
+    exception_info: dict | None = None,
+    tamper_request: bool = False,
+    delivery_text: str | None = None,
+    expose_delivery: bool = True,
+) -> Path:
+    """Write the canonical Mini-SWE artifact shape (no legacy nano.txt)."""
+    task = root / "native-task__trial"
+    agent = task / "agent"
+    state = agent / "gt-state" / "native-task"
+    requests = state / "provider_requests"
+    responses = state / "provider_responses"
+    requests.mkdir(parents=True)
+    responses.mkdir(parents=True)
+
+    request_content = "solve it"
+    if delivery_text is not None and expose_delivery:
+        request_content += "\n" + delivery_text
+    request_bytes = json.dumps(
+        {"messages": [{"role": "user", "content": request_content}]},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    request_sha = hashlib.sha256(request_bytes).hexdigest()
+    (requests / f"{request_sha}.json").write_bytes(
+        request_bytes + (b"tampered" if tamper_request else b"")
+    )
+    response_bytes = b'{"choices":[]}'
+    response_sha = hashlib.sha256(response_bytes).hexdigest()
+    (responses / f"{response_sha}.json").write_bytes(response_bytes)
+
+    delivery_identity = (
+        hashlib.sha256(delivery_text.encode()).hexdigest()
+        if delivery_text is not None else ""
+    )
+    rows = []
+    if delivery_text is not None:
+        deliveries = state / "deliveries"
+        deliveries.mkdir()
+        (deliveries / f"{delivery_identity}.json").write_text(
+            delivery_text, encoding="utf-8"
+        )
+        rows.append({
+            "event": "evidence_delivery",
+            "iteration": 0,
+            "evidence_type": "cochange_partner",
+            "delivery_identity": delivery_identity,
+            "payload_sha256": delivery_identity,
+            "delivery_blob": f"deliveries/{delivery_identity}.json",
+            "rendered_bytes": len(delivery_text.encode()),
+        })
+    rows.extend([
+        {
+            "event": "provider_delivery",
+            "iteration": 1,
+            "request_id": "req-1",
+            "payload_sha256": request_sha,
+            "model_visible_sha256": hashlib.sha256(json.dumps(
+                [{"content": request_content, "role": "user"}],
+                sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest(),
+            "request_blob": f"provider_requests/{request_sha}.json",
+            "delivery_ids": [delivery_identity] if delivery_text is not None else [],
+            "matches": ([{"delivery_id": delivery_identity,
+                           "rendered_sha256": delivery_identity}]
+                        if delivery_text is not None else []),
+            "unmatched_delivery_ids": [],
+        },
+        {
+            "event": "provider_response",
+            "iteration": 1,
+            "request_id": "req-1",
+            "response_sha256": response_sha,
+            "response_blob": f"provider_responses/{response_sha}.json",
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 2},
+            },
+            "delivery_ids": [delivery_identity] if delivery_text is not None else [],
+        },
+    ])
+    parent = GENESIS_HASH
+    encoded_rows = []
+    for sequence, payload in enumerate(rows, 1):
+        row = {
+            "schema": "gt.event.v1",
+            "sequence": sequence,
+            "parent_hash": parent,
+            "timestamp_utc": "2026-09-04T00:00:00+00:00",
+            **payload,
+        }
+        row["event_hash"] = event_hash(row)
+        parent = row["event_hash"]
+        encoded_rows.append(json.dumps(row, sort_keys=True, separators=(",", ":")))
+    (state / "events.jsonl").write_text("\n".join(encoded_rows) + "\n")
+
+    trajectory = {
+        "trajectory_format": "mini-swe-agent-1.1",
+        "exit_status": "submitted",
+        "submission": "done",
+        "info": {"model_stats": {"api_calls": 1}},
+        "messages": [
+            {"role": "system", "content": "system"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"function": {"name": "bash", "arguments": "{}"}}],
+                "extra": {"response": {"usage": {"prompt_tokens": 10,
+                                                     "completion_tokens": 3}}},
+            },
+            {"role": "tool", "content": "<returncode>0</returncode>\n<output>ok</output>",
+             "extra": {"returncode": 0}},
+        ],
+    }
+    (agent / "miniswe_trajectory.json").write_text(json.dumps(trajectory))
+    (task / "result.json").write_text(json.dumps({
+        "task_name": "native-task",
+        "verifier_result": {"rewards": {"reward": 1}},
+        "exception_info": exception_info,
+    }))
+    return task
+
+
+def rewrite_native_events(task: Path, mutate) -> list[dict]:
+    events_path = next((task / "agent" / "gt-state").glob("*/events.jsonl"))
+    rows = [json.loads(line) for line in events_path.read_text().splitlines()]
+    mutate(rows)
+    parent = GENESIS_HASH
+    for row in rows:
+        row["parent_hash"] = parent
+        row["event_hash"] = event_hash(row)
+        parent = row["event_hash"]
+    events_path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True, separators=(",", ":"))
+                  for row in rows) + "\n"
+    )
+    return rows
+
+
+def test_native_miniswe_audit_uses_real_artifacts_not_nano(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "GREEN-quiet"
+    assert audit.stop_reason == "submitted"
+    assert audit.iterations == 1
+    assert audit.in_tokens == 10
+    assert audit.out_tokens == 3
+    assert audit.cache_read == 2
+    assert audit.tool_results == 1
+    assert set(audit.feature_attribution) == set(
+        gt_audit.summarize_features({})
+    )
+    assert "missing agent/nano.txt" not in " ".join(audit.verdict_reasons)
+
+
+def test_native_miniswe_246_terminal_is_read_from_info(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    path = task / "agent" / "miniswe_trajectory.json"
+    trajectory = json.loads(path.read_text())
+    trajectory["info"]["exit_status"] = trajectory.pop("exit_status")
+    path.write_text(json.dumps(trajectory))
+    audit = gt_audit.audit_task(task)
+    assert audit.verdict == "GREEN-quiet"
+    assert audit.stop_reason == "submitted"
+
+
+def test_native_miniswe_audit_reports_timeout_cause_not_missing_nano(tmp_path):
+    task = make_native_miniswe_task(
+        tmp_path,
+        exception_info={
+            "exception_type": "AgentTimeoutError",
+            "exception_message": "Agent execution timed out after 1800 seconds",
+        },
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert audit.stop_reason == "external_timeout"
+    reasons = " ".join(audit.verdict_reasons)
+    assert "AgentTimeoutError" in reasons
+    assert "missing agent/nano.txt" not in reasons
+
+
+def test_native_miniswe_audit_rejects_tampered_provider_blob(tmp_path):
+    task = make_native_miniswe_task(tmp_path, tamper_request=True)
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert any("provider request blob hash mismatch" in reason
+               for reason in audit.verdict_reasons)
+
+
+def test_native_delivery_requires_exact_bytes_in_immediate_request(tmp_path):
+    task = make_native_miniswe_task(
+        tmp_path, delivery_text="inspect sibling.py", expose_delivery=False
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert audit.feature_attribution["cochange_prior"]["status"] == (
+        "DELIVERED_UNEXPOSED"
+    )
+    assert any("delivery bytes absent" in issue for issue in audit.attribution_issues)
+
+
+def test_native_delivery_exact_bytes_are_independently_witnessed(tmp_path):
+    task = make_native_miniswe_task(
+        tmp_path, delivery_text="inspect sibling.py", expose_delivery=True
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "GREEN-delivered"
+    assert audit.feature_attribution["cochange_prior"]["status"] == "WITNESSED"
+
+
+def _wire_consumption_fixture(task, command):
+    """Give the fixture a delivery→request→response→assistant chain whose
+    response turn runs ``command``."""
+
+    def convert(rows):
+        for row in rows:
+            if row["event"] == "evidence_delivery":
+                row["request_id"] = "req-1"
+                row["target"] = "pkg/mod.py"
+            elif row["event"] == "provider_response":
+                row["provider_response_id"] = "gen-fixture-1"
+    rewrite_native_events(task, convert)
+
+    traj_path = task / "agent" / "miniswe_trajectory.json"
+    trajectory = json.loads(traj_path.read_text())
+    for m in trajectory["messages"]:
+        if m.get("role") == "assistant":
+            m["extra"]["response"] = {
+                "id": "gen-fixture-1",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+            }
+            m["tool_calls"] = [{
+                "function": {
+                    "name": "bash",
+                    "arguments": json.dumps({"command": command}),
+                }
+            }]
+    traj_path.write_text(json.dumps(trajectory))
+
+
+def test_delivery_consumption_marks_action_referencing_target(tmp_path):
+    task = make_native_miniswe_task(
+        tmp_path, delivery_text="[GT] callers of helper in pkg/mod.py"
+    )
+    _wire_consumption_fixture(task, "cat pkg/mod.py")
+
+    audit = gt_audit.audit_task(task)
+
+    assert len(audit.delivery_consumption) == 1
+    verdict = audit.delivery_consumption[0]
+    assert verdict["sent"] and verdict["visible"] and verdict["served"]
+    assert verdict["agent_did"] is True
+    assert verdict["consumed"] is True
+    assert verdict["verdict"] == "consumed"
+    assert audit.delivery_consumption_summary["consumed"] == 1
+    assert audit.delivery_consumption_summary["consumed_fair"] == 1
+
+
+def test_delivery_consumption_unrelated_action_is_not_consumed(tmp_path):
+    task = make_native_miniswe_task(
+        tmp_path, delivery_text="[GT] callers of helper in pkg/mod.py"
+    )
+    _wire_consumption_fixture(task, "ls /etc")
+
+    audit = gt_audit.audit_task(task)
+
+    verdict = audit.delivery_consumption[0]
+    assert verdict["sent"] and verdict["served"] and verdict["agent_did"]
+    assert verdict["consumed"] is False
+    assert verdict["verdict"] == "seen_no_action_on_content"
+
+
+def test_delivery_consumption_word_boundary_not_substring(tmp_path):
+    task = make_native_miniswe_task(
+        tmp_path, delivery_text="[GT] callers of helper in pkg/mod.py"
+    )
+    # "mod" inside "mode"/"model" must not count as a reference to pkg/mod.py.
+    _wire_consumption_fixture(task, "cd model && ls")
+
+    audit = gt_audit.audit_task(task)
+
+    verdict = audit.delivery_consumption[0]
+    assert verdict["consumed"] is False
+
+
+def test_delivery_consumption_common_identifiers_do_not_count(tmp_path):
+    """Bare common code words are never distinctive consumption evidence.
+
+    The payload and the command share ``handlers``/``backend``/``service``/
+    ``manager`` verbatim - the old token rule credited that as consumption,
+    which is what inflated the smoke-20 consumption stats (finding 7).
+    """
+    task = make_native_miniswe_task(
+        tmp_path,
+        delivery_text="note: handlers route through the backend service manager",
+    )
+    _wire_consumption_fixture(
+        task, "grep -rn handlers src/ && ls backend service"
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    verdict = audit.delivery_consumption[0]
+    assert verdict["consumed"] is False
+    assert verdict["verdict"] == "seen_no_action_on_content"
+
+
+def test_delivery_consumption_generic_stem_basename_is_not_distinctive(tmp_path):
+    """``utils.py`` is a common code word with an extension, not an anchor."""
+    task = make_native_miniswe_task(
+        tmp_path, delivery_text="note: regenerate utils.py helpers"
+    )
+    _wire_consumption_fixture(task, "ls utils.py")
+
+    audit = gt_audit.audit_task(task)
+
+    verdict = audit.delivery_consumption[0]
+    assert verdict["consumed"] is False
+
+
+def test_delivery_consumption_path_anchor_still_credits(tmp_path):
+    """A ``path`` or ``path:line`` anchor from the payload stays distinctive."""
+    task = make_native_miniswe_task(
+        tmp_path,
+        delivery_text="src/auth/tokens.py:42: note: verify refresh path",
+    )
+    _wire_consumption_fixture(task, "sed -n '40,50p' src/auth/tokens.py")
+
+    audit = gt_audit.audit_task(task)
+
+    verdict = audit.delivery_consumption[0]
+    assert verdict["consumed"] is True
+    assert verdict["verdict"] == "consumed"
+
+
+def test_delivery_consumption_qualified_name_credits(tmp_path):
+    """A qualified/dotted name (ClassName.method) is distinctive."""
+    task = make_native_miniswe_task(
+        tmp_path, delivery_text="note: AuthService.validate_token rejects"
+    )
+    _wire_consumption_fixture(
+        task, "grep -rn AuthService.validate_token src/"
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    verdict = audit.delivery_consumption[0]
+    assert verdict["consumed"] is True
+    assert verdict["match"] == "AuthService.validate_token"
+
+
+def test_delivery_consumption_verbatim_snippet_credits(tmp_path):
+    """A long verbatim payload substring is distinctive even when no single
+    token inside it would be."""
+    task = make_native_miniswe_task(
+        tmp_path,
+        delivery_text="error: signature changed: must update the call sites",
+    )
+    _wire_consumption_fixture(
+        task, 'grep -rn "must update the call sites" .'
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    verdict = audit.delivery_consumption[0]
+    assert verdict["consumed"] is True
+    assert "must update the call sites" in verdict["match"]
+
+
+@pytest.mark.parametrize("expose", [True, False])
+@pytest.mark.parametrize("feature", ["persistent_plan", "plan_gate"])
+def test_native_plan_requires_exact_immediate_provider_bytes(tmp_path, expose, feature):
+    task = make_native_miniswe_task(
+        tmp_path, delivery_text="[GT_PERSISTENT_PLAN] fixture design", expose_delivery=expose
+    )
+
+    def convert(rows):
+        plan = rows[0]
+        plan["event"] = "persistent_plan_delivered" if feature == "persistent_plan" else "plan_gate_directive_prepared"
+        plan["rendered_sha256"] = plan["delivery_identity"]
+        plan["rendered_blob"] = plan["delivery_blob"]
+        for row in rows[1:]:
+            row["delivery_ids"] = []
+            if row["event"] == "provider_delivery":
+                row["matches"] = []
+    rewrite_native_events(task, convert)
+    audit = gt_audit.audit_task(task)
+    plan = audit.feature_attribution[feature]
+    assert plan["status"] == ("WITNESSED" if expose else "DELIVERED_UNEXPOSED")
+    assert plan["exposed"] is expose
+    if not expose:
+        assert any("plan bytes absent" in issue for issue in audit.attribution_issues)
+
+
+@pytest.mark.parametrize("damage", ["missing_blob", "tampered_blob", "wrong_response", "late_plan", "wrong_size"])
+def test_native_plan_never_promotes_broken_delivery_chain(tmp_path, damage):
+    task = make_native_miniswe_task(tmp_path, delivery_text="[GT_PERSISTENT_PLAN] fixture design")
+
+    def convert(rows):
+        plan = rows[0]
+        plan["event"] = "persistent_plan_delivered"
+        plan["rendered_sha256"] = plan["delivery_identity"]
+        plan["rendered_blob"] = plan["delivery_blob"]
+        for row in rows[1:]:
+            row["delivery_ids"] = []
+            if row["event"] == "provider_delivery":
+                row["matches"] = []
+        if damage == "missing_blob":
+            plan.pop("rendered_blob")
+        elif damage == "wrong_size":
+            plan["rendered_bytes"] += 1
+        elif damage == "wrong_response":
+            rows[2]["request_id"] = "another-request"
+        elif damage == "late_plan":
+            rows.append(rows.pop(0))
+            for sequence, row in enumerate(rows, 1):
+                row["sequence"] = sequence
+        elif damage == "tampered_blob":
+            state = task / "agent" / "gt-state" / "native-task"
+            (state / plan["rendered_blob"]).write_bytes(b"another plan")
+    rewrite_native_events(task, convert)
+    audit = gt_audit.audit_task(task)
+    assert audit.feature_attribution["persistent_plan"]["status"] == "DELIVERED_UNEXPOSED"
+    assert audit.feature_attribution["persistent_plan"]["exposed"] is False
+    assert audit.attribution_issues
+
+
+@pytest.mark.parametrize("field", ["select_catalog_bootstrap_calls", "persistent_plan_bootstrap_calls"])
+@pytest.mark.parametrize("count", [1, True, -1, "1", 2])
+def test_native_call_accounting_includes_only_valid_bootstrap_counts(tmp_path, field, count):
+    task = make_native_miniswe_task(tmp_path)
+    path = task / "agent" / "miniswe_trajectory.json"
+    trajectory = json.loads(path.read_text())
+    trajectory["info"]["model_stats"]["api_calls"] = 0
+    path.write_text(json.dumps(trajectory))
+    (task / "agent" / "miniswe_report.json").write_text(json.dumps({"gt": {field: count}}))
+    audit = gt_audit.audit_task(task)
+    accounting = [issue for issue in audit.attribution_issues
+                  if "provider requests" in issue or "bootstrap" in issue]
+    assert bool(accounting) is not (type(count) is int and count == 1)
+
+
+def test_native_delivery_must_be_on_the_immediate_provider_boundary(tmp_path):
+    task = make_native_miniswe_task(tmp_path, delivery_text="inspect sibling.py")
+    rewrite_native_events(
+        task,
+        lambda rows: [row.update(iteration=2) for row in rows
+                      if row["event"].startswith("provider_")],
+    )
+    trajectory_path = task / "agent" / "miniswe_trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text())
+    trajectory["info"]["model_stats"]["api_calls"] = 1
+    trajectory_path.write_text(json.dumps(trajectory))
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert any("not joined to its immediate boundary" in issue
+               for issue in audit.attribution_issues)
+
+
+def test_native_malformed_delivery_ids_fail_closed_without_crashing(tmp_path):
+    task = make_native_miniswe_task(tmp_path, delivery_text="inspect sibling.py")
+    rewrite_native_events(
+        task,
+        lambda rows: next(row for row in rows
+                          if row["event"] == "provider_delivery").update(
+                              delivery_ids=1
+                          ),
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert any("delivery_ids is not a list" in issue
+               for issue in audit.attribution_issues)
+
+
+@pytest.mark.parametrize(
+    "exit_status",
+    ["TimeExceeded", "budget_exhausted", "internal_error", "timeout", "unknown"],
+)
+def test_native_failure_terminal_is_red_without_outer_exception(tmp_path, exit_status):
+    task = make_native_miniswe_task(tmp_path)
+    path = task / "agent" / "miniswe_trajectory.json"
+    trajectory = json.loads(path.read_text())
+    trajectory["exit_status"] = exit_status
+    path.write_text(json.dumps(trajectory))
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert f"Mini-SWE failure terminal: {exit_status}" in audit.verdict_reasons
+
+
+def test_native_non_string_terminal_is_red(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    path = task / "agent" / "miniswe_trajectory.json"
+    trajectory = json.loads(path.read_text())
+    trajectory["exit_status"] = 17
+    path.write_text(json.dumps(trajectory))
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert any("exit_status is not a string" in issue
+               for issue in audit.attribution_issues)
+
+
+def test_native_response_blob_must_be_a_json_object(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    state = next((task / "agent" / "gt-state").glob("*/provider_responses/*.json"))
+    malformed = b"not JSON"
+    digest = hashlib.sha256(malformed).hexdigest()
+    replacement = state.with_name(f"{digest}.json")
+    replacement.write_bytes(malformed)
+    rewrite_native_events(
+        task,
+        lambda rows: next(row for row in rows
+                          if row["event"] == "provider_response").update(
+                              response_sha256=digest,
+                              response_blob=f"provider_responses/{digest}.json",
+                          ),
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert any("unreadable JSON" in issue for issue in audit.attribution_issues)
+
+
+@pytest.mark.parametrize("cached_tokens", [True, -1, 11])
+def test_native_cached_usage_must_be_bounded_integer(tmp_path, cached_tokens):
+    task = make_native_miniswe_task(tmp_path)
+    rewrite_native_events(
+        task,
+        lambda rows: next(row for row in rows
+                          if row["event"] == "provider_response")["usage"]
+        ["prompt_tokens_details"].update(cached_tokens=cached_tokens),
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert any("cached_tokens is invalid" in issue
+               for issue in audit.attribution_issues)
+
+
+def test_native_missing_usage_is_unknown_and_red(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    rewrite_native_events(
+        task,
+        lambda rows: next(row for row in rows
+                          if row["event"] == "provider_response").pop("usage"),
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert audit.in_tokens is None and audit.out_tokens is None
+    assert any("usage is not an object" in issue for issue in audit.attribution_issues)
+
+
+def test_native_feature_projection_requires_request_and_response_identity_join():
+    identity = "a" * 64
+    delivery = {
+        "event": "evidence_delivery",
+        "evidence_type": "cochange_partner",
+        "delivery_identity": identity,
+    }
+    unjoined = gt_audit._native_feature_projection([delivery])
+    assert unjoined["cochange_prior"]["status"] == "DELIVERED_UNEXPOSED"
+
+    joined = gt_audit._native_feature_projection([
+        delivery,
+        {"event": "provider_delivery", "iteration": 2,
+         "delivery_ids": [identity],
+         "matches": [{"delivery_id": identity, "rendered_sha256": identity}]},
+        {"event": "provider_response", "iteration": 2,
+         "delivery_ids": [identity]},
+    ])
+    assert joined["cochange_prior"]["status"] == "WITNESSED"
+    assert joined["cochange_prior"]["exposed"] is True
+    assert joined["cochange_prior"]["response_observed"] is True
+
+
+def test_native_fact_delivery_does_not_invent_capability_execution():
+    identity = "b" * 64
+    projected = gt_audit._native_feature_projection([
+        {"event": "evidence_delivery", "evidence_type": "submit_refusal",
+         "delivery_identity": identity},
+        {"event": "provider_delivery", "iteration": 1,
+         "delivery_ids": [identity],
+         "matches": [{"delivery_id": identity, "rendered_sha256": identity}]},
+        {"event": "provider_response", "iteration": 1,
+         "delivery_ids": [identity]},
+    ])
+
+    assert projected["submit_refusal"]["status"] == "WITNESSED"
+    assert projected["GT_CERT_DELIVERY"]["status"] == "INELIGIBLE"
+    assert projected["GT_SS_SUBMIT_RED"]["status"] == "INELIGIBLE"
+
+
+def test_native_miniswe_audit_rejects_malformed_nested_schemas(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    trajectory_path = task / "agent" / "miniswe_trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text())
+    trajectory["info"] = None
+    trajectory_path.write_text(json.dumps(trajectory))
+    state = next((task / "agent" / "gt-state").glob("*/provider_requests/*.json"))
+    malformed = b"[]"
+    old_digest = state.stem
+    new_digest = hashlib.sha256(malformed).hexdigest()
+    new_state = state.with_name(f"{new_digest}.json")
+    new_state.write_bytes(malformed)
+    events_path = next((task / "agent" / "gt-state").glob("*/events.jsonl"))
+    rows = [json.loads(line) for line in events_path.read_text().splitlines()]
+    rows[0]["payload_sha256"] = new_digest
+    rows[0]["request_blob"] = rows[0]["request_blob"].replace(old_digest, new_digest)
+    parent = GENESIS_HASH
+    for row in rows:
+        row["parent_hash"] = parent
+        row["event_hash"] = event_hash(row)
+        parent = row["event_hash"]
+    events_path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True, separators=(",", ":"))
+                  for row in rows) + "\n"
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert any("trajectory info" in issue for issue in audit.attribution_issues)
+    assert any("provider request JSON object" in issue
+               for issue in audit.attribution_issues)
 
 
 HEALTHY_NONCODE = "\n".join([
@@ -196,7 +843,7 @@ def test_audit_does_not_count_explicit_gt_exclusions_as_access(tmp_path):
     assert audit.forbidden_harness_path_attempt_count == 0
 
 
-def test_attribution_trace_is_loaded_and_projects_all_17_features(tmp_path):
+def test_attribution_trace_is_loaded_and_projects_every_feature(tmp_path):
     from gt_engine.attribution import AttributionTrace
 
     task = make_task_dir(
@@ -228,7 +875,11 @@ def test_attribution_trace_is_loaded_and_projects_all_17_features(tmp_path):
 
     assert audit.attribution_present is True
     assert audit.attribution_issues == []
-    assert len(audit.feature_attribution) == 17
+    # Pinned against the registry rather than a literal, so adding a feature
+    # updates one place and this still asserts completeness.
+    from gt_engine.attribution import DIRECT_FEATURES
+
+    assert len(audit.feature_attribution) == len(DIRECT_FEATURES)
     assert audit.feature_attribution["recovery"]["status"] == "TRIGGERED_DARK"
 
 
@@ -492,6 +1143,14 @@ def test_audit_projects_contract_graph_router_and_verification_receipts(
     assert audit.graph_router_revision == "graph-r1"
     assert audit.graph_semantic_fact_count == 8
     assert audit.graph_refresh_count == 1
+    # This task has no native journal: the increment above can only have come
+    # from the bridge attribution stream. Naming the event pins it to that
+    # branch -- the assertion used to be satisfiable by either counter, so it
+    # gave the native `_audit_native_miniswe_task` counter cover while that
+    # counter was reading an event name no emitter writes. The native side is
+    # owned by
+    # test_audit_counts_publications_amends_and_recoveries_as_refreshes.
+    assert audit.graph_refresh_breakdown == {"graph.context_refreshed": 1}
     assert audit.capsule_expired_count == 1
     assert audit.capsule_unique_exposed_count == 1
     assert audit.capsule_repeated_exposure_count == 0
@@ -843,6 +1502,22 @@ def test_nested_run_dir_is_found(tmp_path):
     make_task_dir(nested, "t__1", "t", HEALTHY_NONCODE)
     audits = gt_audit.audit_run(tmp_path)  # one level above the task dirs' parent
     assert len(audits) == 1 and audits[0].task_name == "t"
+
+
+def test_merged_artifact_wrappers_discover_every_task(tmp_path):
+    expected = [f"task-{index:02d}" for index in range(1, 21)]
+    for task_name in expected:
+        wrapper = tmp_path / f"deepswe-run-{task_name}"
+        make_task_dir(
+            wrapper,
+            f"{task_name}__trial",
+            task_name,
+            HEALTHY_NONCODE,
+        )
+
+    audits = gt_audit.audit_run(tmp_path)
+
+    assert [audit.task_name for audit in audits] == expected
 
 
 def test_empty_run_dir_fails_loud(tmp_path):
@@ -1209,3 +1884,174 @@ def test_gt_l1_inside_a_panel_is_flagged(tmp_path):
     a = gt_audit.audit_run(tmp_path)[0]
     assert any("[GT L1] telemetry INSIDE" in f for f in a.review_flags)
     assert a.verdict == "YELLOW"
+
+
+def _failure_row(request_id: str, iteration: int, sequence: int) -> dict:
+    return {
+        "schema": "gt.event.v1",
+        "event": "provider_failure",
+        "sequence": sequence,
+        "iteration": iteration,
+        "request_id": request_id,
+        "error_type": "FormatError",
+        "error_message": "provider returned unparseable output",
+    }
+
+
+def test_provider_failure_closes_its_request(tmp_path):
+    """A typed provider_failure is a terminal outcome for its request.
+
+    Run 34656860834 request-83 failed with FormatError and the transport
+    retried inside the same agent call: the journal carries delivery+failure
+    and that request is closed, not orphaned.
+    """
+    task = make_native_miniswe_task(tmp_path)
+
+    def mutate(rows):
+        request = next(r for r in rows if r.get("event") == "provider_delivery")
+        response = next(r for r in rows if r.get("event") == "provider_response")
+        rows.append({**request, "request_id": "req-2", "iteration": 2,
+                     "sequence": max(r["sequence"] for r in rows) + 1})
+        rows.append(_failure_row("req-2", 2, max(r["sequence"] for r in rows) + 1))
+        # Keep the census consistent: two logical requests were delivered.
+        response["request_id"] = "req-1"
+
+    rewrite_native_events(task, mutate)
+    trajectory_path = task / "agent" / "miniswe_trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text())
+    trajectory["info"]["model_stats"]["api_calls"] = 2
+    trajectory_path.write_text(json.dumps(trajectory))
+
+    audit = gt_audit.audit_task(task)
+
+    assert not any(
+        "without response" in issue for issue in audit.attribution_issues
+    ), audit.attribution_issues
+
+
+def test_request_with_neither_response_nor_failure_is_missing(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+
+    def mutate(rows):
+        rows[:] = [
+            row for row in rows if row.get("event") != "provider_response"
+        ]
+
+    rewrite_native_events(task, mutate)
+
+    audit = gt_audit.audit_task(task)
+
+    assert any(
+        "provider request(s) without response" in issue
+        and "req-1" in issue
+        for issue in audit.attribution_issues
+    ), audit.attribution_issues
+
+
+def test_failure_without_a_matching_request_is_flagged(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+
+    def mutate(rows):
+        rows.append(_failure_row("req-99", 99, max(r["sequence"] for r in rows) + 1))
+
+    rewrite_native_events(task, mutate)
+
+    audit = gt_audit.audit_task(task)
+
+    assert any(
+        "provider failure(s) without request" in issue and "req-99" in issue
+        for issue in audit.attribution_issues
+    ), audit.attribution_issues
+
+
+def test_duplicate_provider_failure_is_flagged(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+
+    def mutate(rows):
+        next_seq = max(r["sequence"] for r in rows) + 1
+        rows.append(_failure_row("req-1", 1, next_seq))
+        rows.append(_failure_row("req-1", 1, next_seq + 1))
+
+    rewrite_native_events(task, mutate)
+
+    audit = gt_audit.audit_task(task)
+
+    assert any(
+        "duplicate provider failure request_id" in issue
+        for issue in audit.attribution_issues
+    ), audit.attribution_issues
+
+
+def test_audit_counts_publications_amends_and_recoveries_as_refreshes(tmp_path):
+    """The native journal names refreshes three ways; none of them is
+    ``graph_refreshed``.
+
+    `_audit_native_miniswe_task` counted `counts["graph_refreshed"]`, an event
+    name no emitter has written since the adapter was reworked: the engine
+    appends `graph_publication` (`miniswe_integration._record_graph_publication`),
+    `graph_boundary_amend` and `graph_recovery` (both via
+    `_adopt_graph_receipt`). Every attestation therefore reported
+    `graph_refresh_count 0` on runs whose graph was rebuilt dozens of times,
+    and `graph_refresh_failure_count 0` on runs where hundreds of amends were
+    refused. The only green test for this counter drives the BRIDGE branch
+    (`graph.context_refreshed`, audit_task) which the Mini-SWE path never
+    reaches, so the native counter was never exercised at all.
+    """
+    task = make_native_miniswe_task(tmp_path)
+    publications, amends, recoveries = 2, 3, 1
+    refusals, recovery_failures = 4, 2
+    journaled = (
+        [{"event": "graph_publication", "artifact_sha256": f"{i:064x}",
+          "graph_sha256": f"{i:064x}", "repository_revision": f"rev{i}"}
+         for i in range(publications)]
+        + [{"event": "graph_boundary_amend", "adopted": True,
+            "graph_revision": f"g{i}", "phase": "post_edit"}
+           for i in range(amends)]
+        + [{"event": "graph_recovery", "adopted": True,
+            "graph_revision": f"r{i}", "phase": "post_edit"}
+           for i in range(recoveries)]
+        + [{"event": "graph_boundary_amend_refused", "phase": "post_edit",
+            "reason": "amend_failed:producer_exit_1"}
+           for _ in range(refusals)]
+        + [{"event": "graph_recovery_failed", "phase": "post_edit",
+            "error_type": "RuntimeError"}
+           for _ in range(recovery_failures)]
+    )
+
+    def add(rows):
+        for payload in journaled:
+            rows.append({
+                "schema": "gt.event.v1",
+                "sequence": len(rows) + 1,
+                "timestamp_utc": "2026-09-04T00:00:00+00:00",
+                "iteration": 1,
+                **payload,
+            })
+
+    rewrite_native_events(task, add)
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.graph_refresh_count == publications + amends + recoveries
+    assert audit.graph_refresh_failure_count == refusals + recovery_failures
+    # The sum alone cannot say WHICH surface refreshed, and the run evidence
+    # turns on that distinction: an amend chain that keeps landing and a graph
+    # that is rebuilt from scratch every boundary produce the same total.
+    assert audit.graph_refresh_breakdown == {
+        "graph_boundary_amend": amends,
+        "graph_boundary_amend_refused": refusals,
+        "graph_publication": publications,
+        "graph_recovery": recoveries,
+        "graph_recovery_failed": recovery_failures,
+    }
+
+
+def test_audit_reports_zero_refreshes_when_the_journal_has_none(tmp_path):
+    """The counter must still be able to say nothing happened."""
+    task = make_native_miniswe_task(tmp_path)
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.graph_refresh_count == 0
+    assert audit.graph_refresh_failure_count == 0
+    assert audit.graph_refresh_breakdown == {}

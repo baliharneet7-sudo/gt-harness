@@ -1,0 +1,216 @@
+"""One-command, provider-free public GroundTruth re-audit.
+
+The audit is intentionally read-only: Git metadata is inspected through
+immutable commands and no branch, index, provider, or benchmark state is
+changed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any
+
+SCHEMA = "gt.public_reaudit.v1"
+REQUIRED_PATHS = ("README.md", "pyproject.toml", "gt_engine", "scripts", "tests")
+
+
+def _canonical(value: dict[str, Any]) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), *args], capture_output=True, text=True, check=False
+    )
+    if result.returncode:
+        raise RuntimeError("git_unavailable")
+    return result.stdout.strip()
+
+
+def _source_manifest(root: Path) -> tuple[str, int]:
+    rows = []
+    for line in _git(root, "ls-files", "--stage").splitlines():
+        fields = line.split(None, 3)
+        if len(fields) != 4:
+            raise RuntimeError("SOURCE_MANIFEST_INVALID")
+        mode, blob, _stage, path = fields
+        rows.append((path, mode, blob))
+    if not rows:
+        raise RuntimeError("SOURCE_MANIFEST_EMPTY")
+    payload = "".join(
+        f"{len(path.encode())}:{path}{len(mode.encode())}:{mode}{len(blob.encode())}:{blob}\n"
+        for path, mode, blob in sorted(rows)
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest(), len(rows)
+
+
+def _run_provider_free(root: Path, command: list[str]) -> dict[str, Any]:
+    result = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+    return {
+        "command": command,
+        "exit_code": result.returncode,
+        "stdout_sha256": hashlib.sha256(result.stdout.encode()).hexdigest(),
+        "stderr_sha256": hashlib.sha256(result.stderr.encode()).hexdigest(),
+    }
+
+
+def _verify_shipped_receipts(root: Path) -> dict[str, Any]:
+    """Verify every shipped digest-bearing receipt against its Git blob bytes."""
+    checked = 0
+    errors: list[str] = []
+    receipt_root = root / "gt_finalstand" / "receipts"
+    for path in sorted(receipt_root.glob("*.json")) if receipt_root.is_dir() else ():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            errors.append(path.name + ":invalid_json")
+            continue
+        if not isinstance(payload, dict):
+            errors.append(path.name + ":not_object")
+            continue
+        digest_field = next(
+            (
+                field
+                for field in (
+                    "receipt_sha256",
+                    "receipt_digest_sha256",
+                    "report_digest_sha256",
+                )
+                if field in payload
+            ),
+            None,
+        )
+        if digest_field is None:
+            continue
+        supplied = payload[digest_field]
+        body = dict(payload)
+        body.pop(digest_field, None)
+        canonical = _canonical(body)
+        actual = hashlib.sha256(canonical).hexdigest()
+        if supplied != actual:
+            # Older finalstand issuers included the canonical trailing LF.
+            actual = hashlib.sha256(canonical + b"\n").hexdigest()
+        checked += 1
+        if supplied != actual:
+            errors.append(path.name + ":digest_mismatch")
+    return {
+        "checked": checked,
+        "errors": sorted(errors),
+        "status": "pass" if not errors else "fail",
+    }
+
+
+def run_reaudit(groundtruth_root: str | Path) -> dict[str, Any]:
+    root = Path(groundtruth_root).resolve()
+    failure_code = None
+    head = "UNVERIFIED"
+    source_manifest = "UNVERIFIED"
+    tracked_count = 0
+    red_replay: dict[str, Any] | None = None
+    mutation_check: dict[str, Any] | None = None
+    try:
+        if not root.is_dir() or not all((root / path).exists() for path in REQUIRED_PATHS):
+            raise RuntimeError("SOURCE_MISSING")
+        head = _git(root, "rev-parse", "HEAD")
+        source_manifest, tracked_count = _source_manifest(root)
+        red_replay = _run_provider_free(
+            root,
+            [
+                "python",
+                "-m",
+                "pytest",
+                "-q",
+                "tests/test_failure_ids.py",
+                "tests/test_red_evidence.py",
+            ],
+        )
+        producer_check = _run_provider_free(
+            root,
+            ["python", "scripts/check_red_evidence_producers.py", "--root", str(root)],
+        )
+        red_replay["producer_manifest_check"] = producer_check
+        receipt_check = _verify_shipped_receipts(root)
+        red_replay["shipped_receipt_check"] = receipt_check
+        mutation_check = {
+            "command": ["git", "-C", str(root), "diff", "--exit-code"],
+            "exit_code": subprocess.run(
+                ["git", "-C", str(root), "diff", "--exit-code"],
+                capture_output=True,
+                check=False,
+            ).returncode,
+        }
+        if red_replay["exit_code"] != 0 or producer_check["exit_code"] != 0:
+            raise RuntimeError("PRODUCER_REPLAY_FAILED")
+        if receipt_check["status"] != "pass":
+            raise RuntimeError("RECEIPT_CHAIN_MISMATCH")
+        if mutation_check["exit_code"] != 0:
+            raise RuntimeError("RECEIPT_CHAIN_MISMATCH")
+    except RuntimeError as exc:
+        failure_code = str(exc)
+    receipt: dict[str, Any] = {
+        "schema": SCHEMA,
+        "status": "PASS" if failure_code is None else "ABSTAINED",
+        "failure_code": failure_code,
+        "groundtruth_root": str(root),
+        "producer_head": head,
+        "source_manifest_sha256": source_manifest,
+        "tracked_blob_count": tracked_count,
+        "immutable_git_inspection": True,
+        "canonical_red_replay": red_replay or "not_run",
+        "mutation_checks": mutation_check or "not_run",
+        "provider_calls": 0,
+        "benchmark_runs": 0,
+        "benchmark_ready": False,
+    }
+    receipt["receipt_sha256"] = hashlib.sha256(_canonical(receipt)).hexdigest()
+    return receipt
+
+
+def verify_reaudit_receipt(receipt: dict[str, Any]) -> bool:
+    if receipt.get("schema") != SCHEMA or not isinstance(receipt.get("receipt_sha256"), str):
+        return False
+    body = dict(receipt)
+    supplied = body.pop("receipt_sha256")
+    return hashlib.sha256(_canonical(body)).hexdigest() == supplied
+
+
+def write_receipt(path: Path, receipt: dict[str, Any]) -> None:
+    if not verify_reaudit_receipt(receipt):
+        raise ValueError("receipt_chain_mismatch")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", dir=path.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        handle.write(_canonical(receipt) + b"\n")
+    os.replace(temporary, path)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--groundtruth-root", type=Path, default=Path.cwd())
+    parser.add_argument("--harness-root", type=Path, dest="groundtruth_root")
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args()
+    receipt = run_reaudit(args.groundtruth_root)
+    write_receipt(args.output, receipt)
+    print(
+        json.dumps(
+            {
+                "schema": SCHEMA,
+                "failure_code": receipt["failure_code"],
+                "output": str(args.output),
+            }
+        )
+    )
+    return 0 if receipt["failure_code"] is None else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

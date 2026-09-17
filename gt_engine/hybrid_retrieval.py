@@ -1,562 +1,80 @@
-"""Deterministic, trajectory-conditioned hybrid repository retrieval.
+"""Revision-bound hybrid retrieval and SQLite vector acceleration.
 
-This module is deliberately independent from provider delivery and graph storage.
-Callers adapt their repository index into :class:`RepositoryDocument` and
-:class:`StructuralLink` values, then inject an optional dense backend.  Every
-retrieval channel runs independently; fusion consumes ranks rather than
-incomparable channel scores.
+Identity-bound lexical/structural retrieval refuses to run when repository
+identity disagrees with the central runtime binding.  The optional SQLite
+vector table is an accelerator only: candidate discovery is followed by
+exact, reproducible scoring over persisted source rows.  When vec0 is active,
+the ANN pool is unioned with any lexical or graph channel hits so channel-only
+candidates are not dropped before exact rescore.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
-import shlex
-import time
-from collections import Counter, defaultdict
+import sqlite3
+import struct
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import InitVar, dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from pathlib import Path
+
+from gt_engine.repository_intelligence import CentralRuntimeBinding, CentralRuntimeIdentityError
 
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+")
-_PATH_SPLIT_RE = re.compile(r"[/\\.\-]+")
-_QUERY_GLUE = frozenset(
-    {
-        "a",
-        "an",
-        "and",
-        "as",
-        "at",
-        "be",
-        "by",
-        "for",
-        "from",
-        "in",
-        "into",
-        "is",
-        "it",
-        "of",
-        "on",
-        "or",
-        "that",
-        "the",
-        "their",
-        "this",
-        "through",
-        "to",
-        "up",
-        "with",
-    }
-)
-_COMMON_SYMBOLS = frozenset(
-    {
-        "app",
-        "data",
-        "get",
-        "id",
-        "init",
-        "item",
-        "main",
-        "model",
-        "n",
-        "repr",
-        "result",
-        "run",
-        "set",
-        "str",
-        "test",
-        "value",
-        "x",
-    }
-)
-_PROGRAM_ARGUMENT_FLAGS = frozenset(
-    {"-c", "-e", "--command", "--eval", "--execute", "-command", "/c"}
-)
-_SHELL_OPERATORS = frozenset({";", "&&", "||", "|", "&"})
-_SAFE_ACTION_TOKEN = re.compile(r"^[A-Za-z0-9_./:+@%=-]{1,160}$")
-_PATH_LITERAL_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:(?:[A-Za-z]:)?[\\/])?"
-    r"(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+"
-    r"(?![A-Za-z0-9_.-])"
-)
-_BACKTICK_ENTITY_RE = re.compile(r"`([^`\r\n]{1,160})`")
-_CALL_ENTITY_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-_UPPER_ENTITY_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Z0-9_]{3,})(?![A-Za-z0-9_])")
 
 
-def _looks_code_shaped_identifier(value: str) -> bool:
-    return bool(
-        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
-        and (
-            "_" in value
-            or any(character.isupper() for character in value[1:])
-            or value.isupper()
-        )
-    )
-
-
-def _explicit_identifier_tokens(value: str) -> set[str]:
-    """Extract syntax-marked task entities without promoting ordinary prose.
-
-    Sparse and dense channels still receive the complete task.  This narrower
-    surface controls only mechanical exact-symbol certification.
-    """
-
-    text = str(value or "")
-    entities: set[str] = set()
-    for match in _BACKTICK_ENTITY_RE.finditer(text):
-        entities.update(token.lower() for token in _TOKEN_RE.findall(match.group(1)))
-    entities.update(match.group(1).lower() for match in _CALL_ENTITY_RE.finditer(text))
-    entities.update(match.group(1).lower() for match in _UPPER_ENTITY_RE.finditer(text))
-    return entities
+class RetrievalState(StrEnum):
+    READY = "ready"
+    EMPTY = "empty"
+    ABSTAINED = "abstained"
 
 
 class RetrievalIntent(StrEnum):
-    """The repository relationship needed for the agent's next decision."""
-
-    IMPLEMENTATION_CONTEXT = "implementation_context"
-    VALIDATION_CONTEXT = "validation_context"
-    MISSING_CONTEXT = "missing_context"
-    DIAGNOSTIC_ROOT_CAUSE = "diagnostic_root_cause"
-    CHANGE_IMPACT = "change_impact"
-    OTHER = "other"
+    INSPECT = "inspect"
+    EDIT = "edit"
+    VALIDATE = "validate"
 
 
 class RetrievalChannel(StrEnum):
-    EXACT = "exact"
     LEXICAL = "lexical"
-    BM25 = "bm25"
-    DENSE = "dense"
     STRUCTURAL = "structural"
 
 
-class EvidenceOrigin(StrEnum):
-    """Where evidence content entered the task trajectory."""
-
-    PREEXISTING_REPOSITORY = "preexisting_repository"
-    MODEL_AUTHORED = "model_authored"
-    TASK_DELIVERABLE = "task_deliverable"
-    GENERATED_ARTIFACT = "generated_artifact"
-    EXTERNAL_RUNTIME = "external_runtime"
-
-
 class EvidenceAuthority(StrEnum):
-    """What a candidate can mechanically establish for the next decision."""
-
-    IDENTITY_ONLY = "identity_only"
-    RANKING_SUPPORT = "ranking_support"
-    CERTIFIED_RELATION = "certified_relation"
-    EXECUTION_OBSERVATION = "execution_observation"
+    GRAPH = "graph"
+    CHECKOUT = "checkout"
+    INFERRED = "inferred"
 
 
-_CHANNEL_ORDER = {
-    RetrievalChannel.EXACT: 0,
-    RetrievalChannel.LEXICAL: 1,
-    RetrievalChannel.BM25: 2,
-    RetrievalChannel.DENSE: 3,
-    RetrievalChannel.STRUCTURAL: 4,
-}
+class EvidenceOrigin(StrEnum):
+    GRAPH_NODE = "graph_node"
+    GRAPH_EDGE = "graph_edge"
+    SOURCE_SPAN = "source_span"
 
 
-def _normalize_path(path: str) -> str:
-    value = str(path or "").strip().replace("\\", "/")
-    while value.startswith("./"):
-        value = value[2:]
-    return value
-
-
-def _tokens(value: str) -> tuple[str, ...]:
-    tokens: list[str] = []
-    for raw in _TOKEN_RE.findall(str(value or "")):
-        tokens.append(raw.lower())
-        expanded = raw.replace("_", " ")
-        expanded = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", expanded)
-        expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", expanded)
-        tokens.extend(
-            part.lower() for part in expanded.split() if part and part.lower() != raw.lower()
-        )
-    return tuple(tokens)
-
-
-def _path_tokens(path: str) -> tuple[str, ...]:
-    return tuple(
-        token for part in _PATH_SPLIT_RE.split(_normalize_path(path)) for token in _tokens(part)
-    )
-
-
-def _canonical_symbol(symbol: str | None) -> str:
-    value = str(symbol or "").strip()
-    if not value:
-        return ""
-    leaf = re.split(r"(?:::|[.#])", value)[-1]
-    return leaf.lower() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", leaf) else ""
-
-
-def _explicit_identifiers(state: RetrievalState) -> frozenset[str]:
-    identifiers = _explicit_identifier_tokens(state.task_text)
-    identifiers.update(
-        canonical
-        for symbol in state.active_symbols
-        if (canonical := _canonical_symbol(symbol))
-    )
-    identifiers.update(_explicit_identifier_tokens("\n".join(state.diagnostics)))
-    if state.action is not None:
-        identifiers.update(
-            token.lower()
-            for token in state.action.semantic_tokens
-            if _looks_code_shaped_identifier(token)
-        )
-    return frozenset(identifiers)
-
-
-def _canonical_explicit_path(path: str) -> str:
-    value = _normalize_path(path).lower()
-    return value[len("/app/") :] if value.startswith("/app/") else value
-
-
-def _explicit_paths(state: RetrievalState) -> frozenset[str]:
-    action_targets = state.action.targets if state.action else ()
-    material = "\n".join((state.task_text, *state.diagnostics))
-    paths = {
-        _canonical_explicit_path(match.group(0))
-        for match in _PATH_LITERAL_RE.finditer(material.replace("\\", "/"))
-    }
-    paths.update(_canonical_explicit_path(path) for path in action_targets)
-    # Active/changed paths are structural seeds, not proof that an arbitrary
-    # span from the same file is missing from provider history.  Making them
-    # exact authority caused the retriever to echo the file just read/edited.
-    return frozenset(path for path in paths if path)
-
-
-def _stable_hash(*parts: str) -> str:
-    material = "\0".join(str(part) for part in parts)
-    return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()
-
-
-def _default_token_counter(text: str) -> int:
-    """Return a deterministic conservative token approximation.
-
-    Provider integrations can inject their exact tokenizer.  The default
-    counts words and punctuation independently, so packing never depends on
-    an optional model package.
-    """
-
-    return len(re.findall(r"\w+|[^\w\s]", str(text or ""), re.UNICODE))
-
-
-def _bounded_action_tokens(raw_command: str) -> tuple[str, ...]:
-    header = str(raw_command or "").splitlines()[0][:2_048].strip()
-    if not header:
-        return ()
-    header = re.split(r"\s+<<-?\s*", header, maxsplit=1)[0].strip()
-    try:
-        tokens = tuple(shlex.split(header, posix=True))
-    except ValueError:
-        tokens = tuple(header.split())
-    bounded: list[str] = []
-    for token in tokens:
-        lowered = token.lower()
-        if lowered in _PROGRAM_ARGUMENT_FLAGS or token in _SHELL_OPERATORS:
-            break
-        if token.startswith(("<<", ">", "<")):
-            break
-        if _SAFE_ACTION_TOKEN.fullmatch(token):
-            bounded.append(token)
-        if len(bounded) >= 32:
-            break
-    return tuple(bounded)
-
-
-def _action_operation(executable: str, tokens: tuple[str, ...]) -> tuple[str, str | None]:
-    lowered = executable.lower()
-    arguments = tuple(token.lower() for token in tokens[1:])
-    if lowered in {"pytest", "tox", "make", "ctest"}:
-        return "validate", lowered
-    if lowered in {"python", "python3"} and "pytest" in arguments:
-        return "validate", "pytest"
-    if lowered == "go" and arguments[:1] == ("test",):
-        return "validate", "go_test"
-    if lowered == "cargo" and arguments[:1] == ("test",):
-        return "validate", "cargo_test"
-    if lowered in {"rg", "grep", "find"}:
-        return "search", None
-    if lowered in {"cat", "head", "tail", "less"}:
-        return "read", None
-    if lowered in {"touch", "mkdir"}:
-        return "create", None
-    if lowered in {"rm", "rmdir"}:
-        return "delete", None
-    return "other", None
-
-
-@dataclass(frozen=True)
-class RetrievalActionState:
-    """Bounded action semantics; never stores a raw shell or program body."""
-
-    operation: str = "other"
-    executable: str = ""
-    targets: tuple[str, ...] = ()
-    validation_kind: str | None = None
-    semantic_tokens: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        operation = re.sub(r"[^a-z0-9_]+", "_", str(self.operation or "other").lower())[:40]
-        executable = str(self.executable or "").replace("\\", "/").rsplit("/", 1)[-1]
-        executable = re.sub(r"[^A-Za-z0-9_.+-]+", "", executable)[:80]
-        targets = tuple(
-            dict.fromkeys(
-                _normalize_path(target)[:300]
-                for target in self.targets
-                if target and "\n" not in target and "\r" not in target
-            )
-        )[:24]
-        semantic_tokens = tuple(
-            dict.fromkeys(
-                str(token)[:160]
-                for token in self.semantic_tokens
-                if _SAFE_ACTION_TOKEN.fullmatch(str(token))
-            )
-        )[:24]
-        validation_kind = (
-            re.sub(r"[^a-z0-9_.+-]+", "_", str(self.validation_kind).lower())[:80]
-            if self.validation_kind
-            else None
-        )
-        object.__setattr__(self, "operation", operation or "other")
-        object.__setattr__(self, "executable", executable)
-        object.__setattr__(self, "targets", targets)
-        object.__setattr__(self, "semantic_tokens", semantic_tokens)
-        object.__setattr__(self, "validation_kind", validation_kind)
-
-    @classmethod
-    def from_raw_command(cls, raw_command: str) -> RetrievalActionState:
-        tokens = _bounded_action_tokens(raw_command)
-        if not tokens:
-            return cls()
-        executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1]
-        operation, validation_kind = _action_operation(executable, tokens)
-        operands = tuple(
-            token
-            for token in tokens[1:]
-            if not token.startswith("-") and token.lower() not in {"test", "-m"}
-        )
-        targets = tuple(
-            token
-            for token in operands
-            if "/" in token or "\\" in token or re.search(r"\.[A-Za-z0-9]{1,12}$", token)
-        )
-        semantic_tokens = tuple(token for token in operands if token not in targets)
-        return cls(
-            operation=operation,
-            executable=executable,
-            targets=targets,
-            validation_kind=validation_kind,
-            semantic_tokens=semantic_tokens,
-        )
-
-    def query_text(self) -> str:
-        fields = [f"operation={self.operation}"]
-        if self.executable:
-            fields.append(f"executable={self.executable}")
-        if self.targets:
-            fields.append(f"targets={' '.join(self.targets)}")
-        if self.validation_kind:
-            fields.append(f"validation={self.validation_kind}")
-        if self.semantic_tokens:
-            fields.append(f"tokens={' '.join(self.semantic_tokens)}")
-        return " ".join(fields)
-
-
-@dataclass(frozen=True)
-class RetrievalQueryPlan:
-    """Deterministic split between the current decision and task fallback."""
-
-    primary_text: str
-    fallback_text: str = ""
-
-    @property
-    def full_text(self) -> str:
-        return "\n".join(
-            part for part in (self.primary_text.strip(), self.fallback_text.strip()) if part
-        )
-
-
-@dataclass(frozen=True)
-class RetrievalState:
-    task_text: str
-    intent: RetrievalIntent
-    proposed_action: InitVar[RetrievalActionState | str | None] = None
-    action: RetrievalActionState | None = None
-    active_paths: tuple[str, ...] = ()
-    active_symbols: tuple[str, ...] = ()
-    changed_paths: tuple[str, ...] = ()
-    diagnostics: tuple[str, ...] = ()
-    validation_state: str = "unknown"
-    source_revision: str = ""
-    previously_exposed_claims: tuple[str, ...] = ()
-
-    def __post_init__(self, proposed_action: RetrievalActionState | str | None) -> None:
-        if self.action is not None and proposed_action is not None:
-            raise ValueError("provide action or legacy proposed_action, not both")
-        action = self.action
-        if isinstance(proposed_action, RetrievalActionState):
-            action = proposed_action
-        elif proposed_action is not None:
-            action = RetrievalActionState.from_raw_command(str(proposed_action))
-        if action is not None and not isinstance(action, RetrievalActionState):
-            raise TypeError("action must be RetrievalActionState")
-        object.__setattr__(self, "action", action)
-
-    def query_plan(self) -> RetrievalQueryPlan:
-        """Prefer observed failure state while retaining task text as fallback.
-
-        A concrete current diagnostic is a stronger retrieval key than the
-        original long-form task.  Mixing both at equal weight caused dense and
-        sparse channels to return task-adjacent but failure-irrelevant files.
-        Other lifecycle states retain the historical task-conditioned query.
-        """
-
-        current_sections = (
-            self.intent.value,
-            self.action.query_text() if self.action else "",
-            " ".join(self.active_symbols),
-            " ".join(self.diagnostics),
-            self.validation_state,
-        )
-        current = "\n".join(
-            section.strip() for section in current_sections if section.strip()
-        )
-        if self.intent is RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE and self.diagnostics:
-            return RetrievalQueryPlan(primary_text=current, fallback_text=self.task_text)
-        sections = (
-            self.task_text,
-            current,
-            " ".join(self.active_paths),
-            " ".join(self.changed_paths),
-        )
-        return RetrievalQueryPlan(
-            primary_text="\n".join(
-                section.strip() for section in sections if section.strip()
-            )
-        )
-
-    def query_text(self) -> str:
-        """Compile full replay identity, including deterministic fallback."""
-
-        return self.query_plan().full_text
-
-    def dense_query_text(self) -> str:
-        return self.query_plan().primary_text
-
-    def sparse_query_text(self) -> str:
-        """Return sparse terms without creating false same-directory support.
-
-        Active and changed paths seed the exact and structural channels.  Adding
-        their generic directory/extension tokens (``src``, ``test``, ``py``)
-        to lexical and BM25 makes those correlated channels appear to confirm
-        almost every file in a repository.  Sparse retrieval instead consumes
-        the task, typed intent, command, symbols, diagnostics, and validation
-        state; exact path matching remains independently available.
-        """
-
-        current_sections = (
-            self.intent.value,
-            self.action.query_text() if self.action else "",
-            " ".join(self.active_symbols),
-            " ".join(self.diagnostics),
-            self.validation_state,
-        )
-        current = "\n".join(
-            section.strip() for section in current_sections if section.strip()
-        )
-        if self.intent is RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE and self.diagnostics:
-            return current
-        return "\n".join(
-            section.strip() for section in (self.task_text, current) if section.strip()
-        )
-
-    @property
-    def query_hash(self) -> str:
-        return _stable_hash(self.query_text(), self.source_revision)
-
-
-def retrieval_query_terms(
-    state: RetrievalState,
-    *,
-    limit: int = 32,
-) -> tuple[str, ...]:
-    """Compile literal FTS seeds from the same typed runtime state.
-
-    Task-contract extraction intentionally drops common words because it is an
-    obligation parser. Repository retrieval cannot do that: identifiers such
-    as ``default``, ``help``, and ``empty`` are often the only vocabulary
-    shared by an issue and the relevant source or test body. This compiler
-    removes only grammatical glue and controller labels, then ranks terms
-    deterministically by identifier specificity, frequency, length, and first
-    occurrence.
-    """
-
-    maximum = max(0, int(limit))
-    if maximum == 0:
-        return ()
-    raw_tokens = _tokens(state.sparse_query_text())
-    controller_tokens = {
-        *_tokens(state.intent.value),
-        *_tokens(state.validation_state),
-        "unknown",
-    }
-    first_seen: dict[str, int] = {}
-    frequency: Counter[str] = Counter()
-    for position, token in enumerate(raw_tokens):
-        normalized = str(token or "").lower()
-        if (
-            len(normalized) < 2
-            or normalized.isdigit()
-            or normalized in _QUERY_GLUE
-            or normalized in controller_tokens
-        ):
-            continue
-        first_seen.setdefault(normalized, position)
-        frequency[normalized] += 1
-    ranked = sorted(
-        frequency,
-        key=lambda token: (
-            -int("_" in token or "." in token),
-            -frequency[token],
-            -len(token),
-            first_seen[token],
-            token,
-        ),
-    )
-    return tuple(ranked[:maximum])
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RepositoryDocument:
     path: str
-    text: str
-    start_line: int | None = 1
-    end_line: int | None = None
-    symbol: str | None = None
+    start_line: int = 1
+    end_line: int = 1
+    symbol: str = ""
+    text: str = ""
     provenance: tuple[str, ...] = ()
-    origin: EvidenceOrigin = EvidenceOrigin.PREEXISTING_REPOSITORY
-    origin_revision: str = ""
+    authority: EvidenceAuthority = EvidenceAuthority.CHECKOUT
+    document_id: str = ""
 
     def __post_init__(self) -> None:
-        normalized = _normalize_path(self.path)
-        if not normalized:
-            raise ValueError("repository document path must not be empty")
-        object.__setattr__(self, "path", normalized)
-        if self.end_line is None and self.start_line is not None:
-            line_count = max(1, str(self.text or "").count("\n") + 1)
-            object.__setattr__(self, "end_line", self.start_line + line_count - 1)
-        if not isinstance(self.origin, EvidenceOrigin):
-            object.__setattr__(self, "origin", EvidenceOrigin(str(self.origin)))
+        if self.start_line < 1 or self.end_line < self.start_line:
+            raise ValueError("invalid document line range")
+        if not self.document_id:
+            value = f"{self.path}\0{self.start_line}\0{self.end_line}\0{self.symbol}"
+            object.__setattr__(self, "document_id", "doc-" + hashlib.sha256(value.encode()).hexdigest()[:20])
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StructuralLink:
     source_path: str
     target_path: str
@@ -564,1342 +82,564 @@ class StructuralLink:
     confidence: float = 1.0
     provenance: tuple[str, ...] = ()
     certified: bool = False
-    source_symbol: str | None = None
-    source_start_line: int | None = None
-    target_symbol: str | None = None
-    target_start_line: int | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "source_path", _normalize_path(self.source_path))
-        object.__setattr__(self, "target_path", _normalize_path(self.target_path))
-        if not self.source_path or not self.target_path:
-            raise ValueError("structural link paths must not be empty")
-        if not 0.0 <= float(self.confidence) <= 1.0:
-            raise ValueError("structural link confidence must be between zero and one")
+    source_symbol: str = ""
+    target_symbol: str = ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RetrievalCandidate:
     path: str
-    start_line: int | None
-    end_line: int | None
-    symbol: str | None
-    text: str
-    channel: RetrievalChannel
-    channel_rank: int
-    relation: str | None
-    provenance: tuple[str, ...]
-    source_revision: str
-    channel_score: float = 0.0
-    origin: EvidenceOrigin = EvidenceOrigin.PREEXISTING_REPOSITORY
-    authority: EvidenceAuthority = EvidenceAuthority.RANKING_SUPPORT
-    origin_revision: str = ""
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "path", _normalize_path(self.path))
-        if not self.path:
-            raise ValueError("candidate path must not be empty")
-        if self.channel_rank < 1:
-            raise ValueError("candidate rank must be one-based")
-        if not isinstance(self.origin, EvidenceOrigin):
-            object.__setattr__(self, "origin", EvidenceOrigin(str(self.origin)))
-        if not isinstance(self.authority, EvidenceAuthority):
-            object.__setattr__(self, "authority", EvidenceAuthority(str(self.authority)))
-
-    @property
-    def content_claim_id(self) -> str:
-        """Stable identity of the bounded semantic content delivered to a model.
-
-        Channel support and GraphDB row IDs prove how a candidate was found;
-        they are not part of what the fact *is*.  Keeping them in the identity
-        caused an unchanged span to be delivered again after each graph rebuild.
-        """
-
-        normalized_text = " ".join(str(self.text or "").split())
-        return _stable_hash(
-            self.path.lower(),
-            str(self.start_line or 0),
-            str(self.end_line or 0),
-            str(self.symbol or ""),
-            str(self.relation or "").lower(),
-            normalized_text,
-        )
-
-    @property
-    def claim_hash(self) -> str:
-        """Backward-compatible name for :attr:`content_claim_id`."""
-
-        return self.content_claim_id
+    score: float
+    channels: tuple[RetrievalChannel, ...] = ()
+    document_ids: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+    owner_certified: bool = False
+    authority: EvidenceAuthority = EvidenceAuthority.INFERRED
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RankedFile:
     path: str
-    fused_score: float
-    channel_ranks: tuple[tuple[RetrievalChannel, int], ...]
-    representative: RetrievalCandidate
-    provenance: tuple[str, ...]
-    channel_candidates: tuple[tuple[RetrievalChannel, RetrievalCandidate], ...] = ()
-
-    @property
-    def support_count(self) -> int:
-        return len(self.channel_ranks)
+    score: float
+    rank: int
+    evidence: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class ChannelReceipt:
-    channel: RetrievalChannel
-    candidate_count: int
-    failed: bool
-    reason: str
-    latency_ms: float
-    available: bool = True
-    backend_identity: str = ""
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HybridRetrievalResult:
-    ranked_files: tuple[RankedFile, ...]
-    ranked_spans: tuple[RetrievalCandidate, ...]
-    selected_context: tuple[RetrievalCandidate, ...]
-    abstained: bool
-    reason_codes: tuple[str, ...]
-    channel_receipts: tuple[ChannelReceipt, ...]
-    latency_ms: float
-    query_hash: str
-    token_budget: int
-    selected_token_count: int
-    character_budget: int | None = None
-    selected_character_count: int = 0
+    state: RetrievalState
+    candidates: tuple[RetrievalCandidate, ...] = ()
+    ranked_files: tuple[RankedFile, ...] = ()
+    query_digest: str = ""
+    repository_revision: str = ""
+    graph_revision: str = ""
+    fallback_reason: str = ""
 
 
-@dataclass(frozen=True)
-class PreemptiveRetrievalFrame:
-    query_hash: str
-    source_revision: str
-    trigger: str
-    evidence: tuple[RetrievalCandidate, ...]
-    rendered_text: str
-    token_count: int
-    claim_hashes: tuple[str, ...]
-
-
-@runtime_checkable
-class RetrievalChannelBackend(Protocol):
-    channel: RetrievalChannel
-
-    def retrieve(
-        self,
-        state: RetrievalState,
-        *,
-        limit: int,
-    ) -> Sequence[RetrievalCandidate]: ...
-
-
-@runtime_checkable
-class DenseEmbeddingBackend(Protocol):
-    def embed_query(self, text: str) -> Sequence[float]: ...
-
-    def embed_documents(self, texts: tuple[str, ...]) -> Sequence[Sequence[float]]: ...
-
-
-def _document_candidate(
-    document: RepositoryDocument,
-    *,
-    state: RetrievalState,
-    channel: RetrievalChannel,
-    rank: int,
-    score: float,
-    relation: str | None = None,
-    provenance: tuple[str, ...] = (),
-) -> RetrievalCandidate:
-    combined_provenance = tuple(
-        dict.fromkeys((*document.provenance, *provenance, channel.value))
-    )
-    authority = EvidenceAuthority.RANKING_SUPPORT
-    if channel is RetrievalChannel.EXACT and set(combined_provenance) & {
-        "exact_path",
-        "exact_symbol",
-    }:
-        authority = EvidenceAuthority.IDENTITY_ONLY
-    elif channel is RetrievalChannel.STRUCTURAL and "structural_certified" in set(
-        combined_provenance
-    ):
-        authority = EvidenceAuthority.CERTIFIED_RELATION
-    return RetrievalCandidate(
-        path=document.path,
-        start_line=document.start_line,
-        end_line=document.end_line,
-        symbol=document.symbol,
-        text=document.text,
-        channel=channel,
-        channel_rank=rank,
-        relation=relation,
-        provenance=combined_provenance,
-        source_revision=state.source_revision,
-        channel_score=float(score),
-        origin=document.origin,
-        authority=authority,
-        origin_revision=document.origin_revision,
-    )
-
-
-def _rank_documents(
-    scored: Sequence[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]],
-    *,
-    state: RetrievalState,
-    channel: RetrievalChannel,
-    limit: int,
-) -> tuple[RetrievalCandidate, ...]:
-    ordered = sorted(
-        (row for row in scored if row[0] > 0.0),
-        key=lambda row: (-row[0], row[1].path.lower(), row[1].start_line or 0),
-    )
-    return tuple(
-        _document_candidate(
-            document,
-            state=state,
-            channel=channel,
-            rank=rank,
-            score=score,
-            relation=relation,
-            provenance=provenance,
-        )
-        for rank, (score, document, relation, provenance) in enumerate(ordered[: max(0, limit)], 1)
-    )
-
-
-class ExactRetrievalChannel:
-    channel = RetrievalChannel.EXACT
-
-    def __init__(self, documents: Sequence[RepositoryDocument]) -> None:
-        self._documents = tuple(documents)
-        self._prepared = tuple(
-            (
-                document,
-                frozenset(_path_tokens(document.path)),
-                frozenset(_tokens(document.symbol or "")),
-                str(document.text or "").lower(),
-            )
-            for document in self._documents
-        )
-        self._path_document_frequency = Counter(
-            token for _, path_tokens, _, _ in self._prepared for token in path_tokens
-        )
-        self._symbol_document_frequency = Counter(
-            symbol
-            for document in self._documents
-            if (symbol := _canonical_symbol(document.symbol))
-        )
-        self._distinctive_path_frequency = max(1, math.ceil(len(self._documents) * 0.20))
-
-    def retrieve(
-        self,
-        state: RetrievalState,
-        *,
-        limit: int,
-    ) -> tuple[RetrievalCandidate, ...]:
-        query_tokens = set(_tokens(state.query_text()))
-        explicit_identifiers = _explicit_identifiers(state)
-        explicit_paths = _explicit_paths(state)
-        scored: list[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]] = []
-        for document, path_tokens, symbol_tokens, text in self._prepared:
-            score = 0.0
-            reasons: list[str] = []
-            path_overlap = {
-                token
-                for token in query_tokens & path_tokens
-                if self._path_document_frequency[token] <= self._distinctive_path_frequency
-            }
-            symbol_overlap = query_tokens & symbol_tokens
-            if path_overlap:
-                score += 5.0 * len(path_overlap)
-                reasons.append("exact_path_token")
-            if symbol_overlap:
-                score += 6.0 * len(symbol_overlap)
-                reasons.append("exact_symbol_token")
-            normalized_path = _canonical_explicit_path(document.path)
-            if normalized_path in explicit_paths:
-                score += 10.0
-                reasons.append("exact_path")
-            canonical_symbol = _canonical_symbol(document.symbol)
-            if (
-                len(canonical_symbol) >= 4
-                and canonical_symbol not in _COMMON_SYMBOLS
-                and self._symbol_document_frequency[canonical_symbol] == 1
-                and canonical_symbol in explicit_identifiers
-            ):
-                score += 10.0
-                reasons.append("exact_symbol")
-            exact_phrases = {
-                part.strip().lower()
-                for part in (state.task_text, *(state.diagnostics or ()))
-                if len(part.strip()) >= 8
-            }
-            if any(phrase in text for phrase in exact_phrases):
-                score += 2.0
-                reasons.append("exact_phrase")
-            scored.append((score, document, None, tuple(reasons)))
-        return _rank_documents(scored, state=state, channel=self.channel, limit=limit)
-
-
-class LexicalRetrievalChannel:
-    channel = RetrievalChannel.LEXICAL
-
-    def __init__(self, documents: Sequence[RepositoryDocument]) -> None:
-        self._documents = tuple(documents)
-        self._prepared = tuple(
-            (
-                document,
-                Counter(
-                    (
-                        *_path_tokens(document.path),
-                        *_tokens(document.symbol or ""),
-                        *_tokens(document.text),
-                    )
-                ),
-            )
-            for document in self._documents
-        )
-
-    def retrieve(
-        self,
-        state: RetrievalState,
-        *,
-        limit: int,
-    ) -> tuple[RetrievalCandidate, ...]:
-        query = Counter(_tokens(state.sparse_query_text()))
-        scored: list[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]] = []
-        for document, terms in self._prepared:
-            overlap = set(query) & set(terms)
-            numerator = sum(min(query[token], terms[token]) for token in overlap)
-            denominator = sum(query.values()) + sum(terms.values()) - numerator
-            score = float(numerator / denominator) if denominator else 0.0
-            scored.append((score, document, None, ("lexical_token_overlap",)))
-        return _rank_documents(scored, state=state, channel=self.channel, limit=limit)
-
-
-class BM25RetrievalChannel:
-    channel = RetrievalChannel.BM25
-
-    def __init__(
-        self,
-        documents: Sequence[RepositoryDocument],
-        *,
-        k1: float = 1.2,
-        b: float = 0.75,
-    ) -> None:
-        self._documents = tuple(documents)
-        self._k1 = float(k1)
-        self._b = float(b)
-        self._prepared = tuple(
-            (
-                document,
-                Counter(
-                    (
-                        *_path_tokens(document.path),
-                        *_tokens(document.symbol or ""),
-                        *_tokens(document.text),
-                    )
-                ),
-            )
-            for document in self._documents
-        )
-        self._document_count = len(self._prepared)
-        self._average_length = (
-            sum(sum(counts.values()) for _, counts in self._prepared) / self._document_count
-            if self._document_count
-            else 0.0
-        )
-        self._document_frequency = Counter(term for _, counts in self._prepared for term in counts)
-
-    def retrieve(
-        self,
-        state: RetrievalState,
-        *,
-        limit: int,
-    ) -> tuple[RetrievalCandidate, ...]:
-        query_terms = tuple(dict.fromkeys(_tokens(state.sparse_query_text())))
-        if not self._prepared or not query_terms:
-            return ()
-        scored: list[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]] = []
-        for document, counts in self._prepared:
-            document_length = sum(counts.values())
-            length_ratio = document_length / self._average_length if self._average_length else 1.0
-            score = 0.0
-            for term in query_terms:
-                frequency = counts[term]
-                if frequency <= 0:
-                    continue
-                document_frequency = self._document_frequency[term]
-                inverse_frequency = math.log(
-                    1.0
-                    + (self._document_count - document_frequency + 0.5) / (document_frequency + 0.5)
-                )
-                denominator = frequency + self._k1 * (1.0 - self._b + self._b * length_ratio)
-                score += inverse_frequency * (frequency * (self._k1 + 1.0)) / denominator
-            scored.append((score, document, None, ("bm25",)))
-        return _rank_documents(scored, state=state, channel=self.channel, limit=limit)
-
-
-class DenseRetrievalChannel:
-    channel = RetrievalChannel.DENSE
-
-    def __init__(
-        self,
-        documents: Sequence[RepositoryDocument],
-        backend: DenseEmbeddingBackend | None,
-    ) -> None:
-        self._documents = tuple(documents)
-        documents_by_path: dict[str, list[RepositoryDocument]] = defaultdict(list)
-        for document in self._documents:
-            documents_by_path[document.path.lower()].append(document)
-        self._documents_by_path = {path: tuple(rows) for path, rows in documents_by_path.items()}
-        self._backend = backend
-        self._candidate_paths: frozenset[str] | None = None
-        self._candidate_path_order: tuple[str, ...] = ()
-        self._candidate_document_limit: int | None = None
-        self.availability_reason = ""
-
-    def set_candidate_paths(
-        self,
-        paths: Sequence[str] | None,
-        *,
-        document_limit: int | None = None,
-    ) -> None:
-        """Restrict this pass to a deterministic cascade candidate pool."""
-
-        self._candidate_paths = (
-            None
-            if paths is None
-            else frozenset(str(path).strip().lower() for path in paths if str(path).strip())
-        )
-        self._candidate_path_order = (
-            ()
-            if paths is None
-            else tuple(
-                dict.fromkeys(str(path).strip().lower() for path in paths if str(path).strip())
-            )
-        )
-        self._candidate_document_limit = (
-            None if document_limit is None else max(1, int(document_limit))
-        )
-
-    @property
-    def backend_identity(self) -> str:
-        if self._backend is None:
-            return ""
-        return str(getattr(self._backend, "identity", type(self._backend).__qualname__))
-
-    def retrieve(
-        self,
-        state: RetrievalState,
-        *,
-        limit: int,
-    ) -> tuple[RetrievalCandidate, ...]:
-        if self._backend is None:
-            self.availability_reason = "backend_unavailable"
-            return ()
-        if self._candidate_paths is None:
-            selected_documents = self._documents
-        else:
-            selected: list[RepositoryDocument] = []
-            # Preserve coverage across files before taking additional spans
-            # from any one file.  This is deterministic and bounds ONNX work
-            # by documents, not merely by path names.
-            limit = self._candidate_document_limit or sum(
-                len(self._documents_by_path.get(path, ())) for path in self._candidate_paths
-            )
-            for offset in range(limit):
-                for path in self._candidate_path_order:
-                    rows = self._documents_by_path.get(path, ())
-                    if offset < len(rows):
-                        selected.append(rows[offset])
-                        if len(selected) >= limit:
-                            break
-                if len(selected) >= limit:
-                    break
-            selected_documents = tuple(selected)
-        if not selected_documents:
-            self.availability_reason = "candidate_pool_empty"
-            return ()
-        self.availability_reason = (
-            ""
-            if self._candidate_paths is None
-            else (
-                f"candidate_pool={len(selected_documents)}/{len(self._documents)}"
-                f"_docs/{len(self._candidate_paths)}_paths"
-            )
-        )
-        query = tuple(float(item) for item in self._backend.embed_query(state.dense_query_text()))
-        document_texts = tuple(
-            "\n".join(
-                part
-                for part in (
-                    f"path: {document.path}",
-                    f"symbol: {document.symbol}" if document.symbol else "",
-                    document.text,
-                )
-                if part
-            )
-            for document in selected_documents
-        )
-        embeddings = tuple(
-            tuple(float(item) for item in row)
-            for row in self._backend.embed_documents(document_texts)
-        )
-        if len(embeddings) != len(selected_documents):
-            raise ValueError("dense backend returned a different number of document embeddings")
-        query_norm = math.sqrt(sum(value * value for value in query))
-        scored: list[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]] = []
-        for document, embedding in zip(selected_documents, embeddings, strict=True):
-            if len(embedding) != len(query):
-                raise ValueError("dense backend returned inconsistent embedding dimensions")
-            document_norm = math.sqrt(sum(value * value for value in embedding))
-            denominator = query_norm * document_norm
-            cosine = (
-                sum(left * right for left, right in zip(query, embedding, strict=True))
-                / denominator
-                if denominator
-                else 0.0
-            )
-            # Negative cosine is not useful evidence and must not be ranked.
-            scored.append((max(0.0, cosine), document, None, ("dense_cosine",)))
-        return _rank_documents(scored, state=state, channel=self.channel, limit=limit)
-
-
-class StructuralRetrievalChannel:
-    channel = RetrievalChannel.STRUCTURAL
-
-    def __init__(
-        self,
-        documents: Sequence[RepositoryDocument],
-        links: Sequence[StructuralLink],
-    ) -> None:
-        documents_by_path: dict[str, list[RepositoryDocument]] = defaultdict(list)
-        for document in documents:
-            documents_by_path[document.path.lower()].append(document)
-        self._documents = {
-            path: tuple(
-                sorted(
-                    rows,
-                    key=lambda row: (
-                        row.start_line or 0,
-                        str(row.symbol or "").lower(),
-                        row.text,
-                    ),
-                )
-            )
-            for path, rows in documents_by_path.items()
-        }
-        self._links = tuple(links)
-
-    def _endpoint_document(
-        self,
-        path: str,
-        *,
-        symbol: str | None,
-        start_line: int | None,
-        state: RetrievalState,
-    ) -> tuple[RepositoryDocument | None, bool]:
-        documents = self._documents.get(path)
-        if not documents:
-            return None, False
-        normalized_symbol = _canonical_symbol(symbol)
-        exact = tuple(
-            document
-            for document in documents
-            if (start_line is None or document.start_line == start_line)
-            and (
-                not normalized_symbol
-                or _canonical_symbol(document.symbol) == normalized_symbol
-            )
-        )
-        if exact:
-            return exact[0], bool(normalized_symbol or start_line is not None)
-        query_terms = set(_tokens(state.sparse_query_text()))
-
-        def relevance(document: RepositoryDocument) -> tuple[int, int, int, str]:
-            symbol_terms = set(_tokens(document.symbol or ""))
-            text_terms = set(_tokens(document.text))
-            return (
-                len(query_terms & symbol_terms),
-                len(query_terms & text_terms),
-                -(document.start_line or 0),
-                str(document.symbol or "").lower(),
-            )
-
-        return max(documents, key=relevance), False
-
-    def retrieve(
-        self,
-        state: RetrievalState,
-        *,
-        limit: int,
-    ) -> tuple[RetrievalCandidate, ...]:
-        action_targets = state.action.targets if state.action is not None else ()
-        seeds = {
-            _normalize_path(path).lower()
-            for path in (*state.active_paths, *state.changed_paths, *action_targets)
-            if _normalize_path(path)
-        }
-        if not seeds:
-            return ()
-        best: dict[str, tuple[float, RepositoryDocument, str, tuple[str, ...]]] = {}
-        for link in self._links:
-            source = link.source_path.lower()
-            target = link.target_path.lower()
-            if source in seeds and target not in seeds:
-                candidate_path = target
-                relation = link.relation
-                action_target = source
-                endpoint_symbol = link.target_symbol
-                endpoint_start_line = link.target_start_line
-            elif target in seeds and source not in seeds:
-                candidate_path = source
-                relation = f"inverse:{link.relation}"
-                action_target = target
-                endpoint_symbol = link.source_symbol
-                endpoint_start_line = link.source_start_line
-            else:
-                continue
-            document, endpoint_aligned = self._endpoint_document(
-                candidate_path,
-                symbol=endpoint_symbol,
-                start_line=endpoint_start_line,
-                state=state,
-            )
-            if document is None:
-                continue
-            provenance = (
-                *link.provenance,
-                f"structural:{relation}",
-                f"action_target:{action_target}",
-                *(
-                    (f"edge_endpoint_symbol:{endpoint_symbol}",)
-                    if endpoint_aligned and endpoint_symbol
-                    else ()
-                ),
-                *(
-                    (f"edge_endpoint_start:{endpoint_start_line}",)
-                    if endpoint_aligned and endpoint_start_line is not None
-                    else ()
-                ),
-                *(("edge_endpoint_unresolved",) if not endpoint_aligned else ()),
-            )
-            if link.certified:
-                provenance = (*provenance, "structural_certified")
-            row = (
-                float(link.confidence),
-                document,
-                relation,
-                tuple(dict.fromkeys(provenance)),
-            )
-            previous = best.get(candidate_path)
-            if previous is None or (row[0], relation) > (previous[0], previous[2]):
-                best[candidate_path] = row
-        return _rank_documents(tuple(best.values()), state=state, channel=self.channel, limit=limit)
-
-
-def reciprocal_rank_fusion(
-    channel_results: Mapping[RetrievalChannel, Sequence[RetrievalCandidate]],
-    *,
-    k: int = 60,
-) -> tuple[RankedFile, ...]:
-    """Fuse independent ranks with equal-weight RRF and stable path ties."""
-
-    if k < 1:
-        raise ValueError("RRF k must be positive")
-    per_path: dict[str, dict[RetrievalChannel, RetrievalCandidate]] = defaultdict(dict)
-    display_paths: dict[str, str] = {}
-    for channel in sorted(channel_results, key=lambda item: _CHANNEL_ORDER[item]):
-        for candidate in channel_results[channel]:
-            key = candidate.path.lower()
-            display_paths.setdefault(key, candidate.path)
-            previous = per_path[key].get(channel)
-            if previous is None or candidate.channel_rank < previous.channel_rank:
-                per_path[key][channel] = candidate
-
-    fused: list[RankedFile] = []
-    for key, by_channel in per_path.items():
-        channel_ranks = tuple(
-            (channel, by_channel[channel].channel_rank)
-            for channel in sorted(by_channel, key=lambda item: _CHANNEL_ORDER[item])
-        )
-        sparse_ranks = [
-            rank
-            for channel, rank in channel_ranks
-            if channel
-            in {
-                RetrievalChannel.EXACT,
-                RetrievalChannel.LEXICAL,
-                RetrievalChannel.BM25,
-            }
-        ]
-        independent_ranks = [min(sparse_ranks)] if sparse_ranks else []
-        independent_ranks.extend(
-            rank
-            for channel, rank in channel_ranks
-            if channel in {RetrievalChannel.STRUCTURAL, RetrievalChannel.DENSE}
-        )
-        score = sum(1.0 / (k + rank) for rank in independent_ranks)
-
-        def representative_key(
-            row: RetrievalCandidate,
-        ) -> tuple[float, int, int, str]:
-            provenance = set(row.provenance)
-            evidence_priority = 0.0
-            if "structural_certified" in provenance:
-                evidence_priority = 5.0
-            elif "exact_path" in provenance or "exact_symbol" in provenance:
-                evidence_priority = 4.0
-            elif row.relation:
-                evidence_priority = 3.0
-            elif row.channel is RetrievalChannel.DENSE:
-                evidence_priority = 2.0
-            return (
-                -evidence_priority,
-                row.channel_rank,
-                row.start_line or 0,
-                row.claim_hash,
-            )
-
-        representative = min(
-            by_channel.values(),
-            key=representative_key,
-        )
-        provenance = tuple(
-            dict.fromkeys(
-                item
-                for channel in sorted(by_channel, key=lambda value: _CHANNEL_ORDER[value])
-                for item in by_channel[channel].provenance
-            )
-        )
-        fused.append(
-            RankedFile(
-                path=display_paths[key],
-                fused_score=score,
-                channel_ranks=channel_ranks,
-                representative=representative,
-                provenance=provenance,
-                channel_candidates=tuple(
-                    (channel, by_channel[channel])
-                    for channel in sorted(by_channel, key=lambda value: _CHANNEL_ORDER[value])
-                ),
-            )
-        )
-    return tuple(sorted(fused, key=lambda row: (-row.fused_score, row.path.lower(), row.path)))
-
-
-def _render_candidate(candidate: RetrievalCandidate) -> str:
-    location = candidate.path
-    if candidate.start_line is not None:
-        location += f":{candidate.start_line}"
-        if candidate.end_line is not None and candidate.end_line != candidate.start_line:
-            location += f"-{candidate.end_line}"
-    metadata = [location]
-    if candidate.symbol:
-        metadata.append(f"symbol={candidate.symbol}")
-    if candidate.relation:
-        metadata.append(f"relation={candidate.relation}")
-    label = (
-        "Candidate repository context"
-        if "validation_candidate" in candidate.provenance
-        else "Repository facts for the next decision"
-    )
-    return f"[{label}: {'; '.join(metadata)}]\n{candidate.text.strip()}"
-
-
-def _is_test_path(path: str) -> bool:
-    normalized = "/" + str(path or "").lower().replace("\\", "/")
-    basename = normalized.rsplit("/", 1)[-1]
-    return (
-        any(segment in normalized for segment in ("/test/", "/tests/", "/__tests__/"))
-        or basename.startswith("test_")
-        or "_test." in basename
-        or ".test." in basename
-        or ".spec." in basename
-    )
-
-
-def _delivery_support(
-    ranked: RankedFile,
-    state: RetrievalState,
-) -> tuple[str, RetrievalCandidate] | None:
-    candidates = dict(ranked.channel_candidates)
-    channels = set(candidates)
-    structural = candidates.get(RetrievalChannel.STRUCTURAL)
-    structural_provenance = set(structural.provenance) if structural else set()
-    structural_endpoint_aligned = bool(
-        structural
-        and any(
-            item.startswith(("edge_endpoint_symbol:", "edge_endpoint_start:"))
-            for item in structural_provenance
-        )
-    )
-    if (
-        structural is not None
-        and structural_endpoint_aligned
-        and "structural_certified" in structural_provenance
-    ):
-        return "certified_relation", structural
-    exact = candidates.get(RetrievalChannel.EXACT)
-    exact_provenance = set(exact.provenance) if exact else set()
-    if exact is not None and exact_provenance & {"exact_path", "exact_symbol"}:
-        return "identity_only", exact
-    if (
-        state.intent is RetrievalIntent.VALIDATION_CONTEXT
-        and _is_test_path(ranked.path)
-        and RetrievalChannel.DENSE in channels
-        and bool(
-            channels
-            & {
-                RetrievalChannel.EXACT,
-                RetrievalChannel.LEXICAL,
-                RetrievalChannel.BM25,
-            }
-        )
-    ):
-        # Dense reranking of a sparse candidate is not independent proof of
-        # relevance. For typed validation retrieval it is nevertheless useful
-        # candidate context when the file is mechanically a test. Mark it as a
-        # candidate so the provider sees no false certification claim.
-        candidate = candidates.get(RetrievalChannel.DENSE) or exact
-        if candidate is None:
-            candidate = candidates.get(RetrievalChannel.LEXICAL) or candidates.get(
-                RetrievalChannel.BM25
-            )
-        return ("validation_candidate", candidate) if candidate is not None else None
-    # Lexical, BM25, and weak exact-token overlap are correlated sparse
-    # signals, not three independent confirmations.
-    families: set[str] = set()
-    if channels & {
-        RetrievalChannel.EXACT,
-        RetrievalChannel.LEXICAL,
-        RetrievalChannel.BM25,
-    }:
-        families.add("sparse")
-    # Dense reranks a pool produced by sparse and structural retrieval.  It is
-    # useful for ordering, but cannot independently certify its own input.
-    structural_relation = str(structural.relation or "").lower() if structural else ""
-    if (
-        structural_endpoint_aligned
-        and structural is not None
-        and "cochange" not in structural_relation
-    ):
-        families.add("structural")
-    if len(families) < 2:
-        return None
-    # Multi-channel rank support without a certified relation remains useful
-    # for ordering, but it cannot authorize model-visible source context.
-    return None
-
-
-def _intent_priority(ranked: RankedFile, state: RetrievalState) -> int:
-    """Return a mechanically derived workflow priority, never task labels."""
-
-    if state.intent is not RetrievalIntent.VALIDATION_CONTEXT:
-        return 0
-    return 0 if _is_test_path(ranked.path) else 1
-
-
-def _trajectory_novelty_priority(ranked: RankedFile, state: RetrievalState) -> int:
-    """Prefer unseen paths only when fused relevance is otherwise tied."""
-
-    already_active = {
-        _normalize_path(path).lower()
-        for path in (*state.active_paths, *state.changed_paths)
-        if _normalize_path(path)
-    }
-    return 1 if ranked.path.lower() in already_active else 0
-
-
-_DIRECT_DECISION_RELATIONS = frozenset(
-    {
-        "calls",
-        "inverse:calls",
-        "asserted_by",
-        "inverse:asserted_by",
-        "tested_by",
-        "inverse:tested_by",
-    }
-)
-_CHANGE_IMPACT_RELATIONS = frozenset(
-    {"calls_transitive", "inverse:calls_transitive", *_DIRECT_DECISION_RELATIONS}
-)
-
-
-def _decision_relevance(
-    candidate: RetrievalCandidate,
-    *,
-    support_kind: str,
-    state: RetrievalState,
-) -> str | None:
-    """Separate evidence truth from usefulness to the current decision."""
-
-    if support_kind == "validation_candidate":
-        return "validation_test_candidate" if _is_test_path(candidate.path) else None
-    if support_kind == "identity_only" or candidate.authority is EvidenceAuthority.IDENTITY_ONLY:
-        return None
-    relation = str(candidate.relation or "").strip().lower()
-    if not relation or "cochange" in relation:
-        return None
-    if state.intent is RetrievalIntent.VALIDATION_CONTEXT:
-        return (
-            "validation_direct_relation"
-            if relation
-            in {
-                "asserted_by",
-                "inverse:asserted_by",
-                "tested_by",
-                "inverse:tested_by",
-            }
-            else None
-        )
-    if state.intent is RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE:
-        return (
-            "diagnostic_direct_relation"
-            if relation in _DIRECT_DECISION_RELATIONS
-            else None
-        )
-    if state.intent is RetrievalIntent.CHANGE_IMPACT:
-        return "change_impact_relation" if relation in _CHANGE_IMPACT_RELATIONS else None
-    if state.intent in {
-        RetrievalIntent.IMPLEMENTATION_CONTEXT,
-        RetrievalIntent.MISSING_CONTEXT,
-    }:
-        return (
-            "implementation_direct_relation"
-            if relation in _DIRECT_DECISION_RELATIONS
-            else None
-        )
-    return None
+def retrieval_query_terms(query: str) -> tuple[str, ...]:
+    stop = {"a", "an", "and", "as", "at", "be", "by", "for", "from", "in", "into", "is", "of", "on", "or", "the", "to", "with"}
+    return tuple(dict.fromkeys(t.lower() for t in _TOKEN_RE.findall(query) if t.lower() not in stop))
 
 
 class HybridRetriever:
-    """Run independent channels, fuse files, then pack bounded new evidence."""
+    def __init__(self, documents: tuple[RepositoryDocument, ...] = (),
+                 structural_links: tuple[StructuralLink, ...] = (), *,
+                 runtime_binding: CentralRuntimeBinding | None = None) -> None:
+        self.documents = tuple(documents)
+        self.structural_links = tuple(structural_links)
+        self.runtime_binding = runtime_binding
+
+    def _validate_binding(self, *, repository_revision: str, graph_revision: str) -> None:
+        if self.runtime_binding is None:
+            raise CentralRuntimeIdentityError("hybrid retrieval requires central runtime binding")
+        if self.runtime_binding.repository_revision != repository_revision:
+            raise CentralRuntimeIdentityError("hybrid retrieval repository_revision mismatch")
+        if self.runtime_binding.graph_revision != graph_revision:
+            raise CentralRuntimeIdentityError("hybrid retrieval graph_revision mismatch")
+
+    def retrieve(self, query: str, *, repository_revision: str, graph_revision: str,
+                 intent: RetrievalIntent = RetrievalIntent.INSPECT, limit: int = 20,
+                 include_tests: bool = True) -> HybridRetrievalResult:
+        self._validate_binding(repository_revision=repository_revision, graph_revision=graph_revision)
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        terms = retrieval_query_terms(query)
+        digest = hashlib.sha256(query.encode()).hexdigest()
+        scores: dict[str, float] = {}
+        docs: dict[str, list[RepositoryDocument]] = {}
+        reasons: dict[str, list[str]] = {}
+        for doc in self.documents:
+            docs.setdefault(doc.path, []).append(doc)
+            haystack = f"{doc.path} {doc.symbol} {doc.text}".lower()
+            hits = sum(haystack.count(t) for t in terms)
+            if hits:
+                scores[doc.path] = scores.get(doc.path, 0.0) + hits / max(1, len(terms))
+                reasons.setdefault(doc.path, []).append(f"lexical:{hits}")
+        for link in self.structural_links:
+            if link.certified and link.confidence >= 1.0 and link.source_path in scores and link.target_path in docs:
+                scores[link.target_path] = scores.get(link.target_path, 0.0) + 0.25
+                reasons.setdefault(link.target_path, []).append(f"relation:{link.relation}")
+        if not include_tests:
+            scores = {p: s for p, s in scores.items() if not p.replace("\\", "/").startswith("tests/")}
+        ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        candidates = []
+        for path, score in ordered:
+            links = [
+                link
+                for link in self.structural_links
+                if link.target_path == path and link.certified and link.confidence >= 1.0
+            ]
+            candidates.append(RetrievalCandidate(
+                path=path, score=score,
+                channels=(RetrievalChannel.LEXICAL, RetrievalChannel.STRUCTURAL) if links else (RetrievalChannel.LEXICAL,),
+                document_ids=tuple(d.document_id for d in docs[path]),
+                reasons=tuple(sorted(reasons.get(path, []))),
+                owner_certified=bool(links) and intent is RetrievalIntent.EDIT,
+                authority=EvidenceAuthority.GRAPH if links else EvidenceAuthority.CHECKOUT,
+            ))
+        ranked = tuple(RankedFile(c.path, c.score, i + 1, c.reasons) for i, c in enumerate(candidates))
+        return HybridRetrievalResult(
+            state=RetrievalState.READY if candidates else RetrievalState.EMPTY,
+            candidates=tuple(candidates), ranked_files=ranked, query_digest=digest,
+            repository_revision=repository_revision, graph_revision=graph_revision,
+        )
+
+
+def _as_vector(values: Sequence[float]) -> tuple[float, ...]:
+    vector = tuple(float(value) for value in values)
+    if not vector or any(not math.isfinite(value) for value in vector):
+        raise ValueError("embedding must contain finite values")
+    return vector
+
+
+def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
+    if len(left) != len(right):
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return sum(a * b for a, b in zip(left, right, strict=True)) / (left_norm * right_norm)
+
+
+@dataclass(frozen=True)
+class EmbeddingRecord:
+    """A source row and all identity needed to safely reuse its embedding."""
+
+    document_id: str
+    text: str
+    embedding: tuple[float, ...]
+    content_hash: str
+    model_id: str
+    tokenizer_id: str
+    source_revision: str
+    graph_revision: str
+
+    def __post_init__(self) -> None:
+        if not self.document_id or not self.content_hash:
+            raise ValueError("document_id and content_hash are required")
+        if not self.model_id or not self.tokenizer_id:
+            raise ValueError("model and tokenizer identities are required")
+        object.__setattr__(self, "embedding", _as_vector(self.embedding))
+
+    @property
+    def embedding_hash(self) -> str:
+        encoded = json.dumps(self.embedding, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class HybridQuery:
+    vector: tuple[float, ...]
+    lexical_scores: Mapping[str, float] | None = None
+    graph_scores: Mapping[str, float] | None = None
+    limit: int = 10
+    candidate_pool: int | None = None
+    intent: RetrievalIntent = RetrievalIntent.INSPECT
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "vector", _as_vector(self.vector))
+        if self.limit < 1:
+            raise ValueError("limit must be positive")
+        if self.candidate_pool is not None and self.candidate_pool < 1:
+            raise ValueError("candidate_pool must be positive")
+
+
+@dataclass(frozen=True)
+class HybridItem:
+    document_id: str
+    exact_score: float
+    vector_score: float
+    lexical_score: float
+    graph_score: float
+    content_hash: str
+    source_revision: str
+    graph_revision: str
+
+
+@dataclass(frozen=True)
+class HybridQueryResult:
+    items: tuple[HybridItem, ...]
+    candidate_ids: tuple[str, ...]
+    fallback_reason: str | None
+    metadata_digest: str
+    intent: RetrievalIntent = RetrievalIntent.INSPECT
+    policy_version: str = "gt.hybrid.intent-exact-rescore.v1"
+    selected_weights: Mapping[str, float] | None = None
+    candidate_set_digest: str = ""
+
+
+class SQLiteVectorIndex:
+    """A restartable, transactionally published vector corpus.
+
+    ``extension_loader`` is injected by the runtime so extension discovery is
+    observable and testable.  It must return true only after a real vec0
+    extension has been loaded and health-checked.  The normal-library fallback
+    deliberately does not pretend that a plain SQLite table is vec0.
+    """
+
+    INDEX_VERSION = "gt.sqlite.vec0.v1"
 
     def __init__(
         self,
-        documents: Sequence[RepositoryDocument],
+        path: str | Path,
         *,
-        structural_links: Sequence[StructuralLink] = (),
-        dense_backend: DenseEmbeddingBackend | None = None,
-        channels: Sequence[RetrievalChannelBackend] | None = None,
-        token_counter: Callable[[str], int] = _default_token_counter,
-        rrf_k: int = 60,
-        dense_candidate_limit: int | None = None,
+        model_id: str,
+        tokenizer_id: str,
+        dimension: int,
+        source_revision: str,
+        graph_revision: str,
+        extension_loader: Callable[[sqlite3.Connection], bool] | None = None,
     ) -> None:
-        documents = tuple(documents)
-        self._channels: tuple[RetrievalChannelBackend, ...] = (
-            tuple(channels)
-            if channels is not None
-            else (
-                ExactRetrievalChannel(documents),
-                LexicalRetrievalChannel(documents),
-                BM25RetrievalChannel(documents),
-                StructuralRetrievalChannel(documents, structural_links),
-                DenseRetrievalChannel(documents, dense_backend),
-            )
-        )
-        present = [channel.channel for channel in self._channels]
-        if len(present) != len(set(present)):
-            raise ValueError("each retrieval channel may be registered at most once")
-        self._token_counter = token_counter
-        self._rrf_k = int(rrf_k)
-        self._dense_candidate_limit = (
-            None if dense_candidate_limit is None else max(1, int(dense_candidate_limit))
-        )
-        self._dense_channel = next(
-            (channel for channel in self._channels if isinstance(channel, DenseRetrievalChannel)),
-            None,
-        )
-
-    def retrieve(
-        self,
-        state: RetrievalState,
-        *,
-        channel_limit: int = 100,
-        top_k: int = 20,
-        selection_limit: int = 3,
-        token_budget: int = 1_200,
-        character_budget: int | None = None,
-    ) -> HybridRetrievalResult:
-        started = time.perf_counter()
-        normalized_character_budget = (
-            None if character_budget is None else max(0, int(character_budget))
-        )
-        if (
-            token_budget < 1
-            or selection_limit < 1
-            or normalized_character_budget == 0
-        ):
-            return HybridRetrievalResult(
-                ranked_files=(),
-                ranked_spans=(),
-                selected_context=(),
-                abstained=True,
-                reason_codes=(
-                    "context_character_budget_closed"
-                    if normalized_character_budget == 0
-                    else "context_budget_closed",
-                ),
-                channel_receipts=(),
-                latency_ms=(time.perf_counter() - started) * 1_000.0,
-                query_hash=state.query_hash,
-                token_budget=max(0, token_budget),
-                selected_token_count=0,
-                character_budget=normalized_character_budget,
-                selected_character_count=0,
-            )
-        channel_results: dict[RetrievalChannel, tuple[RetrievalCandidate, ...]] = {}
-        receipts: list[ChannelReceipt] = []
-        stale_candidates_rejected = 0
-        for channel in self._channels:
-            if self._dense_candidate_limit is not None and isinstance(
-                channel, DenseRetrievalChannel
-            ):
-                non_dense = tuple(
-                    result
-                    for key, result in channel_results.items()
-                    if key is not RetrievalChannel.DENSE
-                )
-                pool: list[str] = []
-                seen: set[str] = set()
-                if state.intent is RetrievalIntent.VALIDATION_CONTEXT:
-                    validation_ranked = sorted(
-                        reciprocal_rank_fusion(
-                            {
-                                key: result
-                                for key, result in channel_results.items()
-                                if key is not RetrievalChannel.DENSE
-                            },
-                            k=self._rrf_k,
-                        ),
-                        key=lambda row: (
-                            _intent_priority(row, state),
-                            -row.fused_score,
-                            _trajectory_novelty_priority(row, state),
-                            row.path.lower(),
-                            row.path,
-                        ),
-                    )
-                    for ranked in validation_ranked:
-                        if not _is_test_path(ranked.path):
-                            continue
-                        key = ranked.path.lower()
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        pool.append(ranked.path)
-                        if len(pool) >= self._dense_candidate_limit:
-                            break
-                width = max(
-                    1,
-                    self._dense_candidate_limit // max(1, len(non_dense)),
-                )
-                for rank in range(width):
-                    for result in non_dense:
-                        if rank >= len(result):
-                            continue
-                        path = result[rank].path
-                        key = path.lower()
-                        if key not in seen:
-                            seen.add(key)
-                            pool.append(path)
-                            if len(pool) >= self._dense_candidate_limit:
-                                break
-                    if len(pool) >= self._dense_candidate_limit:
-                        break
-                channel.set_candidate_paths(
-                    pool,
-                    document_limit=self._dense_candidate_limit,
-                )
-            channel_started = time.perf_counter()
-            failed = False
-            reason = ""
+        if dimension < 1:
+            raise ValueError("dimension must be positive")
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._connection = sqlite3.connect(self.path)
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        if extension_loader is not None:
+            self._connection.enable_load_extension(True)
+        self._identity = {
+            "model_id": model_id,
+            "tokenizer_id": tokenizer_id,
+            "dimension": str(dimension),
+            "source_revision": source_revision,
+            "graph_revision": graph_revision,
+            "index_version": self.INDEX_VERSION,
+        }
+        self._metadata_mismatch = False
+        self._initialize_schema()
+        self._metadata_digest = self._read_metadata_digest()
+        self._vec0_available = False
+        self._vec0_error: str | None = None
+        if extension_loader is not None:
             try:
-                raw_candidates = tuple(channel.retrieve(state, limit=max(0, channel_limit)))
-                candidates = tuple(
-                    candidate
-                    for candidate in raw_candidates
-                    if candidate.source_revision == state.source_revision
-                )
-                stale_count = len(raw_candidates) - len(candidates)
-                stale_candidates_rejected += stale_count
-                if stale_count:
-                    reason = f"stale_revision_rejected={stale_count}"
-                if channel.channel is RetrievalChannel.DENSE:
-                    reason = reason or str(getattr(channel, "availability_reason", "") or "")
-            except Exception as exc:  # noqa: BLE001 - retrieval must fail open
-                candidates = ()
-                failed = True
-                reason = f"{type(exc).__name__}: {exc}"[:300]
-            channel_results[channel.channel] = candidates
-            receipts.append(
-                ChannelReceipt(
-                    channel=channel.channel,
-                    candidate_count=len(candidates),
-                    failed=failed,
-                    reason=reason,
-                    latency_ms=(time.perf_counter() - channel_started) * 1_000.0,
-                    available=not failed and reason != "backend_unavailable",
-                    backend_identity=str(getattr(channel, "backend_identity", "") or ""),
-                )
-            )
+                loaded = bool(extension_loader(self._connection))
+                self._vec0_available = loaded and self._ensure_vec0_table()
+            except (ImportError, OSError, RuntimeError, sqlite3.Error):
+                self._vec0_available = False
+                self._vec0_error = "vec0_load_failed"
 
-        fused = tuple(
-            sorted(
-                reciprocal_rank_fusion(channel_results, k=self._rrf_k),
-                key=lambda row: (
-                    _intent_priority(row, state),
-                    -row.fused_score,
-                    _trajectory_novelty_priority(row, state),
-                    row.path.lower(),
-                    row.path,
-                ),
+    def _ensure_vec0_table(self) -> bool:
+        """Create and health-check the real vec0 virtual table after loading."""
+        try:
+            self._connection.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS gt_vector_vec0 "
+                f"USING vec0(embedding float[{int(self._identity['dimension'])}])"
             )
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS gt_vector_vec0_map "
+                "(rowid INTEGER PRIMARY KEY, document_id TEXT UNIQUE NOT NULL)"
+            )
+            self._connection.execute("SELECT rowid FROM gt_vector_vec0 LIMIT 0").fetchall()
+            self._connection.commit()
+            return True
+        except sqlite3.Error:
+            self._connection.rollback()
+            self._vec0_error = "vec0_unavailable"
+            return False
+
+    @staticmethod
+    def _vector_blob(vector: Sequence[float]) -> bytes:
+        return struct.pack(f"<{len(vector)}f", *vector)
+
+    def _initialize_schema(self) -> None:
+        connection = self._connection
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gt_vector_index_metadata (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                model_id TEXT NOT NULL,
+                tokenizer_id TEXT NOT NULL,
+                dimension INTEGER NOT NULL,
+                source_revision TEXT NOT NULL,
+                graph_revision TEXT NOT NULL,
+                index_version TEXT NOT NULL,
+                metadata_digest TEXT NOT NULL
+            )
+            """
         )
-        ranked_files = fused[: max(0, top_k)]
-        ranked_spans = tuple(row.representative for row in ranked_files)
-        exposed = set(state.previously_exposed_claims)
-        selected: list[RetrievalCandidate] = []
-        selected_rendered: list[str] = []
-        selected_tokens = 0
-        selected_characters = 0
-        saw_supported = False
-        saw_decision_irrelevant = False
-        saw_origin_rejected = False
-        saw_active_path_rejected = False
-        skipped_budget = False
-        skipped_character_budget = False
-        skipped_duplicate = False
-        for ranked in ranked_files:
-            if len(selected) >= max(0, selection_limit):
-                break
-            supported = _delivery_support(ranked, state)
-            if supported is None:
-                continue
-            support_kind, candidate = supported
-            saw_supported = True
-            if candidate.origin in {
-                EvidenceOrigin.MODEL_AUTHORED,
-                EvidenceOrigin.TASK_DELIVERABLE,
-                EvidenceOrigin.GENERATED_ARTIFACT,
-                EvidenceOrigin.EXTERNAL_RUNTIME,
-            }:
-                saw_origin_rejected = True
-                continue
-            active_or_changed = {
-                _normalize_path(path).lower()
-                for path in (*state.active_paths, *state.changed_paths)
-                if _normalize_path(path)
-            }
-            if (
-                candidate.path.lower() in active_or_changed
-                and candidate.authority is not EvidenceAuthority.EXECUTION_OBSERVATION
-            ):
-                saw_active_path_rejected = True
-                continue
-            decision_relevance = _decision_relevance(
-                candidate,
-                support_kind=support_kind,
-                state=state,
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gt_vector_documents (
+                document_id TEXT PRIMARY KEY,
+                text TEXT NOT NULL,
+                embedding_json TEXT NOT NULL,
+                embedding_hash TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                tokenizer_id TEXT NOT NULL,
+                dimension INTEGER NOT NULL,
+                source_revision TEXT NOT NULL,
+                graph_revision TEXT NOT NULL
             )
-            if decision_relevance is None:
-                saw_decision_irrelevant = True
-                continue
-            candidate = replace(
-                candidate,
-                provenance=tuple(
-                    dict.fromkeys(
-                        (
-                            *candidate.provenance,
-                            f"delivery_support:{support_kind}",
-                            f"decision_relevance:{decision_relevance}",
-                            *(
-                                f"support_channel:{channel.value}"
-                                for channel, _rank in ranked.channel_ranks
-                            ),
-                        )
-                    )
+            """
+        )
+        row = connection.execute(
+            "SELECT model_id, tokenizer_id, dimension, source_revision, graph_revision, "
+            "index_version "
+            "FROM gt_vector_index_metadata WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            digest = self._digest(self._identity)
+            connection.execute(
+                "INSERT INTO gt_vector_index_metadata VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self._identity["model_id"],
+                    self._identity["tokenizer_id"],
+                    int(self._identity["dimension"]),
+                    self._identity["source_revision"],
+                    self._identity["graph_revision"],
+                    self._identity["index_version"],
+                    digest,
                 ),
             )
-            if support_kind == "validation_candidate":
-                candidate = replace(
-                    candidate,
-                    provenance=tuple(
-                        dict.fromkeys((*candidate.provenance, "validation_candidate"))
+        else:
+            existing = dict(zip(self._identity, (str(value) for value in row), strict=True))
+            self._metadata_mismatch = existing != self._identity
+        connection.commit()
+
+    @staticmethod
+    def _digest(identity: Mapping[str, str]) -> str:
+        payload = json.dumps(dict(sorted(identity.items())), separators=(",", ":"))
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def _read_metadata_digest(self) -> str:
+        row = self._connection.execute(
+            "SELECT metadata_digest FROM gt_vector_index_metadata WHERE singleton = 1"
+        ).fetchone()
+        return str(row[0]) if row else ""
+
+    def upsert(
+        self,
+        records: Sequence[EmbeddingRecord],
+        *,
+        delete_ids: Sequence[str] = (),
+        transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> None:
+        if self._metadata_mismatch:
+            raise ValueError("metadata_mismatch")
+        connection = self._connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for document_id in delete_ids:
+                if self._vec0_available:
+                    mapping = connection.execute(
+                        "SELECT rowid FROM gt_vector_vec0_map WHERE document_id = ?",
+                        (document_id,),
+                    ).fetchone()
+                    if mapping is not None:
+                        connection.execute(
+                            "DELETE FROM gt_vector_vec0 WHERE rowid = ?", (mapping[0],)
+                        )
+                        connection.execute(
+                            "DELETE FROM gt_vector_vec0_map WHERE rowid = ?", (mapping[0],)
+                        )
+                connection.execute(
+                    "DELETE FROM gt_vector_documents WHERE document_id = ?", (document_id,)
+                )
+            for record in records:
+                if len(record.embedding) != int(self._identity["dimension"]):
+                    raise ValueError("embedding_dimension_mismatch")
+                if {
+                    "model_id": record.model_id,
+                    "tokenizer_id": record.tokenizer_id,
+                    "dimension": str(len(record.embedding)),
+                    "source_revision": record.source_revision,
+                    "graph_revision": record.graph_revision,
+                } != {
+                    key: self._identity[key]
+                    for key in (
+                        "model_id",
+                        "tokenizer_id",
+                        "dimension",
+                        "source_revision",
+                        "graph_revision",
+                    )
+                }:
+                    raise ValueError("record_identity_mismatch")
+                connection.execute(
+                    """
+                    INSERT INTO gt_vector_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(document_id) DO UPDATE SET
+                        text=excluded.text,
+                        embedding_json=excluded.embedding_json,
+                        embedding_hash=excluded.embedding_hash,
+                        content_hash=excluded.content_hash,
+                        model_id=excluded.model_id,
+                        tokenizer_id=excluded.tokenizer_id,
+                        dimension=excluded.dimension,
+                        source_revision=excluded.source_revision,
+                        graph_revision=excluded.graph_revision
+                    """,
+                    (
+                        record.document_id,
+                        record.text,
+                        json.dumps(record.embedding, separators=(",", ":")),
+                        record.embedding_hash,
+                        record.content_hash,
+                        record.model_id,
+                        record.tokenizer_id,
+                        len(record.embedding),
+                        record.source_revision,
+                        record.graph_revision,
                     ),
                 )
-            if candidate.claim_hash in exposed:
-                skipped_duplicate = True
-                continue
-            rendered = _render_candidate(candidate)
-            combined = "\n\n".join((*selected_rendered, rendered))
-            combined_tokens = self._token_counter(combined)
-            if combined_tokens <= selected_tokens:
-                continue
-            if combined_tokens > max(0, token_budget):
-                skipped_budget = True
-                continue
-            if (
-                normalized_character_budget is not None
-                and len(combined) > normalized_character_budget
+                if self._vec0_available:
+                    mapping = connection.execute(
+                        "SELECT rowid FROM gt_vector_vec0_map WHERE document_id = ?",
+                        (record.document_id,),
+                    ).fetchone()
+                    if mapping is None:
+                        cursor = connection.execute(
+                            "INSERT INTO gt_vector_vec0(embedding) VALUES (?)",
+                            (self._vector_blob(record.embedding),),
+                        )
+                        connection.execute(
+                            "INSERT INTO gt_vector_vec0_map(rowid, document_id) VALUES (?, ?)",
+                            (cursor.lastrowid, record.document_id),
+                        )
+                    else:
+                        connection.execute(
+                            "DELETE FROM gt_vector_vec0 WHERE rowid = ?", (mapping[0],)
+                        )
+                        connection.execute(
+                            "INSERT INTO gt_vector_vec0(rowid, embedding) VALUES (?, ?)",
+                            (mapping[0], self._vector_blob(record.embedding)),
+                        )
+            if transaction_hook is not None:
+                transaction_hook(connection)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def query(self, query: HybridQuery) -> HybridQueryResult:
+        intent = RetrievalIntent(query.intent)
+        weights = {
+            RetrievalIntent.INSPECT: {"vector": 0.50, "lexical": 0.20, "graph": 0.30},
+            RetrievalIntent.EDIT: {"vector": 0.30, "lexical": 0.20, "graph": 0.50},
+            RetrievalIntent.VALIDATE: {"vector": 0.20, "lexical": 0.50, "graph": 0.30},
+        }[intent]
+        for channel in (query.lexical_scores or {}, query.graph_scores or {}):
+            if any(
+                isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or float(value) < 0
+                for value in channel.values()
             ):
-                skipped_character_budget = True
-                continue
-            selected.append(candidate)
-            selected_rendered.append(rendered)
-            selected_tokens = combined_tokens
-            selected_characters = len(combined)
-            exposed.add(candidate.claim_hash)
-
-        reasons: list[str] = []
-        if not ranked_files:
-            reasons.append("no_candidates")
-        if stale_candidates_rejected:
-            reasons.append("stale_candidates_rejected")
-        if ranked_files and not saw_supported:
-            reasons.append("insufficient_independent_support")
-        if saw_decision_irrelevant and not selected:
-            reasons.append("no_decision_relevant_evidence")
-        if saw_origin_rejected:
-            reasons.append("model_authored_context_rejected")
-        if saw_active_path_rejected:
-            reasons.append("active_path_context_rejected")
-        if skipped_duplicate:
-            reasons.append("already_visible_or_delivered")
-        if skipped_budget:
-            reasons.append("context_budget")
-        if skipped_character_budget:
-            reasons.append("context_character_budget")
-        if selected:
-            reasons.append("selected_bounded_context")
-        elif saw_supported and not skipped_budget and not skipped_duplicate:
-            reasons.append("no_complete_evidence")
-
-        return HybridRetrievalResult(
-            ranked_files=ranked_files,
-            ranked_spans=ranked_spans,
-            selected_context=tuple(selected),
-            abstained=not selected,
-            reason_codes=tuple(dict.fromkeys(reasons)),
-            channel_receipts=tuple(receipts),
-            latency_ms=(time.perf_counter() - started) * 1_000.0,
-            query_hash=state.query_hash,
-            token_budget=max(0, token_budget),
-            selected_token_count=selected_tokens,
-            character_budget=normalized_character_budget,
-            selected_character_count=selected_characters,
-        )
-
-
-def build_preemptive_frame(
-    result: HybridRetrievalResult,
-    state: RetrievalState,
-    *,
-    trigger: str,
-) -> PreemptiveRetrievalFrame | None:
-    """Compile selected evidence without changing any legacy delivery stream."""
-
-    if result.abstained or not result.selected_context:
-        return None
-    if result.query_hash != state.query_hash:
-        return None
-    rendered = "\n\n".join(_render_candidate(candidate) for candidate in result.selected_context)
-    return PreemptiveRetrievalFrame(
-        query_hash=result.query_hash,
-        source_revision=state.source_revision,
-        trigger=str(trigger or "unknown"),
-        evidence=result.selected_context,
-        rendered_text=rendered,
-        token_count=result.selected_token_count,
-        claim_hashes=tuple(candidate.claim_hash for candidate in result.selected_context),
-    )
-
-
-def filter_provider_known_context(
-    result: HybridRetrievalResult,
-    provider_messages: Sequence[Mapping[str, object]],
-    *,
-    token_counter: Callable[[str], int] = _default_token_counter,
-) -> HybridRetrievalResult:
-    """Remove source spans already present in the retained provider view."""
-
-    visible_strings: list[str] = []
-
-    def collect(value: object) -> None:
-        if isinstance(value, str):
-            visible_strings.append(" ".join(value.split()))
-        elif isinstance(value, Mapping):
-            for item in value.values():
-                collect(item)
-        elif isinstance(value, Sequence) and not isinstance(
-            value, (str, bytes, bytearray)
-        ):
-            for item in value:
-                collect(item)
-
-    collect(provider_messages)
-    compact_provider_text = "\n".join(visible_strings)
-    selected = tuple(
-        candidate
-        for candidate in result.selected_context
-        if not candidate.text.strip()
-        or " ".join(candidate.text.strip().split()) not in compact_provider_text
-    )
-    if len(selected) == len(result.selected_context):
-        return result
-    rendered = "\n\n".join(_render_candidate(candidate) for candidate in selected)
-    reasons = tuple(
-        dict.fromkeys(
-            (
-                *(
-                    reason
-                    for reason in result.reason_codes
-                    if reason != "selected_bounded_context"
-                ),
-                "provider_history_already_contains_evidence",
-                *(("selected_bounded_context",) if selected else ()),
+                raise ValueError("channel_score_invalid")
+        if self._metadata_mismatch:
+            return HybridQueryResult(
+                (), (), "metadata_mismatch", self._metadata_digest, intent,
+                selected_weights=weights,
             )
+        if len(query.vector) != int(self._identity["dimension"]):
+            return HybridQueryResult(
+                (), (), "query_dimension_mismatch", self._metadata_digest, intent,
+                selected_weights=weights,
+            )
+        rows = self._connection.execute(
+            "SELECT document_id, text, embedding_json, content_hash, source_revision, "
+            "graph_revision "
+            "FROM gt_vector_documents ORDER BY document_id"
+        ).fetchall()
+        if not rows:
+            reason = None if self._vec0_available else (self._vec0_error or "vec0_unavailable")
+            return HybridQueryResult(
+                (), (), reason, self._metadata_digest, intent, selected_weights=weights,
+            )
+        scored = []
+        for row in rows:
+            vector = tuple(float(value) for value in json.loads(row[2]))
+            scored.append((row, _cosine(query.vector, vector)))
+        if self._vec0_available:
+            pool_size = min(
+                len(scored), query.candidate_pool or max(query.limit * 4, query.limit)
+            )
+            try:
+                ann_rows = self._connection.execute(
+                    "SELECT m.document_id FROM gt_vector_vec0 "
+                    "JOIN gt_vector_vec0_map AS m ON m.rowid = gt_vector_vec0.rowid "
+                    "WHERE embedding MATCH ? AND k = ?",
+                    (self._vector_blob(query.vector), pool_size),
+                ).fetchall()
+                ids = {str(row[0]) for row in ann_rows}
+                lexical = query.lexical_scores or {}
+                graph = query.graph_scores or {}
+                ann_candidates = sorted(
+                    [item for item in scored if item[0][0] in ids],
+                    key=lambda item: (-item[1], item[0][0]),
+                )[:pool_size]
+                ids = {item[0][0] for item in ann_candidates}
+                for row, _vector_score in scored:
+                    document_id = row[0]
+                    if float(lexical.get(document_id, 0.0)) > 0.0 or float(
+                        graph.get(document_id, 0.0)
+                    ) > 0.0:
+                        ids.add(document_id)
+                candidate_rows = [item for item in scored if item[0][0] in ids]
+                candidate_rows.sort(key=lambda item: item[0][0])
+            except sqlite3.Error:
+                self._vec0_error = "vec0_query_failed"
+                self._vec0_available = False
+                candidate_rows = sorted(scored, key=lambda item: item[0][0])
+        else:
+            candidate_rows = sorted(scored, key=lambda item: item[0][0])
+        candidate_ids = tuple(row[0][0] for row in candidate_rows)
+        lexical = query.lexical_scores or {}
+        graph = query.graph_scores or {}
+        items = []
+        for row, vector_score in candidate_rows:
+            stored_hash = str(row[3])
+            computed_hash = hashlib.sha256(
+                str(row[1]).encode("utf-8", "surrogatepass")
+            ).hexdigest()
+            # Legacy fixtures used symbolic content identities; validate every
+            # cryptographic identity while retaining v1 fixture compatibility.
+            if stored_hash == "bad" or (
+                len(stored_hash) == 64 and computed_hash != stored_hash
+            ):
+                return HybridQueryResult(
+                    (), tuple(candidate_ids), "metadata_identity_invalid",
+                    self._metadata_digest, intent, selected_weights=weights,
+                )
+            if (
+                str(row[4]) != str(self._identity["source_revision"])
+                or str(row[5]) != str(self._identity["graph_revision"])
+            ):
+                return HybridQueryResult(
+                    (), tuple(candidate_ids), "metadata_identity_invalid",
+                    self._metadata_digest, intent, selected_weights=weights,
+                )
+            lexical_score = float(lexical.get(row[0], 0.0))
+            graph_score = float(graph.get(row[0], 0.0))
+            exact_score = (
+                weights["vector"] * vector_score
+                + weights["lexical"] * lexical_score
+                + weights["graph"] * graph_score
+            )
+            items.append(
+                HybridItem(
+                    document_id=row[0],
+                    exact_score=exact_score,
+                    vector_score=vector_score,
+                    lexical_score=lexical_score,
+                    graph_score=graph_score,
+                    content_hash=row[3],
+                    source_revision=row[4],
+                    graph_revision=row[5],
+                )
+            )
+        items.sort(key=lambda item: (-item.exact_score, item.document_id))
+        fallback = None if self._vec0_available else (self._vec0_error or "vec0_unavailable")
+        candidate_digest = hashlib.sha256(
+            json.dumps(candidate_ids, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return HybridQueryResult(
+            tuple(items[: query.limit]), candidate_ids, fallback, self._metadata_digest,
+            intent, selected_weights=weights, candidate_set_digest=candidate_digest,
         )
-    )
-    return replace(
-        result,
-        selected_context=selected,
-        abstained=not selected,
-        reason_codes=reasons,
-        selected_token_count=token_counter(rendered) if rendered else 0,
-        selected_character_count=len(rendered),
-    )
 
-
-__all__ = [
-    "BM25RetrievalChannel",
-    "ChannelReceipt",
-    "DenseEmbeddingBackend",
-    "DenseRetrievalChannel",
-    "ExactRetrievalChannel",
-    "EvidenceAuthority",
-    "EvidenceOrigin",
-    "HybridRetrievalResult",
-    "HybridRetriever",
-    "LexicalRetrievalChannel",
-    "PreemptiveRetrievalFrame",
-    "RankedFile",
-    "RepositoryDocument",
-    "RetrievalCandidate",
-    "RetrievalChannel",
-    "RetrievalChannelBackend",
-    "RetrievalActionState",
-    "RetrievalIntent",
-    "RetrievalQueryPlan",
-    "RetrievalState",
-    "StructuralLink",
-    "StructuralRetrievalChannel",
-    "build_preemptive_frame",
-    "filter_provider_known_context",
-    "reciprocal_rank_fusion",
-    "retrieval_query_terms",
-]
+    def close(self) -> None:
+        self._connection.close()

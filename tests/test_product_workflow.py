@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path, PurePosixPath
+
+from scripts.validate_product_workflow import validate_workflow
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github" / "workflows" / "deepswe_gt_harness_product.yml"
+PAID_WORKFLOW = (
+    ROOT / ".github" / "workflows" / "deepswe_gt_harness_product_p0731.yaml"
+)
+
+
+def test_product_workflow_is_reachable_pinned_and_provider_free() -> None:
+    assert validate_workflow(WORKFLOW, root=ROOT) == []
+
+
+def test_full_suite_receives_the_verified_producer_path() -> None:
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["provider-free-product"]["steps"]
+    suite = next(step for step in steps if step.get("name") == "Run the full Python suite serially")
+    assert suite.get("env", {}).get("GT_INDEX_BINARY") == "/opt/groundtruth/gt-index/gt-index"
+
+
+def test_product_workflow_rejects_bypassing_manifest_pin_resolution(
+    tmp_path: Path,
+) -> None:
+    altered = tmp_path / "workflow.yml"
+    altered.write_text(
+        WORKFLOW.read_text(encoding="utf-8").replace(
+            "${{ steps.product-pins.outputs.review_inbox_commit }}",
+            "ac45a546cb3c39d5b8ce0f630b5c8ce2ef572685",
+        )
+        + "\n# steps.product-pins.outputs.review_inbox_commit\n",
+        encoding="utf-8",
+    )
+    assert "product_manifest_pins_unreachable" in validate_workflow(altered, root=ROOT)
+
+
+def test_only_closed_supported_workflow_set_is_active() -> None:
+    # git ls-files, not glob. GitHub runs workflows from the COMMITTED ref, so
+    # the working tree is a proxy for the property and not the property: an
+    # untracked .yml never reaches Actions, and globbing calls it a
+    # supply-chain event anyway. That false red is not the safe direction - it
+    # is the condition that trains a hurried operator to wave the gate through,
+    # and this is the gate that must not be waved through. The staging area is
+    # included on purpose: something staged is one command from being the ref.
+    listed = subprocess.run(
+        ["git", "ls-files", "--", ".github/workflows/*.yml", ".github/workflows/*.yaml"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=True,
+    ).stdout
+    active = sorted(PurePosixPath(line).name for line in listed.splitlines() if line.strip())
+    # The set stays closed on purpose: an unreviewed workflow appearing here
+    # is a supply-chain event, not a detail. The two image mirrors are
+    # workflow_dispatch-only, touch no paid path, and exist to cut task-image
+    # pull latency; they are admitted by name rather than by loosening the rule.
+    # `installed_rehearsal.yml` is admitted the same way: it runs the installed
+    # full-flow rehearsal, which serves its own synthetic transport in-process
+    # and makes no provider call, so it touches no paid path. It exists because
+    # that rehearsal previously had exactly ONE reproducer -- a single
+    # workstation whose Docker Desktop 9p mount deadlocked two runs in
+    # `p9_client_rpc` -- and evidence nobody else can reproduce is weak
+    # evidence for a release gate. `swelive_gt_harness_paid.yaml` is the
+    # reviewed paid smoke path: workflow_dispatch-only, approval-gated by its
+    # own input, and bound to the manifest pins -- admitted by name, not by
+    # loosening the rule. `producer_build.yml` is admitted the same way: it
+    # is the certified producer-build lane (dispatch-only, builds the pinned
+    # Groundtruth gt-index binary with stamped source commit/fingerprint and
+    # static-link verification), touches no paid path, and exists so the
+    # producer artifact carries an auditable CI recipe rather than an
+    # unreproducible workstation build.
+    assert active == [
+        "deepswe_cache_images.yml",
+        "deepswe_gt_harness_product.yml",
+        "deepswe_gt_harness_product_p0731.yaml",
+        "installed_rehearsal.yml",
+        "producer_build.yml",
+        "swelive_gt_harness_paid.yaml",
+        "tb2_cache_images.yml",
+    ]
+
+
+def test_paid_product_workflow_is_reachable_pinned_and_approval_gated() -> None:
+    assert validate_workflow(PAID_WORKFLOW, root=ROOT) == []
+
+
+def test_readiness_workflows_enforce_full_suite_pinned_sources_and_dark_gate() -> None:
+    provider_free = WORKFLOW.read_text(encoding="utf-8")
+    paid = PAID_WORKFLOW.read_text(encoding="utf-8")
+    assert "python -m pytest -q -ra tests" in provider_free
+    assert "repository: abhigyanpatwari/GitNexus" in provider_free
+    assert "ref: 7e993ab8972386294fb96bf14a8665d0b5325397" in provider_free
+    assert "fetch-depth: 0" in provider_free
+    assert "e56c7ef17eaffee36c80ff4dde4f0cd3991c4dcd" in provider_free
+    assert "7bbbc9d0b7f02f8cdaab79ad82ee86884b738eb5" in provider_free
+    assert "+refs/heads/*:refs/remotes/origin/*" in provider_free
+    assert "PRODUCER_PATH=\"/opt/groundtruth/gt-index/gt-index\"" in provider_free
+    assert "sha256sum --check --strict" in provider_free
+    assert 're.fullmatch(r"[0-9a-f]{64}", pins["producer_sha"])' in provider_free
+    assert 'Path("artifacts/product-closeout").mkdir(parents=True, exist_ok=True)' in provider_free
+    assert "git config --global user.email \"gt-harness-ci@example.invalid\"" in provider_free
+    assert "git config core.hooksPath \"${GITHUB_WORKSPACE}/.githooks\"" in provider_free
+    assert "python scripts/verify_feature_matrix.py" in provider_free
+    assert "python scripts/gt_audit.py" in paid
+    assert "python scripts/gt_live_gate.py" in paid
+    assert "--require-complete-census" in paid
+    assert "python -m scripts.attest_deepswe" in paid
+    assert "--output attestation/feature-matrix.json" in paid
+    assert "cp gt_finalstand/feature_matrix.json" not in paid
+    assert "AUDIT_EXIT=0" in paid
+    assert '--workflow-run-id "$GITHUB_RUN_ID"' in paid
+    assert "attestation/gt-audit.json" in paid
+    assert "attestation/gt-live-gate.json" in paid
+    assert "attestation/feature-matrix.json" in paid
+    assert "cohort_stage" in paid
+    assert "remaining-19" in paid
+    assert "validate_prior_gate" in paid
+    assert "diagnose_benchmark_run" in paid
+    assert "task_selection" not in paid
+    assert "if: always()" in paid.split(
+        "- name: Verify all DeepSWE outcomes and product receipts", 1
+    )[1].split("- name: Upload final DeepSWE GT Harness attestation", 1)[0]
+    assert "from gt_harness.runtime_receipts import" not in paid
+    assert '"onnxruntime==1.20.1" "tokenizers==0.23.1"' in paid
+    assert "Install pinned attestation test dependencies" in paid
+    assert "--require-hashes -r config/product-requirements.lock" in paid.split(
+        "Install pinned attestation test dependencies", 1
+    )[1]
+    assert "str(MiniSweAgent._gt_wheel())" in paid
+    assert 'python -c "import groundtruth.runtime.gateway"' in paid
+    assert "max_timeout_sec=stage_timeout_cap_seconds(stage)" in paid
+    assert '"agent_timeout_multiplier": budget["timeout_multiplier"]' in paid
+    assert '--agent-timeout-multiplier "${{ matrix.agent_timeout_multiplier }}"' in paid
+    assert "--agent-timeout-multiplier 1.0" not in paid
+
+
+def test_paid_smoke_requires_all_exact_task_image_digests_before_provider_gate() -> None:
+    paid = PAID_WORKFLOW.read_text(encoding="utf-8")
+    assert '"container_image": bundle_task["container_image"]' in paid
+    assert '"container_digest": bundle_task["container_digest"]' in paid
+    assert "image_digest_gate:" in paid
+    assert "needs: [plan, readiness, image_digest_gate]" in paid
+    assert "needs: [plan, readiness, image_digest_gate, provider_gate]" in paid
+    assert "Verify all exact task-image manifests without provider access" in paid
+    assert 'docker buildx imagetools inspect --raw "$IMAGE_REF"' in paid
+    assert 'test "sha256:${OBSERVED}" = "${DIGEST}"' in paid
+    assert "Pull and verify the exact task image" in paid
+    assert 'docker pull "${SOURCE_IMAGE}@${SOURCE_DIGEST}"' in paid
+    assert "image_cache:" not in paid
+    assert "ghcr.io/" not in paid
+    assert "secrets.OPENROUTER_API_KEY" not in paid.split(
+        "  image_digest_gate:", 1
+    )[1].split(
+        "  provider_gate:", 1
+    )[0]

@@ -1,14 +1,18 @@
 """Read-only projection of graph.db surfaces into task and verification context."""
-
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from gt_engine.task_contract import TaskContract, TaskResourceRole, significant_tokens
+from gt_engine.derived_context import DERIVED_STATE_OK, derived_layer_states
+from gt_engine.task_contract import TaskContract, significant_tokens
 
 GRAPH_SURFACES = (
     "nodes",
@@ -23,9 +27,103 @@ GRAPH_SURFACES = (
     "assertions",
     "cochanges",
     "cochange_sets",
+    "communities",
+    "community_members",
+    "processes",
+    "process_steps",
     "file_hashes",
     "project_meta",
+    "routes",
 )
+CAPABILITY_MATRIX_SCHEMA = "gt.capability_matrix.v2"
+CAPABILITY_STATES = frozenset({"demonstrated", "partial", "absent", "stale"})
+GITNEXUS_PINNED_REVISION = "7e993ab8972386294fb96bf14a8665d0b5325397"
+
+# These are probes, not claims copied from a ticket.  A cell is produced only
+# after the exact blob at the supplied revision has been read and its symbol
+# located in that blob.
+_CAPABILITY_PROBES = (
+    ("indexing and freshness", "gt_engine/indexer.py", "ensure_index_with_receipt",
+     "gitnexus/src/core/analysis-features.ts", "resolveAnalysisFeatureVersions"),
+    ("hybrid retrieval", "gt_engine/graph_context.py", "build_graph_projection",
+     "gitnexus/src/core/search/hybrid-search.ts", "hybridSearch"),
+    ("community analysis", "gt_engine/graph_context.py", "build_graph_projection",
+     "gitnexus/src/core/ingestion/community-processor.ts", "processCommunities"),
+    ("resolution provenance", "gt_engine/resolution_provenance.py", "CallCandidate",
+     "gitnexus/src/cli/eval-server.ts", "candidates"),
+    ("feature lifecycle accounting", "gt_engine/attribution.py", "summarize_features",
+     "gitnexus/src/storage/repo-meta.ts", "RepoMeta"),
+    ("production query delivery", "gt_engine/bridge.py", "GTBridge",
+     "gitnexus/src/cli/tool.ts", "output"),
+)
+
+
+def _git_blob(root: str | Path, revision: str, path: str) -> bytes | None:
+    """Read one immutable Git blob; never inspect a working-tree substitute."""
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    normalized = path.replace("\\", "/")
+    if not normalized or normalized.startswith("/") or ".." in normalized.split("/"):
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "show", f"{revision}:{normalized}"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _symbol_line(blob: bytes, symbol: str) -> int | None:
+    text = blob.decode("utf-8", "replace")
+    escaped = re.escape(symbol)
+    patterns = (
+        rf"(?m)^\s*(?:async\s+)?def\s+{escaped}\b",
+        rf"(?m)^\s*class\s+{escaped}\b",
+        rf"(?m)^\s*(?:export\s+)?(?:async\s+)?function\s+{escaped}\b",
+        rf"(?m)^\s*(?:export\s+)?(?:const|let|var|interface|type)\s+{escaped}\b",
+        rf"(?m)^\s*['\"]?{escaped}['\"]?\s*[:(=]",
+        rf"(?m)^.*\b{escaped}\b.*$",
+    )
+    match = None
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match is not None:
+            break
+    if match is None:
+        return None
+    return text.count("\n", 0, match.start()) + 1
+
+
+def _source_cell(
+    tool: str,
+    capability: str,
+    root: str | Path,
+    revision: str,
+    path: str,
+    symbol: str,
+) -> tuple[dict[str, Any], bytes] | None:
+    blob = _git_blob(root, revision, path)
+    if blob is None:
+        return None
+    line = _symbol_line(blob, symbol)
+    citation: dict[str, Any] = {
+        "tool": tool,
+        "path": path,
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "revision": revision,
+    }
+    if line is not None:
+        citation.update({"symbol": symbol, "line": line})
+    return {
+        "tool": tool,
+        "capability": capability,
+        "state": "demonstrated" if line is not None else "partial",
+        "citation": citation,
+    }, blob
 
 
 def graph_revision(graph_db: str) -> str:
@@ -40,7 +138,9 @@ def graph_revision(graph_db: str) -> str:
         stat = os.stat(graph_db)
     except (OSError, TypeError, ValueError):
         return ""
-    material = f"{os.path.abspath(graph_db)}\0{stat.st_size}\0{stat.st_mtime_ns}"
+    material = (
+        f"{os.path.abspath(graph_db)}\0{stat.st_size}\0{stat.st_mtime_ns}"
+    )
     return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:24]
 
 
@@ -55,8 +155,6 @@ class GraphSemanticFact:
     line: int = 0
     confidence: float = 0.0
     revision: str = ""
-    semantic_certainty: float = 0.0
-    retrieval_relevance: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -67,6 +165,107 @@ class GraphProjection:
     surface_hits: tuple[tuple[str, int], ...]
     semantic_facts: tuple[GraphSemanticFact, ...] = ()
     revision: str = ""
+    # The recorded admission state of each derived layer, verbatim
+    # (``ok``/``not_run``/a reason constant) or a reader-named degraded
+    # condition (``unrecorded``/``table_absent``/``count_mismatch``). Empty
+    # only when the states themselves could not be read.
+    derived_states: tuple[tuple[str, str], ...] = ()
+
+
+def build_capability_matrix(
+    gt_root: str | Path,
+    *,
+    gt_revision: str,
+    gitnexus_root: str | Path,
+    gitnexus_revision: str = GITNEXUS_PINNED_REVISION,
+) -> dict[str, Any]:
+    """Generate a matrix from pinned source bytes and resolvable symbols."""
+    if not re.fullmatch(r"[0-9a-f]{40}", gt_revision) or not re.fullmatch(
+        r"[0-9a-f]{40}", gitnexus_revision
+    ):
+        raise ValueError("matrix revisions must be full Git SHAs")
+    cells: list[dict[str, Any]] = []
+    for capability, gt_path, gt_symbol, gn_path, gn_symbol in _CAPABILITY_PROBES:
+        gt_cell = _source_cell("gt", capability, gt_root, gt_revision, gt_path, gt_symbol)
+        gn_cell = _source_cell(
+            "gitnexus", capability, gitnexus_root, gitnexus_revision, gn_path, gn_symbol
+        )
+        if gt_cell is None or gn_cell is None:
+            raise ValueError(f"pinned source probe unavailable for {capability}")
+        cells.extend((gt_cell[0], gn_cell[0]))
+    cells.sort(key=lambda row: (row["capability"], row["tool"]))
+    payload = {
+        "schema": CAPABILITY_MATRIX_SCHEMA,
+        "source_revision": gt_revision,
+        "gitnexus_revision": gitnexus_revision,
+        "cells": cells,
+    }
+    payload["matrix_sha256"] = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return payload
+
+
+def verify_capability_matrix(
+    matrix: dict[str, Any],
+    roots: dict[str, str | Path],
+) -> bool:
+    """Verify digest, pinned revisions, paths, symbols, and immutable blobs."""
+    if not isinstance(matrix, dict) or matrix.get("schema") != CAPABILITY_MATRIX_SCHEMA:
+        return False
+    cells = matrix.get("cells")
+    if not isinstance(cells, list) or len(cells) != len(_CAPABILITY_PROBES) * 2:
+        return False
+    source_revision = matrix.get("source_revision")
+    gitnexus_revision = matrix.get("gitnexus_revision")
+    if not isinstance(source_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+        return False
+    if gitnexus_revision != GITNEXUS_PINNED_REVISION:
+        return False
+    unsigned = {key: value for key, value in matrix.items() if key != "matrix_sha256"}
+    digest = hashlib.sha256(
+        json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if matrix.get("matrix_sha256") != digest:
+        return False
+    for cell in cells:
+        if not isinstance(cell, dict) or cell.get("state") not in CAPABILITY_STATES:
+            return False
+        citation = cell.get("citation", {})
+        tool = citation.get("tool")
+        path = citation.get("path")
+        revision = citation.get("revision")
+        if tool not in roots or not isinstance(path, str) or not isinstance(revision, str):
+            return False
+        expected_revision = source_revision if tool == "gt" else gitnexus_revision
+        if revision != expected_revision:
+            return False
+        blob = _git_blob(roots[tool], revision, path)
+        if blob is None or hashlib.sha256(blob).hexdigest() != citation.get("sha256"):
+            return False
+        symbol = citation.get("symbol")
+        line = citation.get("line")
+        if symbol is not None and _symbol_line(blob, str(symbol)) != line:
+            return False
+    return True
+
+
+def persist_capability_matrix(path: str | Path, matrix: dict[str, Any]) -> None:
+    """Atomically persist the exact matrix bytes for later independent review."""
+    destination = Path(path)
+    temporary = destination.with_name(destination.name + ".tmp")
+    temporary.write_text(
+        json.dumps(matrix, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(destination)
+
+
+def load_capability_matrix(path: str | Path) -> dict[str, Any]:
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("capability matrix artifact must be an object")
+    return value
 
 
 def _connect(graph_db: str) -> sqlite3.Connection | None:
@@ -82,7 +281,9 @@ def _tables(con: sqlite3.Connection) -> set[str]:
     try:
         return {
             str(row[0])
-            for row in con.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
+            )
         }
     except sqlite3.Error:
         return set()
@@ -115,20 +316,6 @@ def graph_query_terms(
     """Return decision anchors in specificity order, never alphabetic order."""
     subjects: list[str] = []
     tokens: list[str] = []
-    resource_terms: list[str] = []
-    for resource in contract.resources:
-        if resource.confidence < 0.8 or resource.role not in {
-            TaskResourceRole.INPUT,
-            TaskResourceRole.REFERENCE,
-            TaskResourceRole.EXECUTABLE,
-        }:
-            continue
-        path = str(resource.path or "").replace("\\", "/").strip("/").lower()
-        if not path:
-            continue
-        basename = path.rsplit("/", 1)[-1]
-        stem = basename.rsplit(".", 1)[0]
-        resource_terms.extend((path, basename, stem))
     for item in contract.obligations:
         tokens.extend(significant_tokens(item.text))
         subjects.extend(s.lower() for s in item.subjects)
@@ -141,7 +328,7 @@ def graph_query_terms(
     # repeated obligation coverage and specificity (longer identifiers) while
     # retaining first occurrence as a deterministic final tie-break.
     ordered: list[str] = []
-    for value in (*resource_terms, *subjects):
+    for value in subjects:
         value = clean(value)
         if value and value not in ordered:
             ordered.append(value)
@@ -168,20 +355,8 @@ def graph_query_terms(
     return tuple(ordered[: max(1, int(limit))])
 
 
-def _fts_query(
-    contract: TaskContract,
-    *,
-    query_terms: tuple[str, ...] | None = None,
-) -> str:
-    terms = graph_query_terms(contract) if query_terms is None else query_terms
-    safe_terms = tuple(
-        dict.fromkeys(
-            str(token or "").replace('"', "").strip().lower()
-            for token in terms
-            if str(token or "").replace("_", "").replace(".", "").isalnum()
-        )
-    )
-    return " OR ".join(f'"{token}"' for token in safe_terms if token)
+def _fts_query(contract: TaskContract) -> str:
+    return " OR ".join(f'"{token}"' for token in graph_query_terms(contract))
 
 
 def build_graph_projection(
@@ -189,9 +364,6 @@ def build_graph_projection(
     contract: TaskContract,
     *,
     limit: int = 24,
-    active_paths: tuple[str, ...] = (),
-    include_tests: bool = False,
-    query_terms: tuple[str, ...] | None = None,
 ) -> GraphProjection:
     """Use lexical, body, relation, closure, property, test, and cochange surfaces."""
     con = _connect(graph_db)
@@ -205,119 +377,70 @@ def build_graph_projection(
     revision = graph_revision(graph_db)
     try:
         tables = _tables(con)
-        normalized_active_paths: list[str] = []
-        for raw_path in active_paths:
-            path = str(raw_path or "").strip().replace("\\", "/")
-            if path.startswith("/app/"):
-                path = path[5:]
-            elif path.startswith("./"):
-                path = path[2:]
-            if path and not path.startswith("/") and ".." not in Path(path).parts:
-                normalized_active_paths.append(path)
-        normalized_active_paths = list(dict.fromkeys(normalized_active_paths))
-        if normalized_active_paths and "nodes" in tables:
-            try:
-                placeholders = ",".join("?" for _ in normalized_active_paths)
-                rows = con.execute(
-                    "SELECT id,file_path,name,COALESCE(start_line,0),"
-                    "COALESCE(signature,''),COALESCE(language,'') FROM nodes "
-                    "WHERE file_path IN (" + placeholders + ") "
-                    "AND COALESCE(is_test,0)=0 ORDER BY file_path,start_line,id LIMIT ?",
-                    (*normalized_active_paths, limit),
-                ).fetchall()
-                hits["nodes"] += len(rows)
-                for node_id, file_path, name, start_line, signature, _language in rows:
-                    node_ids.add(int(node_id))
-                    files.add(str(file_path).replace("\\", "/"))
-                    symbols.add(str(name))
-                    semantic_facts.append(
-                        GraphSemanticFact(
-                            surface="nodes",
-                            node_id=int(node_id),
-                            file_path=str(file_path).replace("\\", "/"),
-                            symbol=str(name),
-                            kind="active_path_symbol",
-                            value=str(signature or f"{file_path}:{name}")[:500],
-                            line=int(start_line or 0),
-                            confidence=1.0 if int(start_line or 0) > 0 else 0.0,
-                            revision=revision,
-                            semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
-                            retrieval_relevance=0.0,
-                        )
-                    )
-            except sqlite3.Error:
-                pass
-        query = _fts_query(contract, query_terms=query_terms)
+        # Admission state of each derived layer, read once up front. Only
+        # ``ok`` serves rows -- a degraded, unrecorded or count-mismatched
+        # partition is never projected into the work surface.
+        try:
+            derived_states = derived_layer_states(con, tables)
+        except Exception:  # noqa: BLE001 - derived layers are advisory
+            derived_states = {}
+        query = _fts_query(contract)
         if query and "nodes_fts" in tables:
             try:
                 rows = con.execute(
-                    "SELECT n.id,n.file_path,n.name,COALESCE(n.start_line,0),"
-                    "COALESCE(n.signature,''),"
+                    "SELECT n.id,n.file_path,n.name,"
                     "snippet(nodes_fts,-1,'','',' ',12) FROM nodes_fts f "
                     "JOIN nodes n ON n.id=f.rowid WHERE nodes_fts MATCH ? "
-                    + ("" if include_tests else "AND COALESCE(n.is_test,0)=0 ")
-                    + "ORDER BY bm25(nodes_fts) LIMIT ?",
+                    "AND COALESCE(n.is_test,0)=0 ORDER BY bm25(nodes_fts) LIMIT ?",
                     (query, limit),
                 ).fetchall()
                 hits["nodes_fts"] += len(rows)
-                for node_id, file_path, name, start_line, signature, excerpt in rows:
+                for rank, (
+                    node_id, file_path, name, excerpt
+                ) in enumerate(rows, 1):
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    semantic_facts.append(
-                        GraphSemanticFact(
-                            surface="nodes_fts",
-                            node_id=int(node_id),
-                            file_path=str(file_path).replace("\\", "/"),
-                            symbol=str(name),
-                            kind="ranked_symbol",
-                            value=str(signature or excerpt or f"{file_path}:{name}")[:500],
-                            line=int(start_line or 0),
-                            # FTS rank orders candidates; it is not evidence
-                            # that a candidate is relevant to the current
-                            # decision.  The downstream evidence linker owns
-                            # that certification.
-                            confidence=1.0 if int(start_line or 0) > 0 else 0.0,
-                            revision=revision,
-                            semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
-                            retrieval_relevance=0.0,
-                        )
-                    )
+                    semantic_facts.append(GraphSemanticFact(
+                        "nodes_fts",
+                        int(node_id),
+                        str(file_path).replace("\\", "/"),
+                        str(name),
+                        "ranked_symbol",
+                        str(excerpt or f"{file_path}:{name}")[:500],
+                        confidence=max(0.5, 1.0 - ((rank - 1) / max(1, limit))),
+                        revision=revision,
+                    ))
             except sqlite3.Error:
                 pass
         if query and {"symbol_content_fts", "nodes"} <= tables:
             try:
                 rows = con.execute(
-                    "SELECT n.id,n.file_path,n.name,COALESCE(n.start_line,0),"
-                    "COALESCE(n.signature,''),"
+                    "SELECT n.id,n.file_path,n.name,"
                     "snippet(symbol_content_fts,0,'','',' ',12) "
                     "FROM symbol_content_fts f "
                     "JOIN nodes n ON n.id=f.rowid "
-                    "WHERE symbol_content_fts MATCH ? "
-                    + ("" if include_tests else "AND COALESCE(n.is_test,0)=0 ")
-                    + "ORDER BY bm25(symbol_content_fts) LIMIT ?",
+                    "WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
+                    "ORDER BY bm25(symbol_content_fts) LIMIT ?",
                     (query, limit),
                 ).fetchall()
                 hits["symbol_content_fts"] += len(rows)
-                for node_id, file_path, name, start_line, signature, excerpt in rows:
+                for rank, (
+                    node_id, file_path, name, excerpt
+                ) in enumerate(rows, 1):
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    semantic_facts.append(
-                        GraphSemanticFact(
-                            surface="symbol_content_fts",
-                            node_id=int(node_id),
-                            file_path=str(file_path).replace("\\", "/"),
-                            symbol=str(name),
-                            kind="ranked_body",
-                            value=str(signature or excerpt or f"{file_path}:{name}")[:500],
-                            line=int(start_line or 0),
-                            confidence=1.0 if int(start_line or 0) > 0 else 0.0,
-                            revision=revision,
-                            semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
-                            retrieval_relevance=0.0,
-                        )
-                    )
+                    semantic_facts.append(GraphSemanticFact(
+                        "symbol_content_fts",
+                        int(node_id),
+                        str(file_path).replace("\\", "/"),
+                        str(name),
+                        "ranked_body",
+                        str(excerpt or f"{file_path}:{name}")[:500],
+                        confidence=max(0.5, 1.0 - ((rank - 1) / max(1, limit))),
+                        revision=revision,
+                    ))
             except sqlite3.Error:
                 pass
         if query and {"content_passages_fts", "content_passages", "nodes"} <= tables:
@@ -327,152 +450,72 @@ def build_graph_projection(
                     "FROM content_passages_fts f "
                     "JOIN content_passages p ON p.passage_id=f.rowid "
                     "JOIN nodes n ON n.id=p.node_id "
-                    "WHERE content_passages_fts MATCH ? "
-                    + ("" if include_tests else "AND COALESCE(n.is_test,0)=0 ")
-                    + "ORDER BY bm25(content_passages_fts) LIMIT ?",
+                    "WHERE content_passages_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
+                    "ORDER BY bm25(content_passages_fts) LIMIT ?",
                     (query, limit),
                 ).fetchall()
                 hits["content_passages_fts"] += len(rows)
                 hits["content_passages"] += len(rows)
-                for node_id, file_path, name, excerpt, start_line in rows:
+                for rank, (
+                    node_id, file_path, name, excerpt, start_line
+                ) in enumerate(rows, 1):
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    semantic_facts.append(
-                        GraphSemanticFact(
-                            "content_passages_fts",
-                            int(node_id),
-                            str(file_path).replace("\\", "/"),
-                            str(name),
-                            "ranked_passage",
-                            str(excerpt or f"{file_path}:{name}")[:500],
-                            int(start_line or 0),
-                            confidence=1.0 if int(start_line or 0) > 0 else 0.0,
-                            revision=revision,
-                            semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
-                            retrieval_relevance=0.0,
-                        )
-                    )
+                    semantic_facts.append(GraphSemanticFact(
+                        "content_passages_fts",
+                        int(node_id),
+                        str(file_path).replace("\\", "/"),
+                        str(name),
+                        "ranked_passage",
+                        str(excerpt or f"{file_path}:{name}")[:500],
+                        int(start_line or 0),
+                        confidence=max(0.5, 1.0 - ((rank - 1) / max(1, limit))),
+                        revision=revision,
+                    ))
             except sqlite3.Error:
                 pass
 
-        # Preserve the retrieval order that produced the seed.  Sorting node
-        # identifiers here silently replaced FTS/BM25 relevance order with an
-        # index-allocation accident.
-        seed_ids = list(
-            dict.fromkeys(
-                fact.node_id
-                for fact in semantic_facts
-                if fact.node_id > 0
-                and fact.surface
-                in {
-                    "nodes",
-                    "nodes_fts",
-                    "symbol_content_fts",
-                    "content_passages_fts",
-                }
-            )
-        )[:limit]
+        seed_ids = sorted(node_ids)[:limit]
         if seed_ids and {"edges", "nodes"} <= tables:
             placeholders = ",".join("?" for _ in seed_ids)
             try:
                 rows = con.execute(
-                    "SELECT DISTINCT n.id,n.file_path,n.name,"
-                    "COALESCE(n.start_line,0),e.type,COALESCE(e.confidence,0.0),"
-                    "COALESCE(e.trust_tier,''),e.source_id,e.target_id,"
-                    "src.file_path,dst.file_path FROM edges e "
+                    "SELECT DISTINCT n.id,n.file_path,n.name FROM edges e "
                     "JOIN nodes n ON n.id=CASE WHEN e.source_id IN ("
                     + placeholders
                     + ") THEN e.target_id ELSE e.source_id END "
-                    "JOIN nodes src ON src.id=e.source_id "
-                    "JOIN nodes dst ON dst.id=e.target_id "
                     "WHERE (e.source_id IN ("
                     + placeholders
                     + ") OR e.target_id IN ("
                     + placeholders
-                    + ")) AND e.confidence>=0.7 "
-                    "ORDER BY COALESCE(e.confidence,0.0) DESC,e.id LIMIT ?",
+                    + ")) AND e.confidence>=0.7 AND COALESCE(n.is_test,0)=0 "
+                    "LIMIT ?",
                     (*seed_ids, *seed_ids, *seed_ids, limit),
                 ).fetchall()
                 hits["edges"] += len(rows)
-                for (
-                    node_id,
-                    file_path,
-                    name,
-                    start_line,
-                    edge_type,
-                    confidence,
-                    _trust_tier,
-                    _source_id,
-                    _target_id,
-                    source_path,
-                    target_path,
-                ) in rows:
+                for node_id, file_path, name in rows:
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    semantic_facts.append(
-                        GraphSemanticFact(
-                            "edges",
-                            int(node_id),
-                            str(file_path).replace("\\", "/"),
-                            str(name),
-                            str(edge_type),
-                            f"{edge_type}:{source_path}->{target_path}",
-                            int(start_line or 0),
-                            float(confidence or 0.0),
-                            revision,
-                            semantic_certainty=float(confidence or 0.0),
-                            retrieval_relevance=0.0,
-                        )
-                    )
             except sqlite3.Error:
                 pass
         if seed_ids and {"closure", "nodes"} <= tables:
             placeholders = ",".join("?" for _ in seed_ids)
             try:
                 rows = con.execute(
-                    "SELECT DISTINCT n.id,n.file_path,n.name,"
-                    "COALESCE(n.start_line,0),c.depth,"
-                    "COALESCE(c.min_confidence,0.0),c.source_id,c.target_id,"
-                    "src.file_path FROM closure c "
-                    "JOIN nodes n ON n.id=c.target_id "
-                    "JOIN nodes src ON src.id=c.source_id WHERE c.source_id IN ("
+                    "SELECT DISTINCT n.id,n.file_path,n.name FROM closure c "
+                    "JOIN nodes n ON n.id=c.target_id WHERE c.source_id IN ("
                     + placeholders
                     + ") AND c.depth<=2 AND c.min_confidence>=0.5 "
-                    "ORDER BY c.depth,COALESCE(c.min_confidence,0.0) DESC,c.target_id LIMIT ?",
+                    "AND COALESCE(n.is_test,0)=0 LIMIT ?",
                     (*seed_ids, limit),
                 ).fetchall()
                 hits["closure"] += len(rows)
-                for (
-                    node_id,
-                    file_path,
-                    name,
-                    start_line,
-                    depth,
-                    confidence,
-                    _source_id,
-                    _target_id,
-                    source_path,
-                ) in rows:
+                for node_id, file_path, name in rows:
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    semantic_facts.append(
-                        GraphSemanticFact(
-                            "closure",
-                            int(node_id),
-                            str(file_path).replace("\\", "/"),
-                            str(name),
-                            "closure",
-                            f"depth={depth}:{source_path}->{file_path}",
-                            int(start_line or 0),
-                            float(confidence or 0.0),
-                            revision,
-                            semantic_certainty=float(confidence or 0.0),
-                            retrieval_relevance=0.0,
-                        )
-                    )
             except sqlite3.Error:
                 pass
         if seed_ids and "properties" in tables:
@@ -480,7 +523,9 @@ def build_graph_projection(
             try:
                 hits["properties"] = int(
                     con.execute(
-                        "SELECT COUNT(*) FROM properties WHERE node_id IN (" + placeholders + ")",
+                        "SELECT COUNT(*) FROM properties WHERE node_id IN ("
+                        + placeholders
+                        + ")",
                         seed_ids,
                     ).fetchone()[0]
                 )
@@ -504,7 +549,8 @@ def build_graph_projection(
                         float(confidence or 0.0),
                         revision,
                     )
-                    for node_id, path, symbol, kind, value, line, confidence in rows
+                    for node_id, path, symbol, kind, value, line, confidence
+                    in rows
                 )
             except sqlite3.Error:
                 pass
@@ -520,11 +566,10 @@ def build_graph_projection(
                     ).fetchone()[0]
                 )
                 rows = con.execute(
-                    "SELECT a.test_node_id,n.file_path,n.name,a.kind,"
+                    "SELECT a.target_node_id,n.file_path,n.name,a.kind,"
                     "a.expression,COALESCE(a.line,0),"
-                    "COALESCE(a.resolution_score,0.0),target.file_path "
-                    "FROM assertions a JOIN nodes n ON n.id=a.test_node_id "
-                    "JOIN nodes target ON target.id=a.target_node_id "
+                    "COALESCE(a.resolution_score,0.0) "
+                    "FROM assertions a JOIN nodes n ON n.id=a.target_node_id "
                     "WHERE a.target_node_id IN (" + placeholders + ") "
                     "ORDER BY COALESCE(a.resolution_score,0.0) DESC LIMIT ?",
                     (*seed_ids, limit),
@@ -536,15 +581,14 @@ def build_graph_projection(
                         str(path).replace("\\", "/"),
                         str(symbol),
                         str(kind),
-                        f"{value} [target:{target_path}]"[:500],
+                        str(value)[:500],
                         int(line or 0),
                         float(confidence or 0.0),
                         revision,
                     )
-                    for node_id, path, symbol, kind, value, line, confidence, target_path in rows
+                    for node_id, path, symbol, kind, value, line, confidence
+                    in rows
                 )
-                files.update(str(row[1]).replace("\\", "/") for row in rows)
-                node_ids.update(int(row[0]) for row in rows)
             except sqlite3.Error:
                 pass
         if seed_ids and {"edge_metadata", "edges", "nodes"} <= tables:
@@ -572,7 +616,8 @@ def build_graph_projection(
                         float(confidence or 0.0),
                         revision,
                     )
-                    for node_id, path, symbol, kind, value, line, confidence in rows
+                    for node_id, path, symbol, kind, value, line, confidence
+                    in rows
                 )
             except sqlite3.Error:
                 pass
@@ -582,7 +627,8 @@ def build_graph_projection(
             try:
                 rows = con.execute(
                     "SELECT file_path,content_hash,COALESCE(language,''),"
-                    "indexed_at FROM file_hashes WHERE file_path IN (" + placeholders + ") LIMIT ?",
+                    "indexed_at FROM file_hashes WHERE file_path IN ("
+                    + placeholders + ") LIMIT ?",
                     (*base_files, limit),
                 ).fetchall()
                 hits["file_hashes"] += len(rows)
@@ -626,7 +672,7 @@ def build_graph_projection(
             placeholders = ",".join("?" for _ in base_files)
             try:
                 rows = con.execute(
-                    "SELECT file_a,file_b,count FROM cochanges WHERE file_a IN ("
+                    "SELECT file_a,file_b FROM cochanges WHERE file_a IN ("
                     + placeholders
                     + ") OR file_b IN ("
                     + placeholders
@@ -634,31 +680,10 @@ def build_graph_projection(
                     (*base_files, *base_files, limit),
                 ).fetchall()
                 hits["cochanges"] += len(rows)
-                seed_files = set(base_files)
-                for left, right, count in rows:
-                    normalized_left = str(left).replace("\\", "/")
-                    normalized_right = str(right).replace("\\", "/")
-                    files.update({normalized_left, normalized_right})
-                    for partner, seed in (
-                        (normalized_right, normalized_left),
-                        (normalized_left, normalized_right),
-                    ):
-                        if seed not in seed_files or partner in seed_files:
-                            continue
-                        semantic_facts.append(
-                            GraphSemanticFact(
-                                "cochanges",
-                                0,
-                                partner,
-                                "",
-                                "cochange",
-                                f"cochange_with:{seed}:count={int(count or 0)}",
-                                confidence=1.0,
-                                revision=revision,
-                                semantic_certainty=1.0,
-                                retrieval_relevance=0.0,
-                            )
-                        )
+                for left, right in rows:
+                    files.update(
+                        {str(left).replace("\\", "/"), str(right).replace("\\", "/")}
+                    )
             except sqlite3.Error:
                 pass
         if files and "cochange_sets" in tables:
@@ -676,65 +701,208 @@ def build_graph_projection(
                 if commits:
                     commit_ph = ",".join("?" for _ in commits)
                     rows = con.execute(
-                        "SELECT DISTINCT file_path,commit_hash FROM cochange_sets "
+                        "SELECT DISTINCT file_path FROM cochange_sets "
                         "WHERE commit_hash IN (" + commit_ph + ") LIMIT ?",
                         (*commits, limit),
                     ).fetchall()
                     hits["cochange_sets"] += len(rows)
-                    for file_path, commit_hash in rows:
-                        normalized = str(file_path).replace("\\", "/")
-                        files.add(normalized)
-                        if normalized in base_files:
-                            continue
-                        semantic_facts.append(
-                            GraphSemanticFact(
-                                "cochange_sets",
-                                0,
-                                normalized,
-                                "",
-                                "cochange_set",
-                                f"commit:{commit_hash}",
-                                confidence=1.0,
-                                revision=revision,
-                                semantic_certainty=1.0,
-                                retrieval_relevance=0.0,
-                            )
-                        )
+                    files.update(str(row[0]).replace("\\", "/") for row in rows)
             except sqlite3.Error:
                 pass
-        retrieval_surfaces = {
-            "nodes": 4,
-            "nodes_fts": 3,
-            "symbol_content_fts": 2,
-            "content_passages_fts": 1,
-        }
-        canonical_retrieval: dict[int, GraphSemanticFact] = {}
-        retained: list[GraphSemanticFact] = []
-        for fact in semantic_facts:
-            if fact.surface not in retrieval_surfaces or fact.node_id <= 0:
-                retained.append(fact)
-                continue
-            prior = canonical_retrieval.get(fact.node_id)
-            if prior is None or (
-                fact.semantic_certainty,
-                retrieval_surfaces[fact.surface],
-                fact.retrieval_relevance,
-            ) > (
-                prior.semantic_certainty,
-                retrieval_surfaces[prior.surface],
-                prior.retrieval_relevance,
-            ):
-                canonical_retrieval[fact.node_id] = fact
-        # Dict insertion order retains FTS/BM25 order while still collapsing
-        # duplicate node surfaces.  Node ids have no relevance semantics.
-        retained.extend(canonical_retrieval.values())
+        # Community grouping: ``community_members.member`` is a file path, so
+        # every localized file that belongs to a published community emits a
+        # membership fact and pulls its sibling members into the file set --
+        # the same shape as the cochange expansion, one partition level up.
+        if (
+            files
+            and derived_states.get("community") == DERIVED_STATE_OK
+            and {"communities", "community_members"} <= tables
+        ):
+            base_files = sorted(files)[:limit]
+            placeholders = ",".join("?" for _ in base_files)
+            try:
+                rows = con.execute(
+                    "SELECT cm.member,c.id,c.label,c.cohesion,c.member_count "
+                    "FROM community_members cm "
+                    "JOIN communities c ON c.id=cm.community_id "
+                    "WHERE cm.member IN (" + placeholders + ") "
+                    "AND cm.member_kind='file' "
+                    "ORDER BY c.id,cm.member LIMIT ?",
+                    (*base_files, limit),
+                ).fetchall()
+                community_ids: list[str] = []
+                for member, community_id, label, cohesion, member_count in rows:
+                    member = str(member).replace("\\", "/")
+                    hits["community_members"] += 1
+                    if community_id not in community_ids:
+                        community_ids.append(str(community_id))
+                        hits["communities"] += 1
+                    cohesion_text = (
+                        "unmeasured" if cohesion is None
+                        else f"{float(cohesion):.4f}"
+                    )
+                    semantic_facts.append(GraphSemanticFact(
+                        "communities",
+                        0,
+                        member,
+                        "",
+                        "community_membership",
+                        (
+                            f"community={label} cohesion={cohesion_text} "
+                            f"members={int(member_count or 0)}"
+                        )[:500],
+                        confidence=0.8,
+                        revision=revision,
+                    ))
+                if community_ids:
+                    cid_ph = ",".join("?" for _ in community_ids)
+                    member_rows = con.execute(
+                        "SELECT DISTINCT member FROM community_members "
+                        "WHERE community_id IN (" + cid_ph + ") "
+                        "AND member_kind='file' ORDER BY member LIMIT ?",
+                        (*community_ids, limit),
+                    ).fetchall()
+                    for (member,) in member_rows:
+                        files.add(str(member).replace("\\", "/"))
+            except sqlite3.Error:
+                pass
+        # Process participation: ``process_steps.stable_id`` is the producer's
+        # effective stable id -- ``nodes.stable_id`` when stamped, else the
+        # ``resolution_symbols`` id joined on native_id -- so the same
+        # expression resolves which seed nodes sit on a witnessed path.
+        if (
+            seed_ids
+            and derived_states.get("process") == DERIVED_STATE_OK
+            and {"processes", "process_steps"} <= tables
+        ):
+            placeholders = ",".join("?" for _ in seed_ids)
+            try:
+                if "resolution_symbols" in tables:
+                    id_rows = con.execute(
+                        "SELECT n.id,n.file_path,n.name,"
+                        "COALESCE(NULLIF(n.stable_id,''),rs.stable_id,'') "
+                        "FROM nodes n LEFT JOIN resolution_symbols rs "
+                        "ON CAST(rs.native_id AS INTEGER)=n.id "
+                        "WHERE n.id IN (" + placeholders + ")",
+                        seed_ids,
+                    ).fetchall()
+                else:
+                    id_rows = con.execute(
+                        "SELECT n.id,n.file_path,n.name,"
+                        "COALESCE(NULLIF(n.stable_id,''),'') "
+                        "FROM nodes n WHERE n.id IN (" + placeholders + ")",
+                        seed_ids,
+                    ).fetchall()
+                by_stable_id = {
+                    str(sid): (int(nid), str(path).replace("\\", "/"), str(name))
+                    for nid, path, name, sid in id_rows
+                    if sid
+                }
+                if by_stable_id:
+                    sid_ph = ",".join("?" for _ in by_stable_id)
+                    if "resolution_symbols" in tables:
+                        name_expr = "COALESCE(re.qualified_name,p.entry_stable_id)"
+                        name_join = (
+                            "LEFT JOIN resolution_symbols re "
+                            "ON re.stable_id=p.entry_stable_id "
+                        )
+                    else:
+                        name_expr = "p.entry_stable_id"
+                        name_join = ""
+                    prows = con.execute(
+                        "SELECT ps.stable_id,ps.ordinal,p.id,p.kind,"
+                        "p.trust_floor,"
+                        "(SELECT COUNT(*) FROM process_steps s "
+                        "WHERE s.process_id=ps.process_id)," + name_expr + " "
+                        "FROM process_steps ps "
+                        "JOIN processes p ON p.id=ps.process_id "
+                        + name_join
+                        + "WHERE ps.stable_id IN (" + sid_ph + ") "
+                        "ORDER BY ps.ordinal,ps.process_id LIMIT ?",
+                        (*by_stable_id.keys(), limit),
+                    ).fetchall()
+                    hits["processes"] += len({row[2] for row in prows})
+                    hits["process_steps"] += len(prows)
+                    for (
+                        sid, ordinal, _pid, kind, trust_floor, step_count, pname
+                    ) in prows:
+                        nid, path, name = by_stable_id[str(sid)]
+                        semantic_facts.append(GraphSemanticFact(
+                            "processes",
+                            nid,
+                            path,
+                            name,
+                            "process_participation",
+                            (
+                                f"process={pname} "
+                                f"step {int(ordinal or 0) + 1}/"
+                                f"{int(step_count or 0)} "
+                                f"kind={kind} trust={trust_floor}"
+                            )[:500],
+                            confidence=0.8,
+                            revision=revision,
+                        ))
+            except sqlite3.Error:
+                pass
+        # Route/API/data-access surface: HANDLES_ROUTE binds a handler to its
+        # route file, API_CALL binds a client call to the route it resolves to,
+        # QUERIES binds a function to the model it reads through an ORM, and
+        # INJECTS binds a function/ctor to the service type it injects. All carry
+        # producer mechanism + confidence; surface them for in-scope files so a
+        # model editing a handler, client, or data-access call sees that surface
+        # without having to query a tool.
+        if files and {"edges", "nodes"} <= tables:
+            base_files = sorted(files)[:limit]
+            placeholders = ",".join("?" for _ in base_files)
+            try:
+                route_rows = con.execute(
+                    "SELECT e.type,src.file_path,src.name,src.start_line,"
+                    "tgt.file_path,tgt.name,e.confidence,e.resolution_method "
+                    "FROM edges e "
+                    "JOIN nodes src ON src.id=e.source_id "
+                    "JOIN nodes tgt ON tgt.id=e.target_id "
+                    "WHERE e.type IN ('HANDLES_ROUTE','API_CALL','QUERIES','INJECTS') "
+                    "AND (src.file_path IN (" + placeholders + ") "
+                    "OR tgt.file_path IN (" + placeholders + ")) "
+                    "ORDER BY e.confidence DESC,src.file_path LIMIT ?",
+                    (*base_files, *base_files, limit),
+                ).fetchall()
+                hits["routes"] += len(route_rows)
+                _EDGE_FACT_KIND = {
+                    "HANDLES_ROUTE": "route_handler",
+                    "API_CALL": "api_call",
+                    "QUERIES": "data_access",
+                    "INJECTS": "injection",
+                }
+                for (
+                    etype, src_path, src_name, src_line,
+                    tgt_path, tgt_name, conf, mechanism,
+                ) in route_rows:
+                    src_path = str(src_path).replace("\\", "/")
+                    tgt_path = str(tgt_path).replace("\\", "/")
+                    semantic_facts.append(GraphSemanticFact(
+                        "routes",
+                        0,
+                        src_path,
+                        str(src_name or ""),
+                        _EDGE_FACT_KIND.get(etype, "api_surface"),
+                        (
+                            f"{etype} {src_name} ({src_path}:{src_line}) -> "
+                            f"{tgt_name} ({tgt_path})"
+                        )[:500],
+                        confidence=None if conf is None else float(conf),
+                        revision=revision,
+                    ))
+            except sqlite3.Error:
+                pass
         return GraphProjection(
             files=frozenset(files),
             symbols=frozenset(symbols),
             node_ids=frozenset(node_ids),
             surface_hits=tuple(sorted((k, v) for k, v in hits.items() if v)),
-            semantic_facts=tuple(retained),
+            semantic_facts=tuple(semantic_facts),
             revision=revision,
+            derived_states=tuple(sorted(derived_states.items())),
         )
     finally:
         con.close()
