@@ -1,8 +1,15 @@
 name: "TB2 GT smoke20: Union Alpha on 921bec20"
-run-name: "TB2-GT smoke20 | stealth/union-alpha | 921bec20 | p20"
+run-name: "TB2-GT ${{ inputs.cohort_stage }} | stealth/union-alpha | 921bec20 | p20"
 
 on:
   workflow_dispatch:
+    inputs:
+      cohort_stage:
+        description: "Run gate-one first; release remaining-19 only after an official grade"
+        required: true
+        type: choice
+        options: [gate-one, remaining-19, all-20]
+        default: gate-one
 
 permissions:
   contents: read
@@ -47,6 +54,8 @@ jobs:
       - name: Freeze the canonical repair20 matrix and task budgets
         id: plan
         shell: bash
+        env:
+          COHORT_STAGE: ${{ inputs.cohort_stage }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$TREATMENT_SHA"
@@ -71,13 +80,21 @@ jobs:
           digest = hashlib.sha256(("\n".join(sorted(tasks)) + "\n").encode()).hexdigest()
           if digest != expected_hash or len(tasks) != 20 or len(set(tasks)) != 20:
               raise SystemExit("repair20 task identity mismatch")
+          stage = os.environ["COHORT_STAGE"]
+          selected = {
+              "gate-one": tasks[:1],
+              "remaining-19": tasks[1:],
+              "all-20": tasks,
+          }.get(stage)
+          if selected is None:
+              raise SystemExit(f"unsupported cohort stage: {stage}")
           dataset = Path(os.environ["RUNNER_TEMP"]) / "tb2-plan" / "terminal-bench"
           available = {p.name for p in dataset.iterdir() if p.is_dir()}
           missing = sorted(set(tasks) - available)
           if missing:
               raise SystemExit(f"tasks absent from terminal-bench@2.0: {missing}")
           rows = []
-          for ordinal, task in enumerate(tasks, 1):
+          for ordinal, task in enumerate(selected, 1):
               budget = resolve_budget(dataset / task / "task.toml", multiplier=5.0)
               rows.append({
                   "ordinal": ordinal,
@@ -95,12 +112,15 @@ jobs:
               "model": os.environ["MODEL"],
               "effective_model": "openai/stealth/union-alpha",
               "dataset": os.environ["DATASET"],
-              "task_count": 20,
-              "task_ids": tasks,
+              "cohort_stage": stage,
+              "task_count": len(selected),
+              "task_ids": selected,
+              "full_task_count": 20,
+              "full_task_ids": tasks,
               "task_set_sha256": digest,
-              "parallel": 20,
+              "parallel": min(20, len(selected)),
               "attempts_per_task": 1,
-              "agent": "eval.miniswe_agent:MiniSweGtAgent",
+              "agent": "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent",
               "agent_scaffold": "mini-swe-agent",
               "agent_scaffold_version": "2.4.6",
               "timeout_multiplier": 5.0,
@@ -112,7 +132,7 @@ jobs:
               json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
           )
           matrix = json.dumps({"include": rows}, separators=(",", ":"))
-          tasks_json = json.dumps(tasks, separators=(",", ":"))
+          tasks_json = json.dumps(selected, separators=(",", ":"))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"matrix={matrix}\n")
               out.write(f"tasks={tasks_json}\n")
@@ -142,23 +162,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install the official Harbor runtime
-        run: python -m pip install --disable-pip-version-check "harbor==0.20.0"
+      - name: Install the locked GT product and official runtimes
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check \
+            --require-hashes -r config/product-requirements.lock
+          test "$(python -c 'import importlib.metadata as m; print(m.version("datacurve-pier"))')" = "0.3.1"
+          test "$(python -c 'import importlib.metadata as m; print(m.version("harbor"))')" = "0.20.0"
+          test "$(python -c 'import importlib.metadata as m; print(m.version("mini-swe-agent"))')" = "2.4.6"
 
-      - name: Prove the exact treatment agent is importable by Harbor
+      - name: Prove the exact treatment adapter and environment contract
         run: |
           set -euo pipefail
           python - <<'PY'
-          from harbor.agents.base import BaseAgent
-          from harbor.utils.import_path import import_class
+          from eval.pier_filtered_docker import PierFilteredDockerEnvironment
+          from eval.pier_gt_harness_adapter import PierGtHarnessMiniSwe246Agent
 
-          agent = import_class(
-              "eval.miniswe_agent:MiniSweGtAgent",
-              base=BaseAgent,
-              label="agent",
-          )
-          assert agent.__module__ == "eval.miniswe_agent"
-          assert agent.__name__ == "MiniSweGtAgent"
+          agent = PierGtHarnessMiniSwe246Agent
+          environment = PierFilteredDockerEnvironment
+          assert agent.__module__ == "eval.pier_gt_harness_adapter"
+          assert agent.__name__ == "PierGtHarnessMiniSwe246Agent"
+          assert agent.MINISWE_AGENT_VERSION == "2.4.6"
+          assert hasattr(environment, "agent_process_env")
           PY
 
       - name: Restore the existing verifier-canary image cache
@@ -191,17 +216,24 @@ jobs:
           path: ${{ runner.temp }}/tb2-img.tar.gz
           key: tb2-img-${{ env.TASK }}-${{ env.IMAGE_TAG }}
 
-      - name: Run the real official verifier without a model
+      - name: Export the exact official verifier-canary task package
+        run: |
+          set -euo pipefail
+          harbor dataset download "$DATASET" -o "$RUNNER_TEMP/tb2-pre-spend" --export
+          test -f "$RUNNER_TEMP/tb2-pre-spend/terminal-bench/$TASK/task.toml"
+
+      - name: Run the real official verifier through Pier without a model
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p results/pre-spend
-          harbor run \
-            -d "$DATASET" \
+          pier run \
+            -p "$RUNNER_TEMP/tb2-pre-spend/terminal-bench" \
             -a nop \
+            --environment-import-path eval.pier_filtered_docker:PierFilteredDockerEnvironment \
             -o results/pre-spend \
             --job-name "tb2-gt-pre-spend-${GITHUB_RUN_ID}" \
-            -n 1 -l 1 --delete -y \
+            -n 1 -l 1 -y \
             -i "$TASK"
 
       - name: Parse and certify official-verifier evidence
@@ -234,6 +266,7 @@ jobs:
               "dataset": os.environ["DATASET"],
               "canary_task": task,
               "checks": {
+                  "exact_pier_environment_executed": "PASS",
                   "official_verifier_executed": "PASS",
                   "parser_accepted_official_evidence": "PASS",
                   "infrastructure_classification": "PASS",
@@ -460,15 +493,22 @@ jobs:
                   out.write(f"{name}={clean}\n")
           PY
 
-      - name: Run one official Harbor TB2 trial
+      - name: Export the exact official TB2 task package for Pier
+        run: |
+          set -euo pipefail
+          harbor dataset download "$DATASET" -o "$RUNNER_TEMP/tb2-task" --export
+          test -f "$RUNNER_TEMP/tb2-task/terminal-bench/$TASK/task.toml"
+
+      - name: Run one official Pier TB2 trial
         id: harbor
         shell: bash
         run: |
           set +e
           mkdir -p results/terminal-bench
-          harbor run \
-            -d "$DATASET" \
-            --agent-import-path eval.miniswe_agent:MiniSweGtAgent \
+          pier run \
+            -p "$RUNNER_TEMP/tb2-task/terminal-bench" \
+            --agent-import-path eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent \
+            --environment-import-path eval.pier_filtered_docker:PierFilteredDockerEnvironment \
             -m "$MODEL" \
             -o results/terminal-bench \
             --job-name "tb2-gt-smoke20-921bec20-${GITHUB_RUN_ID}-${TASK}" \

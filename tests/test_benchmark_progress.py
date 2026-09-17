@@ -163,7 +163,7 @@ def test_tb2_workflow_publishes_harbor_verifier_receipts_to_live_monitor() -> No
     assert "expected_tasks_json: ${{ needs.plan.outputs.tasks }}" in workflow
     assert "Passed (official reward 1)" in monitor
     assert "Successful task jobs" not in monitor
-    run_marker = "Run one official Harbor TB2 trial"
+    run_marker = "Run one official Pier TB2 trial"
     assert workflow.index("Pull the existing GHCR mirror only on cache miss") < workflow.index(
         run_marker
     )

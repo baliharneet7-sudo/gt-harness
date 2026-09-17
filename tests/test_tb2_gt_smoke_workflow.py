@@ -21,7 +21,7 @@ def test_gt_smoke_is_source_bound_and_uses_the_product_agent() -> None:
     )
     assert "TREATMENT_SHA: ${{ github.sha }}" in text
     assert "GT_SOURCE_SHA: 921bec20d3dbabd12e4b442936d9259c24cdcc74" in text
-    assert "eval.miniswe_agent:MiniSweGtAgent" in text
+    assert "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent" in text
     assert "eval.miniswe_agent:MiniSweAgent" not in text
     assert "openhands" not in text.lower()
     assert 'MINISWE_AGENT_VERSION: "2.4.6"' in text
@@ -31,11 +31,14 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
     assert "max-parallel: 20" in text
+    assert "options: [gate-one, remaining-19, all-20]" in text
+    assert '"gate-one": tasks[:1]' in text
+    assert '"remaining-19": tasks[1:]' in text
     assert 'TIMEOUT_MULTIPLIER: "5.0"' in text
     assert 'STEP_LIMIT: "100"' in text
     assert "attempts_per_task" in text
-    assert '"parallel": 20' in text
-    assert '"task_count": 20' in text
+    assert '"parallel": min(20, len(selected))' in text
+    assert '"full_task_count": 20' in text
     assert "36d5c8945f6f8d9ae23fe2cea759f16da0c0cea424a98f710cfaa0d9d6fd0303" in text
     assert "actions/cache/restore@v4" in text
     assert "tb2-img-${{ matrix.task }}-${{ env.IMAGE_TAG }}" in text
@@ -44,9 +47,12 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert "pre_spend:" in text
     assert "needs: [plan, provider_free]" in text
     assert "needs: [plan, pre_spend]" in text
-    assert "Run the real official verifier without a model" in text
-    assert "Prove the exact treatment agent is importable by Harbor" in text
+    assert "Run the real official verifier through Pier without a model" in text
+    assert "Prove the exact treatment adapter and environment contract" in text
     assert "PYTHONPATH: ${{ github.workspace }}" in text
+    assert "eval.pier_filtered_docker:PierFilteredDockerEnvironment" in text
+    assert 'm.version("datacurve-pier")' in text
+    assert '"exact_pier_environment_executed": "PASS"' in text
     assert "-a nop" in text
     assert '"model_requests": 0' in text
     assert "Save the verifier-canary image for paid task reuse" in text
@@ -57,7 +63,8 @@ def test_gt_smoke_uses_official_harbor_grades_and_retains_evidence() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     parser = (ROOT / "scripts" / "benchmark_progress.py").read_text(encoding="utf-8")
 
-    assert "harbor run" in text
+    assert "pier run" in text
+    assert "Run one official Pier TB2 trial" in text
     assert 'DATASET: terminal-bench@2.0' in text
     assert 'MODEL: stealth/union-alpha' in text
     assert '--effective-model "openai/stealth/union-alpha"' in text
