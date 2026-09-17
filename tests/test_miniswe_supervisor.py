@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -287,3 +288,40 @@ def test_churn_abort_maps_to_typed_terminal(tmp_path):
     assert report["terminal"] == "churn_abort"
     assert report["exit_code"] == 7
     assert report["supervisor"]["reason"] == "churn_abort"
+
+def test_patch_output_is_required_only_when_a_baseline_exists(tmp_path):
+    """A workspace with no git baseline cannot produce a patch, so its absence
+    is not evidence that the run failed.
+
+    Run 35280614124 (TB2 extract-elf): the child exited 0 with terminal
+    budget_exhausted - a completed solver outcome whose workspace the official
+    verifier grades on its own. A terminal-bench workspace is not a git
+    repository, so `git rev-parse HEAD` found no baseline and --patch-output
+    was never written. The supervisor required that file regardless, routed a
+    clean exit into conserve_failure, and conserve_failure only maps
+    returncodes {3,4,5,6,7} - so 0 fell through to its internal_error/5
+    default. harbor saw non-zero, errored the trial, and the task was recorded
+    infrastructure_failed with no official grade. No TB2 task could be graded
+    no matter how well it went.
+
+    When a baseline DOES exist the patch stays required: that is the object
+    SWE-Live submits, and a missing one must not be mistaken for a clean run.
+    """
+    from scripts.miniswe_supervisor import required_run_artifacts
+
+    args = SimpleNamespace(
+        metrics=str(tmp_path / "metrics.json"),
+        product_receipt=str(tmp_path / "product.json"),
+        adapter_receipt=str(tmp_path / "adapter.json"),
+        patch_output=str(tmp_path / "model.patch"),
+    )
+
+    with_baseline = required_run_artifacts(args, "b658ce261b56c02cb8635416d310ca8f30f4dc90")
+    assert args.patch_output in with_baseline
+
+    without_baseline = required_run_artifacts(args, "")
+    assert args.patch_output not in without_baseline
+    # Everything the run always owes is still required.
+    for path in (args.metrics, args.product_receipt, args.adapter_receipt):
+        assert path in without_baseline
+        assert path in with_baseline

@@ -408,6 +408,27 @@ def _seal_terminated_journals(state_dir: Path, *, reason: str, terminal: str,
     return summary
 
 
+def required_run_artifacts(args: argparse.Namespace, baseline: str) -> list[str]:
+    """Artifacts whose absence means the run did not finish what it owed.
+
+    The patch belongs on this list only when a baseline exists to diff from.
+    A terminal-bench workspace is not a git repository, so `git rev-parse HEAD`
+    yields nothing and --patch-output can never be written. Requiring it there
+    routed a child that exited 0 with terminal budget_exhausted into
+    conserve_failure, which maps only returncodes {3,4,5,6,7} and so dropped
+    the 0 through to its internal_error/5 default: harbor errored the trial and
+    no TB2 task could be officially graded however well it went (run
+    35280614124).
+
+    Where a baseline DOES exist the patch stays required. That is the object
+    SWE-Live submits, and a missing one must never read as a clean run.
+    """
+    required = [args.metrics, args.product_receipt, args.adapter_receipt]
+    if baseline:
+        required.append(args.patch_output)
+    return required
+
+
 def conserve_failure(args: argparse.Namespace, result: SupervisedResult, baseline: str) -> int:
     """Keep real bytes and publish ERROR receipts, even if no model was started."""
     report_path = Path(args.metrics or (Path(args.state_dir) / "supervisor_report.json"))
@@ -667,7 +688,7 @@ def main() -> int:
         return conserve_failure(args, result, baseline)
     if result.returncode not in {0, 3, 4, 5, 6}:
         return conserve_failure(args, result, baseline)
-    required = [args.metrics, args.product_receipt, args.adapter_receipt, args.patch_output]
+    required = required_run_artifacts(args, baseline)
     if any(path and not Path(path).is_file() for path in required):
         return conserve_failure(args, result, baseline)
     return result.returncode if result.returncode is not None else 5
