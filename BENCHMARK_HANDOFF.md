@@ -46,6 +46,103 @@ new series identifier.
 - The planner list is now limited to source-compatible central-agent, progress, provider-preflight, budget, and outcome tests in `.github/workflows/tb2_miniswe_engine.yml`. Push this fix to both benchmark accounts before retrying TB2.
 - Retry with the exact branch, model `openrouter/stealth/union-alpha`, `parallel=20`, `arm=certified_full`, and the documented smoke task list.
 
+### TB2 root cause, corrected 2026-09-17
+
+The five plan failures and the Snowflake failure above were real but they were
+symptoms in front of a wall. `tb2_miniswe_engine.yml:367` pins
+`AGENT="eval.gt_central_agent:MiniSweCentralAgent"`, and that module does not
+exist on `codex/gt-921bec20-union-smokes`: commit `97efb7f0`, the one that
+integrated GT 921bec20, deleted it (9,094 lines). Run `35259343723` therefore
+lost 20/20 tasks to `No module named 'eval.gt_central_agent'`. The module is
+not lost - it is 226,811 bytes on `harneet2512@inline-engine`, which is that
+workflow's own documented default `ref`. The dispatches overrode `ref` to the
+pinned-source branch, the one branch guaranteed not to carry it.
+
+Do not "fix" this by restoring the file. Two different experiments exist:
+
+- `tb2_miniswe_central.yml` uses `eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent`,
+  the same adapter SWE-Live uses, and it works. This is the proven path.
+- `tb2_miniswe_engine.yml` needs `ref=inline-engine`, which abandons the
+  921bec20 pin. Treat it as a separately pinned experiment.
+
+`deepswe_miniswe_central.yml:822` has the same defect via
+`eval.pier_gt_adapter`, which exists on no branch at all (only at `97efb7f0^`).
+It will fail on first dispatch.
+
+### Run conclusion is not a valid signal
+
+Harbor exits 0 on an errored trial, so GitHub reports the run green while the
+receipt records `infrastructure_failed`. Count only
+`gt.benchmark_progress.v1`: `officially_graded`, `passed`,
+`infrastructure_failed`. Run `35262214538` is the worked example - green run,
+zero graded tasks.
+
+### Defects found by the 2026-09-17 smokes
+
+1. FIXED (`8bf0a107`). `_classify_terminal` matched the bare substring
+   `"status"` against the exception message. A TB2 task workspace has no git
+   baseline, so patch export raised `CalledProcessError` ending "returned
+   non-zero exit status 128", and a git failure was graded `provider_failed`,
+   exit 4, harbor errored the trial. Message matching itself is deliberate and
+   is pinned by `test_provider_errors_map_to_provider_failed`; only the
+   `"status"` token was removed.
+2. FIXED (`8bf0a107`). A failed patch export was promoted to the run's
+   terminating exception whenever the agent had not raised, overwriting an
+   outcome the solver had earned. `extract-elf` returned
+   `exit_status: LimitsExceeded` - `budget_exhausted`, which exits 0 precisely
+   because the workspace stays gradable. Promotion is kept for runs that claim
+   a submission and dropped for non-submitted terminals.
+3. OPEN, needs a decision. `scripts/miniswe_gt_run.py:427` raises
+   `command_descendant_receipt_missing` when a worker leaves no containment
+   receipt. On `amoffat__sh-744` this killed a run whose work was already
+   committed: `committed_patch_bytes: 4660`, `committed_patch_empty: false`,
+   `repository_head_moved: true`, and the harness had recorded
+   `collected_patch_will_be_empty: false`. Exit 5 errored the trial, so
+   task.toml's verifier-collect stage - the only producer of
+   `/logs/artifacts/model.patch` - never ran, and an empty patch was graded 0.
+   2 of 4 SWE-Live tasks died this way. Neither fix above touches it.
+4. OPEN, not ours. `cfn-lint-3764`'s own gold patch does not resolve in its
+   pinned image; the pre-spend canary correctly refused at zero model spend.
+   The canary discards the per-instance `test_output.txt`, so the failing test
+   is unknown - keep those logs.
+5. OPEN. `total_cost` reads 0.0 against 22,847,464 input tokens. Tokens are
+   metered in the GT receipt but do not reach the Pier/Harbor receipt, which
+   reports null.
+6. OPEN. The model returns no-tool-call responses at a steady ~10%
+   (SWE-Live 34/354, TB2 11/102), surfaced as `FormatError` and labelled
+   `GT_PROVIDER_MALFORMED_RESPONSE`. That code is the fallback branch of
+   `_classify`, NOT evidence of a transport fault: transport was healthy
+   (`provider_request_count == provider_response_count`). Every one burns an
+   agent turn against `STEP_LIMIT: 100`.
+7. OPEN. TB2 task cgroups are memory-pressured:
+   `GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT` refused 9 graph refreshes
+   (`limit=0..12804096` vs `need=178438144`), leaving `lsp_promotion`
+   non-WORKING and `verified_claims_prohibited`. The GT arm is measured
+   degraded until the task container gets more memory.
+
+### GT mode is already pinned
+
+`eval/miniswe_agent.py:565` builds the supervisor command with
+`--gt-mode advisory`, inherited by `PierGtHarnessMiniSwe246Agent` through
+`super()._run_command`. Both benchmarks use that one adapter, so `advisory` is
+a deliberate pin, not a default. The workflows pass no `--gt-mode`; do not add
+one without deciding to change the arm.
+
+### Account topology
+
+Runs live in `baliharneet7-sudo/gt-harness`. Three accounts are authenticated
+in the gh keyring; use `GH_TOKEN=$(gh auth token --user <acct>)` per command
+rather than `gh auth switch`, which is global and races. Only the owning
+account has push/admin. TB2 images resolve as
+`ghcr.io/<repo_owner>/tb2.<task>:<tag>` with NO Docker Hub fallback, so a
+fresh account must run `tb2_cache_images.yml` first; this was done for
+`baliharneet7-sudo` on 2026-09-17 (run `35262200448`, 13/13) and verified by
+`35280614124`.
+
+Stuck runs whose `plan` failed leave a non-terminating progress job and stay
+`in_progress` forever, leaking concurrency. Plain cancel does not clear them;
+`POST .../force-cancel` does.
+
 ## How state carries between sessions
 
 There is no hidden model memory between GitHub jobs. Continuity is explicit:

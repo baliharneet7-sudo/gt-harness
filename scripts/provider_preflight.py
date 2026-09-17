@@ -59,6 +59,14 @@ _AUTHORIZED_ROUTES = {
         "allow_fallbacks": False,
         "require_parameters": True,
     },
+    # union-alpha's stealth preview ended on 2026-09-17 and OpenRouter now
+    # serves the same deployment under its revealed name. The provider tag is
+    # "unbiased", not "stealth": routing it to the retired tag 404s.
+    "unbiased/pareto": {
+        "only": ["unbiased"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
 }
 
 

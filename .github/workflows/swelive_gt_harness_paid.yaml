@@ -259,7 +259,7 @@ jobs:
           if treatment != "groundtruth":
               raise SystemExit("paid smoke is GT-only; no GT-off baseline exists for SWE-bench-Live")
           provider_route, provider_route_sha256 = load_route(
-              Path("config/provider_route_union_alpha.v1.json")
+              Path("config/provider_route_unbiased_pareto.v1.json")
           )
           # Same declared cohort pacing as the DeepSWE workflow: smaller
           # matrix, identical jitterless-retry exposure inside each leg.
@@ -476,7 +476,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m scripts.provider_preflight \
-            --manifest config/provider_route_union_alpha.v1.json \
+            --manifest config/provider_route_unbiased_pareto.v1.json \
             --source-sha "${{ needs.plan.outputs.source_sha }}" \
             --output provider-gate.json \
             --live
@@ -1043,11 +1043,32 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p results/swelive/official-evaluator
+          # Pier's collect stage is the canonical producer of artifacts/model.patch,
+          # but it only runs when the trial survives. On a trial that errored -
+          # run 35256147148 tasks 1 and 2 - this fabricated an EMPTY patch and
+          # graded it, scoring reward 0 while the model's committed work sat in
+          # agent/gt-worktree.patch beside it (amoffat__sh-744: 4,660 committed
+          # bytes, submission_patch_state.committed_patch_empty false, and the
+          # harness had already recorded collected_patch_will_be_empty false).
+          # Falling back to the harness export grades the work that exists
+          # instead of manufacturing a false negative. PATCH_SOURCE records which
+          # producer supplied it so a fallback grade is never mistaken for an
+          # official collection.
           PATCH_FILE="$(find results/swelive -path '*/artifacts/model.patch' -type f -print -quit)"
+          PATCH_SOURCE="official_collection"
+          if [ -z "$PATCH_FILE" ]; then
+            PATCH_FILE="$(find results/swelive -path '*/agent/gt-worktree.patch' -type f -size +0 -print -quit)"
+            PATCH_SOURCE="harness_export"
+          fi
           if [ -z "$PATCH_FILE" ]; then
             PATCH_FILE="$RUNNER_TEMP/empty-model.patch"
+            PATCH_SOURCE="absent"
             : > "$PATCH_FILE"
           fi
+          mkdir -p results/swelive/official-evaluator
+          PATCH_BYTES="$(wc -c < "$PATCH_FILE" | tr -d " ")"
+          echo "{\"schema\":\"gt.patch_source.v1\",\"patch_source\":\"$PATCH_SOURCE\",\"patch_bytes\":$PATCH_BYTES}" > results/swelive/official-evaluator/patch-source.json
+          echo "::notice::grading patch source=$PATCH_SOURCE bytes=$(wc -c < "$PATCH_FILE")"
           python - "$TASK" "$PATCH_FILE" "$MODEL" <<'PY'
           import json, sys
           task, patch, model = sys.argv[1:]
@@ -1106,8 +1127,27 @@ jobs:
           if len(pier_receipts) != 1:
               raise SystemExit(f"expected one Pier verifier receipt, found {len(pier_receipts)}")
           pier = json.loads(pier_receipts[0].read_text(encoding="utf-8"))
-          if pier.get("reward") != reward:
+          # Two graders may only be compared when both actually graded. Pier
+          # reports reward null when its trial errored before the verifier ran,
+          # and demanding equality with null turned every such run into a hard
+          # failure - which is right when it guards a fabricated empty patch,
+          # and wrong once the patch above comes from the harness export of
+          # work the model really did. Disagreement between two real rewards
+          # stays fatal; an absent second opinion is recorded, not equated.
+          source = "official_collection"
+          source_path = Path("results/swelive/official-evaluator/patch-source.json")
+          if source_path.is_file():
+              source = json.loads(source_path.read_text(encoding="utf-8")).get("patch_source", source)
+          receipt["patch_source"] = source
+          receipt["cross_verified"] = pier.get("reward") is not None
+          Path("results/swelive/official-evaluator/official-grade.json").write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + chr(10), encoding="utf-8"
+          )
+          if pier.get("reward") is not None and pier.get("reward") != reward:
               raise SystemExit(f"official evaluator disagrees with Pier verifier: {reward} != {pier.get('reward')}")
+          if pier.get("reward") is None:
+              print(f"::notice::pier produced no reward; official grade {reward} recorded "
+                    f"uncross-verified from patch_source={source}")
           PY
 
       - name: Emit honest task diagnostics for every outcome

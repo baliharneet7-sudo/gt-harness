@@ -495,6 +495,11 @@ _PROVIDER_ROUTING_BY_MODEL = {
         "allow_fallbacks": False,
         "require_parameters": True,
     },
+    "openai/unbiased/pareto": {
+        "only": ["unbiased"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
 }
 
 
