@@ -1141,11 +1141,23 @@ def _classify_terminal(exception: BaseException | None, result: dict) -> str:
         name = type(exception).__name__
         if name in _EXCEPTION_TERMINAL:
             return _EXCEPTION_TERMINAL[name]
-        # litellm connection/status errors surface with provider-ish names.
+        # litellm connection errors surface with provider-ish names, and they
+        # also arrive wrapped in generic exceptions that carry the provider
+        # class name in the message, so the message is matched on purpose.
+        #
+        # "status" is deliberately NOT a token.  subprocess controls its own
+        # message text, and CalledProcessError's stock wording ends "returned
+        # non-zero exit status 128".  On run 35262214538 (TB2 extract-elf) the
+        # task workspace had no git baseline, `git read-tree ''` failed, and
+        # that lone substring classified a harness fault as the provider
+        # refusing the model: exit 4, harbor raised NonZeroAgentExitCodeError,
+        # and a step-limited run that belonged in front of the official
+        # verifier was recorded as an infrastructure failure instead.  No
+        # litellm class is named for a bare status, so nothing needs it.
         lowered = f"{name} {str(exception)}".lower()
         if any(t in lowered for t in (
             "connection", "timeout", "api", "auth", "provider",
-            "rate limit", "status",
+            "rate limit", "ratelimit",
         )):
             return "provider_failed"
         if "tool action after stuck" in lowered or "lifecycleerror" in lowered:
@@ -1356,7 +1368,22 @@ def main() -> int:
             )
         except Exception as exc:  # noqa: BLE001 - missing patch invalidates grading
             report["patch_export_error"] = f"{type(exc).__name__}: {exc}"
-            if exception is None:
+            # A run that CLAIMS a submission must carry the patch that
+            # submission consists of: promoting the export failure is what
+            # keeps an empty patch from being graded as the model's answer.
+            #
+            # A run that claimed nothing must not be promoted.  On run
+            # 35262214538 mini-swe returned exit_status "LimitsExceeded" -
+            # budget_exhausted, which TERMINAL_EXIT_CODES maps to 0 precisely
+            # because the workspace remains gradable.  The task workspace had
+            # no git baseline, export raised CalledProcessError, and promoting
+            # it replaced the solver's own outcome with a harness fault: exit
+            # non-zero, harbor errored the trial, no official grade. The export
+            # failure stays recorded either way; it just no longer overwrites
+            # an outcome the solver already reached.
+            if exception is None and _classify_terminal(
+                None, result
+            ) not in _NON_SUBMITTED_TERMINALS:
                 exception = exc
     # Whether the benchmark will see anything at all. task.toml collects
     # `git diff BASE HEAD`, so a run whose agent never committed grades against

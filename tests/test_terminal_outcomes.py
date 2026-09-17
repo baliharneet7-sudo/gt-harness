@@ -317,3 +317,108 @@ def test_a_session_with_no_gate_decision_keeps_todays_terminal():
     assert _submission_terminal({"verified": True}) == "submitted_verified"
     assert _submission_terminal({"verified": False}) == "submitted_unverified"
     assert _submission_terminal(None) == "submitted_unverified"
+
+
+# --------------------------------------------------------------------------- #
+# Provider classification must not capture harness faults
+# --------------------------------------------------------------------------- #
+
+
+def test_git_failure_is_not_a_provider_failure():
+    """A subprocess fault must never be graded as a provider failure.
+
+    Run 35262214538 (TB2 extract-elf) exported no patch because the task
+    workspace had no git baseline.  `git read-tree ''` raised
+    CalledProcessError, whose stock message ends "returned non-zero exit
+    status 128".  `_classify_terminal` matched the bare substring "status"
+    against that message and returned provider_failed, which exits 4, which
+    makes harbor raise NonZeroAgentExitCodeError and error the trial.  A
+    harness fault was reported as the provider refusing the model, and the
+    task was never graded.
+
+    The provider heuristic exists for litellm classes that "surface with
+    provider-ish names", so it belongs on the class name, never on the
+    message text an arbitrary subprocess controls.
+    """
+    import subprocess
+
+    from scripts.miniswe_gt_run import TERMINAL_EXIT_CODES, _classify_terminal
+
+    git_failure = subprocess.CalledProcessError(128, ["git", "read-tree", ""])
+    assert "status" in str(git_failure).lower()  # the substring that misfired
+    terminal = _classify_terminal(git_failure, {})
+    assert terminal != "provider_failed"
+    assert terminal == "internal_error"
+    assert TERMINAL_EXIT_CODES[terminal] != 4
+
+    # Real provider classes must still classify as provider failures, both by
+    # exact name and by the provider-ish-name fallback.
+    class APIConnectionError(Exception):
+        pass
+
+    class ProviderOverloadedError(Exception):
+        pass
+
+    assert _classify_terminal(APIConnectionError("boom"), {}) == "provider_failed"
+    assert _classify_terminal(ProviderOverloadedError("boom"), {}) == "provider_failed"
+
+    # Message matching stays: litellm errors arrive wrapped in generic
+    # exceptions carrying the provider class name, which
+    # test_provider_errors_map_to_provider_failed pins.  Only the bare
+    # "status" token is gone, so a subprocess message cannot claim the
+    # provider failed.
+    assert _classify_terminal(ValueError("baseline_unavailable"), {}) == "internal_error"
+    assert _classify_terminal(
+        subprocess.CalledProcessError(1, ["git", "diff", "--cached"]), {}
+    ) == "internal_error"
+
+
+def test_failed_patch_export_does_not_overwrite_a_non_submitted_terminal(
+    monkeypatch, tmp_path
+):
+    """A run that never claimed a submission keeps the terminal it earned.
+
+    Run 35262214538 (TB2 extract-elf) burned all 100 turns and mini-swe
+    returned exit_status "LimitsExceeded" - budget_exhausted, which exits 0 and
+    leaves the workspace for the official verifier, exactly as
+    TERMINAL_EXIT_CODES documents.  The workspace then had no git baseline, so
+    patch export raised, and the export failure was promoted to the run's
+    terminating exception.  That promotion, not the agent, decided the
+    terminal: harbor saw a non-zero exit, errored the trial, and the run was
+    recorded as an infrastructure failure with no grade.
+
+    The export failure is still recorded.  It just cannot overwrite an outcome
+    the solver already reached.
+    """
+    import scripts.miniswe_gt_run as runner
+
+    # No git init: the patch exporter cannot resolve a baseline here, which is
+    # the production condition for a terminal-bench task workspace.
+    class FakeAgent:
+        model = SimpleNamespace()
+        env = SimpleNamespace(runtime_layout=SimpleNamespace(excluded_roots=()))
+        n_calls = 100
+        cost = 0
+
+        def run(self, _task):
+            return {"exit_status": "LimitsExceeded", "submission": ""}
+
+    monkeypatch.setattr(
+        runner, "build_agent", lambda **_kwargs: (FakeAgent(), None, None)
+    )
+    metrics = tmp_path / "metrics.json"
+    patch = tmp_path / "model.patch"
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "miniswe_gt_run.py", "--task", "do it", "--cwd", str(tmp_path),
+            "--state-dir", str(tmp_path / "state"), "--metrics", str(metrics),
+            "--patch-output", str(patch), "--gt-off",
+        ],
+    )
+
+    assert runner.main() == TERMINAL_EXIT_CODES["budget_exhausted"] == 0
+    report = json.loads(metrics.read_text(encoding="utf-8"))
+    assert report["terminal"] == "budget_exhausted"
+    # The failure is conserved, never silent.
+    assert "patch_export_error" in report
