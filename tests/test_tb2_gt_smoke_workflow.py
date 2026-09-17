@@ -41,7 +41,12 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert "tb2-img-${{ matrix.task }}-${{ env.IMAGE_TAG }}" in text
     assert "Pull the existing GHCR mirror only on cache miss" in text
     assert "uses: ./.github/workflows/deepswe_gt_harness_product.yml" in text
+    assert "pre_spend:" in text
     assert "needs: [plan, provider_free]" in text
+    assert "needs: [plan, pre_spend]" in text
+    assert "Run the real official verifier without a model" in text
+    assert "-a nop" in text
+    assert '"model_requests": 0' in text
 
 
 def test_gt_smoke_uses_official_harbor_grades_and_retains_evidence() -> None:

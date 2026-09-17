@@ -125,8 +125,114 @@ jobs:
           path: tb2-gt-smoke20-plan.json
           if-no-files-found: error
 
-  run:
+  pre_spend:
     needs: [plan, provider_free]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TASK: extract-elf
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TREATMENT_SHA }}
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the official Harbor runtime
+        run: python -m pip install --disable-pip-version-check "harbor==0.20.0"
+
+      - name: Restore the existing verifier-canary image cache
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/tb2-img.tar.gz
+          key: tb2-img-${{ env.TASK }}-${{ env.IMAGE_TAG }}
+
+      - name: Load the cached verifier-canary image
+        if: steps.restore.outputs.cache-hit == 'true'
+        run: docker load -i "${{ runner.temp }}/tb2-img.tar.gz"
+
+      - name: Pull the existing GHCR verifier-canary mirror only on cache miss
+        if: steps.restore.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mirror="ghcr.io/${{ github.repository_owner }}/tb2.${TASK}:${IMAGE_TAG}"
+          canonical="alexgshaw/${TASK}:${IMAGE_TAG}"
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+          docker pull "$mirror"
+          docker tag "$mirror" "$canonical"
+
+      - name: Run the real official verifier without a model
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results/pre-spend
+          harbor run \
+            -d "$DATASET" \
+            -a nop \
+            -o results/pre-spend \
+            --job-name "tb2-gt-pre-spend-${GITHUB_RUN_ID}" \
+            -n 1 -l 1 --delete -y \
+            -i "$TASK"
+
+      - name: Parse and certify official-verifier evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.benchmark_progress emit-harbor \
+            --root results/pre-spend \
+            --task-id "$TASK" \
+            --model "nop" \
+            --effective-model "harbor/nop" \
+            --treatment-sha "$TREATMENT_SHA" \
+            --gt-source-sha "$GT_SOURCE_SHA" \
+            --output pre-spend-progress.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          progress = json.loads(Path("pre-spend-progress.json").read_text(encoding="utf-8"))
+          task = progress["tasks"][0]
+          assert task["task_id"] == "extract-elf"
+          assert task["official_verifier"] is True
+          assert task["state"] in {"passed", "verifier_failed"}
+          assert task["reward"] in {0, 1}
+          receipt = {
+              "schema": "gt.benchmark_pre_spend.v1",
+              "status": "PASS",
+              "treatment_sha": os.environ["TREATMENT_SHA"],
+              "gt_source_sha": os.environ["GT_SOURCE_SHA"],
+              "dataset": os.environ["DATASET"],
+              "canary_task": task,
+              "checks": {
+                  "official_verifier_executed": "PASS",
+                  "parser_accepted_official_evidence": "PASS",
+                  "infrastructure_classification": "PASS",
+                  "model_requests": 0,
+              },
+          }
+          Path("pre-spend-certification.json").write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Persist the pre-spend verifier chain
+        uses: actions/upload-artifact@v4
+        with:
+          name: tb2-gt-pre-spend-${{ github.run_id }}
+          path: |
+            pre-spend-certification.json
+            pre-spend-progress.json
+            results/pre-spend/
+          if-no-files-found: error
+          retention-days: 90
+
+  run:
+    needs: [plan, pre_spend]
     runs-on: ubuntu-latest
     timeout-minutes: 600
     strategy:

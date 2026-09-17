@@ -81,13 +81,43 @@ jobs:
           python -m pytest -q \
             tests/test_index_incremental.py \
             tests/test_miniswe_integration.py \
-            tests/test_miniswe_agent_parity.py
+            tests/test_miniswe_agent_parity.py \
+            tests/test_agent_resource_evidence.py \
+            tests/test_attest_deepswe.py \
+            tests/test_product_acceptance.py \
+            tests/test_installed_rehearsal_interruption.py
+
+      - name: Seal pre-spend provider-free certification
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          source = json.loads(
+              Path("provider-free-source-objects.json").read_text(encoding="utf-8")
+          )
+          source.update({
+              "status": "PASS",
+              "checks": {
+                  "source_binding": "PASS",
+                  "workflow_dependencies": "PASS",
+                  "progress_parser_fixtures": "PASS",
+                  "resource_attestation": "PASS",
+                  "final_attestation": "PASS",
+                  "artifact_contract": "PASS",
+                  "miniswe_product_integration": "PASS",
+              },
+          })
+          Path("provider-free-certification.json").write_text(
+              json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
 
       - name: Upload provider-free receipt
-        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: gt-benchmark-provider-free-${{ github.run_id }}
-          path: provider-free-source-objects.json
+          path: provider-free-certification.json
           if-no-files-found: error
           retention-days: 90
