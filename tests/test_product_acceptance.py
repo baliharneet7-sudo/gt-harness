@@ -327,7 +327,14 @@ def test_provider_free_acceptance_executes_both_parity_arms(
     )
     receipt = run_provider_free_acceptance(MANIFEST, output_dir=tmp_path)
     assert receipt["schema"] == "gt.product_closeout.v1"
-    assert receipt["status"] == "VERIFIED_PROVIDER_FREE"
+    assert receipt["status"] == "VERIFIED_PROVIDER_FREE", {
+        "release_blockers": receipt["release_blockers"],
+        "container_proof": receipt["container_proof"],
+        "fake_provider_proof": receipt["fake_provider_proof"],
+        "content_correctness": receipt["content_correctness"],
+        "parity": receipt["parity"],
+        "secret_canary_matches": receipt["secret_canary_matches"],
+    }
     assert receipt["provider_calls"] == 0
     assert receipt["release_eligible"] is True
     assert receipt["container_proof"]["status"] == "VERIFIED"
