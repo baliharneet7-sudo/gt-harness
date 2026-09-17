@@ -35,6 +35,9 @@ def test_paid_workflow_is_exact_miniswe_union_alpha_and_officially_graded() -> N
     assert "git+https://github.com/microsoft/SWE-bench-Live.git@ad79b850f15e33992e96f03f6e97f05ddf9aa0be" in text
     assert 'direct["vcs_info"]["commit_id"] == "ad79b850f15e33992e96f03f6e97f05ddf9aa0be"' in text
     assert "python -m swebench.harness.run_evaluation" in text
+    assert "--predictions_path gold" in text
+    assert 'name "*.${EVAL_RUN_ID}.json"' in text
+    assert 'for key in ("resolved_ids", "unresolved_ids", "error_ids", "empty_patch_ids")' in text
     assert "official evaluator disagrees with Pier verifier" in text
     pre = text.index("Prove the official SWE-bench evaluator before any model request")
     paid = text.index("Run SWE-bench-Live through the released gt-harness run boundary")

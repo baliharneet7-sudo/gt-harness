@@ -862,39 +862,41 @@ jobs:
           docker pull "$IMAGE"
           docker tag "$IMAGE" "${{ matrix.container_image }}:latest"
           mkdir -p results/swelive/pre-spend-official
-          python - "$TASK" <<'PY'
-          import json, sys
-          with open("results/swelive/pre-spend-official/predictions.jsonl", "w", encoding="utf-8") as out:
-              out.write(json.dumps({
-                  "instance_id": sys.argv[1],
-                  "model_patch": "",
-                  "model_name_or_path": "pre-spend-nop",
-              }) + "\n")
-          PY
+          EVAL_RUN_ID="pre_${GITHUB_RUN_ID}_${TASK}"
           set +e
           python -m swebench.harness.run_evaluation \
             --dataset_name benchmarks/data/swebench_live_lite.jsonl \
-            --predictions_path results/swelive/pre-spend-official/predictions.jsonl \
+            --predictions_path gold \
             --instance_ids "$TASK" \
             --namespace starryzhang \
-            --run_id "pre_${GITHUB_RUN_ID}_${TASK}" \
+            --run_id "$EVAL_RUN_ID" \
             --max_workers 1 --timeout 1800 --cache_level env \
             2>&1 | tee results/swelive/pre-spend-official/evaluator.log
           evaluator_rc=${PIPESTATUS[0]}
           set -e
-          REPORT="$(find "logs/run_evaluation/pre_${GITHUB_RUN_ID}_${TASK}" -name report.json -type f -print -quit)"
-          test -n "$REPORT"
-          cp "$REPORT" results/swelive/pre-spend-official/report.json
+          SUMMARY="$(find . -maxdepth 1 -name "*.${EVAL_RUN_ID}.json" -type f -print -quit)"
+          test -n "$SUMMARY"
+          cp "$SUMMARY" results/swelive/pre-spend-official/report.json
           TASK="$TASK" RC="$evaluator_rc" python - <<'PY'
           import json, os
           from pathlib import Path
           report = json.loads(Path("results/swelive/pre-spend-official/report.json").read_text(encoding="utf-8"))
-          row = (next(iter(report.values())) if report else {}) or {}
+          task = os.environ["TASK"]
+          resolved = set(report.get("resolved_ids") or [])
+          errors = set(report.get("error_ids") or [])
+          submitted = set().union(*(
+              set(report.get(key) or [])
+              for key in ("resolved_ids", "unresolved_ids", "error_ids", "empty_patch_ids")
+          ))
+          if int(os.environ["RC"]) != 0 or task not in submitted or task in errors:
+              raise SystemExit("official gold canary did not produce a clean submitted result")
+          if task not in resolved:
+              raise SystemExit("official gold canary did not resolve the frozen task")
           receipt = {
               "schema": "gt.swebench_live.pre_spend.v1",
-              "instance_id": os.environ["TASK"],
+              "instance_id": task,
               "official_report_present": True,
-              "reward": int(bool(row.get("resolved"))),
+              "reward": 1,
               "evaluator_exit_code": int(os.environ["RC"]),
               "model_requests": 0,
               "status": "PASS",
@@ -1052,29 +1054,38 @@ jobs:
           IMAGE="${{ matrix.container_image }}@${{ matrix.container_digest }}"
           docker image inspect "$IMAGE" >/dev/null
           docker tag "$IMAGE" "${{ matrix.container_image }}:latest"
+          EVAL_RUN_ID="gt_${GITHUB_RUN_ID}_${TASK}"
           set +e
           python -m swebench.harness.run_evaluation \
             --dataset_name benchmarks/data/swebench_live_lite.jsonl \
             --predictions_path results/swelive/official-evaluator/predictions.jsonl \
             --instance_ids "$TASK" \
             --namespace starryzhang \
-            --run_id "gt_${GITHUB_RUN_ID}_${TASK}" \
+            --run_id "$EVAL_RUN_ID" \
             --max_workers 1 --timeout 1800 --cache_level env \
             2>&1 | tee results/swelive/official-evaluator/evaluator.log
           evaluator_rc=${PIPESTATUS[0]}
           set -e
-          REPORT="$(find "logs/run_evaluation/gt_${GITHUB_RUN_ID}_${TASK}" -name report.json -type f -print -quit)"
-          test -n "$REPORT"
-          cp "$REPORT" results/swelive/official-evaluator/report.json
+          SUMMARY="$(find . -maxdepth 1 -name "*.${EVAL_RUN_ID}.json" -type f -print -quit)"
+          test -n "$SUMMARY"
+          cp "$SUMMARY" results/swelive/official-evaluator/report.json
           TASK="$TASK" RC="$evaluator_rc" python - <<'PY'
           import json, os
           from pathlib import Path
           report = json.loads(Path("results/swelive/official-evaluator/report.json").read_text(encoding="utf-8"))
-          row = (next(iter(report.values())) if report else {}) or {}
-          reward = int(bool(row.get("resolved")))
+          task = os.environ["TASK"]
+          resolved = set(report.get("resolved_ids") or [])
+          errors = set(report.get("error_ids") or [])
+          submitted = set().union(*(
+              set(report.get(key) or [])
+              for key in ("resolved_ids", "unresolved_ids", "error_ids", "empty_patch_ids")
+          ))
+          if int(os.environ["RC"]) != 0 or task not in submitted or task in errors:
+              raise SystemExit("official evaluator did not produce a clean submitted result")
+          reward = int(task in resolved)
           receipt = {
               "schema": "gt.swebench_live.official_grade.v1",
-              "instance_id": os.environ["TASK"],
+              "instance_id": task,
               "reward": reward,
               "status": "passed" if reward else "failed",
               "official_report_present": True,
