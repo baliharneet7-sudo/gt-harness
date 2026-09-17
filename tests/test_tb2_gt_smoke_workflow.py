@@ -40,6 +40,8 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert "actions/cache/restore@v4" in text
     assert "tb2-img-${{ matrix.task }}-${{ env.IMAGE_TAG }}" in text
     assert "Pull the existing GHCR mirror only on cache miss" in text
+    assert "uses: ./.github/workflows/deepswe_gt_harness_product.yml" in text
+    assert "needs: [plan, provider_free]" in text
 
 
 def test_gt_smoke_uses_official_harbor_grades_and_retains_evidence() -> None:

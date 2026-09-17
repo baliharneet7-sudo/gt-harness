@@ -144,6 +144,9 @@ env:
   # routing block (DeepSeek/OpenRouter/TokenRouter). No top-level key needed.
 
 jobs:
+  provider_free:
+    uses: ./.github/workflows/deepswe_gt_harness_product.yml
+
   # ── Stage-0 / prepare: build the Pro task matrix ────────────────────────────
   # Reads benchmarks/data/swebench_live_lite.jsonl (the 731-task source of
   # truth), applies mode/language/instance_ids filters, and emits the GHA matrix.
@@ -626,7 +629,7 @@ jobs:
 
   # ── Trial: one job per Pro task (matrix) ─────────────────────────────────────
   trial:
-    needs: prepare
+    needs: [prepare, provider_free]
     runs-on: ubuntu-latest
     name: "${{ matrix.task }} (${{ matrix.language }})"
     # 240 minutes leaves setup, a 150-minute Union Alpha agent window, the

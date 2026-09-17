@@ -71,3 +71,5 @@ def test_live_gt_smoke_is_miniswe_official_and_bound_to_the_imported_source() ->
     assert "python3 -m swebench.harness.run_evaluation" in workflow
     assert "official-verifier progress receipt" in workflow.lower()
     assert "ref: ${{ inputs.gt_ref || 'gt-trial' }}" in workflow
+    assert "uses: ./.github/workflows/deepswe_gt_harness_product.yml" in workflow
+    assert "needs: [prepare, provider_free]" in workflow

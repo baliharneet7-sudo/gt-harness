@@ -21,6 +21,9 @@ env:
   PYTHONIOENCODING: utf-8
 
 jobs:
+  provider_free:
+    uses: ./.github/workflows/deepswe_gt_harness_product.yml
+
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -123,7 +126,7 @@ jobs:
           if-no-files-found: error
 
   run:
-    needs: plan
+    needs: [plan, provider_free]
     runs-on: ubuntu-latest
     timeout-minutes: 600
     strategy:
