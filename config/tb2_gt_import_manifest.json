@@ -3,6 +3,16 @@
     "baseline_harness_parent":  "f4aaf2bf88d007334195a6c71a34cd16b82bb8dc",
     "gt_source_commit":  "921bec20d3dbabd12e4b442936d9259c24cdcc74",
     "gt_source_parent":  "62b28f8872f053537c293f504e8d23d1b6eac7b3",
+    "source_object_ids":  {
+                              "gt_engine":  "22daf78b80d74a0524de36c96d2060d411bdf5a5",
+                              "gt_harness":  "c98d3cb1688914e55eb3452126b09acacfcf4d39",
+                              "eval":  "4a6a85d7f643c4a54b34dc3aee8f992059bbb80d",
+                              "vendor":  "f559a836f91af42e4b4a0ff8078a35f967293d8f",
+                              "nano":  "15f14a0899939b048ae91d4a3519247b0505e07b",
+                              "gt_finalstand":  "d7c2784310557b9aece3b163d72de5502d313104",
+                              "pyproject.toml":  "0d295e6a4371e084df705f29843600bb29aaef38",
+                              "conftest.py":  "6256a57f7a19dd014f2de329b59c1fe95bd606a1"
+                          },
     "imported_roots":  [
                            "config",
                            "eval",
