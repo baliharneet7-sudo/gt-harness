@@ -15,7 +15,10 @@ jobs:
       - name: Checkout exact integration source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 1
+          # Recorded-content attestation resolves the three historical renderer
+          # commits and their trees. A shallow checkout makes valid provenance
+          # indistinguishable from missing history.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Python 3.12
