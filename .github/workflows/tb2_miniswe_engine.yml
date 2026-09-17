@@ -243,6 +243,9 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
+      # Harbor launches the agent from a task workspace; keep the checked-out
+      # host package importable when it resolves AGENT below.
+      PYTHONPATH: ${{ github.workspace }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
       # Provider credentials remain on the Harbor host. The external agent
       # passes an empty env mapping to every model-selected task command.
