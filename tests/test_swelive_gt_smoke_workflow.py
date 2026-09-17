@@ -32,6 +32,8 @@ def test_paid_workflow_is_exact_miniswe_union_alpha_and_officially_graded() -> N
     assert "multiplier=5.0" in text
     assert 'gt_source_commit != "921bec20d3dbabd12e4b442936d9259c24cdcc74"' in text
     assert '"swebench==4.1.0"' in text
+    assert "git+https://github.com/microsoft/SWE-bench-Live.git@ad79b850f15e33992e96f03f6e97f05ddf9aa0be" in text
+    assert 'direct["vcs_info"]["commit_id"] == "ad79b850f15e33992e96f03f6e97f05ddf9aa0be"' in text
     assert "python -m swebench.harness.run_evaluation" in text
     assert "official evaluator disagrees with Pier verifier" in text
     pre = text.index("Prove the official SWE-bench evaluator before any model request")

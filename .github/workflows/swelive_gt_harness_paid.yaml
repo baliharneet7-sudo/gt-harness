@@ -157,6 +157,7 @@ jobs:
           gt_source_commit = import_manifest.get("gt_source_commit")
           if gt_source_commit != "921bec20d3dbabd12e4b442936d9259c24cdcc74":
               raise SystemExit("SWE-Live GT source is not the final 921bec20 revision")
+          official_evaluator_commit = "ad79b850f15e33992e96f03f6e97f05ddf9aa0be"
           manifest_path = Path("swelive-bench/manifest.json")
           manifest_bytes = manifest_path.read_bytes()
           manifest = json.loads(manifest_bytes)
@@ -293,6 +294,11 @@ jobs:
               "source_sha": os.environ["SOURCE_SHA"],
               "gt_source_commit": gt_source_commit,
               "gt_source_object_ids": import_manifest["source_object_ids"],
+              "official_evaluator": {
+                  "repository": "microsoft/SWE-bench-Live",
+                  "branch": "python-only",
+                  "commit": official_evaluator_commit,
+              },
               "benchmark_sha": manifest_sha256,
               "task_config_identity": TASK_CONFIG_IDENTITY,
               "task_ids": selected_tasks,
@@ -695,10 +701,23 @@ jobs:
           python -m pip install --disable-pip-version-check \
             --require-hashes -r config/product-requirements.lock
           python -m pip install --disable-pip-version-check --no-deps "$GT_HARNESS_WHEEL_HOST"
+          # PyPI supplies the frozen dependency closure. Replace its classic
+          # repository/spec implementation with Microsoft's official Live
+          # evaluator at an immutable python-only commit.
           python -m pip install --disable-pip-version-check "swebench==4.1.0"
+          python -m pip install --disable-pip-version-check --no-deps --force-reinstall \
+            "git+https://github.com/microsoft/SWE-bench-Live.git@ad79b850f15e33992e96f03f6e97f05ddf9aa0be"
           test "$(python -c 'import importlib.metadata as m; print(m.version("mini-swe-agent"))')" = "2.4.6"
           test "$(python -c 'import importlib.metadata as m; print(m.version("datacurve-pier"))')" = "0.3.1"
-          test "$(python -c 'import importlib.metadata as m; print(m.version("swebench"))')" = "4.1.0"
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import json
+          dist = metadata.distribution("swebench")
+          direct = json.loads(dist.read_text("direct_url.json"))
+          assert dist.version == "4.0.3", dist.version
+          assert direct["url"] == "https://github.com/microsoft/SWE-bench-Live.git"
+          assert direct["vcs_info"]["commit_id"] == "ad79b850f15e33992e96f03f6e97f05ddf9aa0be"
+          PY
 
       - name: Provision the pinned local retrieval model
         env:

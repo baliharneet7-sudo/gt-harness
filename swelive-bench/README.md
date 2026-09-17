@@ -27,7 +27,9 @@ SWE-bench evaluator canary. It pulls each task image once in its task job and
 reuses that image for Mini-SWE and final grading.
 
 Every completed task is graded twice: first through Pier's task verifier, then
-independently with `swebench==4.1.0`. The job fails if the two rewards disagree.
+independently with Microsoft's official SWE-bench-Live `python-only` evaluator
+pinned at `ad79b850f15e33992e96f03f6e97f05ddf9aa0be`. The job fails if the two
+rewards disagree.
 The saved artifacts include the plan, trajectory, patch, Pier verifier receipt,
 official evaluator report, per-task metrics, diagnostics, and final attestation.
 
