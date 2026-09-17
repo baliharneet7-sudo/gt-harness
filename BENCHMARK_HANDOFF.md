@@ -40,8 +40,9 @@ new series identifier.
 
 ### TB2
 
-- Attempts `35256152140`, `35257234010`, `35257606223`, `35257941589`, and `35258327432` failed in `plan` before task dispatch. The first referenced test files absent from the checked-out tree; the second selected a test tied to a different producer digest and historical commits; the third invoked an absent `scripts/central_feature_census.py` after all selected tests passed; the fourth used only `OPENAI_API_KEY`; the fifth populated the secret fallback but still omitted LiteLLM's required `OPENROUTER_API_KEY`, producing a 401. No TB2 task was graded and no TB2 image was pulled.
+- Attempts `35256152140`, `35257234010`, `35257606223`, `35257941589`, and `35258327432` failed in `plan` before task dispatch. The first referenced test files absent from the checked-out tree; the second selected a test tied to a different producer digest and historical commits; the third invoked an absent `scripts/central_feature_census.py` after all selected tests passed; the fourth used only `OPENAI_API_KEY`; the fifth populated the secret fallback but still omitted LiteLLM's required `OPENROUTER_API_KEY`, producing a 401. Attempt `35258719496` reached task jobs but failed six tasks during setup because the run job lacked the Snowflake model/tokenizer hash environment. No TB2 task was officially graded.
 - TB2 now sets both `OPENAI_API_KEY` and `OPENROUTER_API_KEY` from `secrets.OPENROUTER_NEW` in its plan and task environments, matching the proven SWE-Live route.
+- The TB2 infrastructure count exceeded five in this first series, so that series is closed. The Snowflake hashes are now bound in both plan and task jobs. The next dispatch starts a fresh TB2 series with infrastructure count 0.
 - The planner list is now limited to source-compatible central-agent, progress, provider-preflight, budget, and outcome tests in `.github/workflows/tb2_miniswe_engine.yml`. Push this fix to both benchmark accounts before retrying TB2.
 - Retry with the exact branch, model `openrouter/stealth/union-alpha`, `parallel=20`, `arm=certified_full`, and the documented smoke task list.
 

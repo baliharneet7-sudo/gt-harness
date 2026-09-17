@@ -251,6 +251,8 @@ jobs:
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
+      SNOWFLAKE_MODEL_SHA256: 564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971
+      SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
       # Provider credentials remain on the Harbor host. The external agent
       # passes an empty env mapping to every model-selected task command.
     steps:
