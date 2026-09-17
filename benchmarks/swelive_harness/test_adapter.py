@@ -78,9 +78,10 @@ def test_workflow_uses_one_pull_and_retains_image_by_id():
     ) in text
 
 
-def test_prewarm_bounds_dense_work_before_the_provider():
+def test_prewarm_requires_dense_work_before_the_provider():
     text = (ROOT / "benchmarks/swelive_harness/prewarm_graph.py").read_text(
         encoding="utf-8"
     )
-    assert "embedding_budget_seconds=1.0" in text
-    assert '"dense_refresh_deferred_to_runtime": True' in text
+    assert "embedding_budget_seconds=1800.0" in text
+    assert 'receipt.embedding_state != "refreshed"' in text
+    assert '"dense_ready_before_provider": True' in text

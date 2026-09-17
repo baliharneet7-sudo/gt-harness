@@ -49,16 +49,21 @@ def main() -> int:
         excluded_roots=layout.excluded_roots,
         contract_store_path=layout.contract_store_path,
         source_revision=source_revision,
-        # Pre-spend exists only to close the graph-publication/edit race.  A
-        # cold dense sidecar can take many minutes and is a cache, so give its
-        # planner a deliberately impossible budget here.  The normal runtime
-        # refreshes it asynchronously after the provider session starts.
-        embedding_budget_seconds=1.0,
+        # The 921bec20 runtime adopts its startup graph only after this dense
+        # sidecar is current.  Finishing both before the provider call closes
+        # the publication/edit race without changing the pinned product code.
+        # The bound stays below Pier's 2,100-second setup watchdog.
+        embedding_budget_seconds=1800.0,
     )
     if not receipt.success or not receipt.graph_db:
         raise RuntimeError(
             "task-local graph prewarm failed: "
             f"{receipt.error_type or receipt.status}: {receipt.error_diagnostic}"
+        )
+    if receipt.embedding_state != "refreshed":
+        raise RuntimeError(
+            "task-local dense prewarm failed: "
+            f"{receipt.embedding_state}: {receipt.embedding_failure_reason}"
         )
     payload = asdict(receipt) if is_dataclass(receipt) else dict(vars(receipt))
     payload.update(
@@ -69,7 +74,7 @@ def main() -> int:
             "state_root": str(state_root),
             "source_revision": source_revision,
             "ready_before_provider": True,
-            "dense_refresh_deferred_to_runtime": True,
+            "dense_ready_before_provider": True,
             "status": "ready",
         }
     )
