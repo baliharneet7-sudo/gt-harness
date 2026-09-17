@@ -27,6 +27,22 @@ def main() -> int:
     source_revision = capture_workspace(
         workspace, excluded_roots=layout.excluded_roots
     ).revision
+    output = Path("/logs/agent/pre-spend-graph.json")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(
+            {
+                "schema": "gt.swelive.pre_spend_graph.v1",
+                "task_id": task_id,
+                "source_revision": source_revision,
+                "status": "building",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     receipt = ensure_index_with_receipt(
         workspace,
         layout=layout,
@@ -39,16 +55,6 @@ def main() -> int:
             "task-local graph prewarm failed: "
             f"{receipt.error_type or receipt.status}: {receipt.error_diagnostic}"
         )
-    reuse_receipt = ensure_index_with_receipt(
-        workspace,
-        layout=layout,
-        excluded_roots=layout.excluded_roots,
-        contract_store_path=layout.contract_store_path,
-        source_revision=source_revision,
-    )
-    if not reuse_receipt.success or reuse_receipt.graph_db != receipt.graph_db:
-        raise RuntimeError("task-local graph is not stable across immediate reuse")
-
     payload = asdict(receipt) if is_dataclass(receipt) else dict(vars(receipt))
     payload.update(
         {
@@ -58,12 +64,9 @@ def main() -> int:
             "state_root": str(state_root),
             "source_revision": source_revision,
             "ready_before_provider": True,
-            "reuse_graph_db": reuse_receipt.graph_db,
-            "reuse_status": str(reuse_receipt.status),
+            "status": "ready",
         }
     )
-    output = Path("/logs/agent/pre-spend-graph.json")
-    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",

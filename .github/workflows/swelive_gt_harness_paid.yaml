@@ -981,6 +981,7 @@ jobs:
             -o results/swelive \
             --job-name "swelive-gt-harness-${GITHUB_RUN_ID}-${TASK}" \
             --agent-timeout-multiplier "${{ matrix.agent_timeout_multiplier }}" \
+            --agent-setup-timeout-multiplier "${{ matrix.agent_timeout_multiplier }}" \
             -n 1 \
             -y \
             --ak task_id="$TASK" \

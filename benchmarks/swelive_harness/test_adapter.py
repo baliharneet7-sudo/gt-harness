@@ -69,6 +69,10 @@ def test_workflow_uses_one_pull_and_retains_image_by_id():
     assert "pre-spend-official/image-id.txt" in text
     assert "python benchmarks/swelive_harness/run_pier.py run" in text
     assert (
+        '--agent-setup-timeout-multiplier '
+        '"${{ matrix.agent_timeout_multiplier }}"'
+    ) in text
+    assert (
         "--agent-import-path "
         "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent"
     ) in text
