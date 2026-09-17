@@ -859,7 +859,7 @@ jobs:
         run: |
           set -euo pipefail
           IMAGE="${{ matrix.container_image }}@${{ matrix.container_digest }}"
-          docker pull "$IMAGE"
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
           docker tag "$IMAGE" "${{ matrix.container_image }}:latest"
           mkdir -p results/swelive/pre-spend-official
           EVAL_RUN_ID="pre_${GITHUB_RUN_ID}_${TASK}"
@@ -905,6 +905,12 @@ jobs:
               json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
           )
           PY
+          # Bind both evaluator invocations to the image that the digest gate
+          # already pulled and verified. The official evaluator may manage its
+          # eval tag; it must never trigger a second task-image pull.
+          docker image inspect "$IMAGE_ID" >/dev/null
+          docker tag "$IMAGE_ID" "${{ matrix.container_image }}:latest"
+          printf '%s\n' "$IMAGE_ID" > results/swelive/pre-spend-official/image-id.txt
 
       - name: Stagger provider dispatch within the parallel cohort
         env:
@@ -966,7 +972,7 @@ jobs:
           ) &
           MONITOR_PID=$!
           set +e
-          pier run \
+          python benchmarks/swelive_harness/run_pier.py run \
             -p swelive-bench/tasks \
             --include-task-name "$TASK" \
             --agent-import-path eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent \
@@ -1052,8 +1058,9 @@ jobs:
               }) + "\n")
           PY
           IMAGE="${{ matrix.container_image }}@${{ matrix.container_digest }}"
-          docker image inspect "$IMAGE" >/dev/null
-          docker tag "$IMAGE" "${{ matrix.container_image }}:latest"
+          IMAGE_ID="$(cat results/swelive/pre-spend-official/image-id.txt)"
+          docker image inspect "$IMAGE_ID" >/dev/null
+          docker tag "$IMAGE_ID" "${{ matrix.container_image }}:latest"
           EVAL_RUN_ID="gt_${GITHUB_RUN_ID}_${TASK}"
           set +e
           python -m swebench.harness.run_evaluation \
