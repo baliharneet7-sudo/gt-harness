@@ -297,7 +297,7 @@ jobs:
           assert receipt["provider_ready"] is True
           assert receipt["model"] == "unbiased/pareto"
           assert receipt["provider_routing"] == {
-              "only": ["stealth"],
+              "only": ["unbiased"],
               "allow_fallbacks": False,
               "require_parameters": True,
           }

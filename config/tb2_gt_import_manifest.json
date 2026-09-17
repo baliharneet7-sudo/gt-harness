@@ -32,7 +32,7 @@
                               "benchmarks",
                               "src"
                           ],
-    "model":  "stealth/union-alpha",
+    "model":  "unbiased/pareto",
     "smoke_tasks":  20,
     "parallel":  20,
     "official_verifier":  "Harbor terminal-bench@2.0 task verifier"

@@ -291,7 +291,10 @@ def attest_deepswe(
     ):
         errors.append("planned_execution_contract_mismatch")
     route_name = (
-        "provider_route_union_alpha.v1.json"
+        # union-alpha's stealth preview was retired on 2026-09-17; the paid
+        # SWE-Live workflow now binds the unbiased/pareto manifest, and the
+        # attestation must load the same one it verifies against.
+        "provider_route_unbiased_pareto.v1.json"
         if suite.suite_id == "swelive"
         else "provider_route.v1.json"
     )

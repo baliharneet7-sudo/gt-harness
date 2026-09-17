@@ -30,8 +30,8 @@ SWELIVE_TASKS = (
     "aws-cloudformation__cfn-lint-3749",
     "aws-cloudformation__cfn-lint-3764",
 )
-REQUESTED = "stealth/union-alpha"
-EFFECTIVE = "openai/stealth/union-alpha"
+REQUESTED = "unbiased/pareto"
+EFFECTIVE = "openai/unbiased/pareto"
 
 
 def _write(path: Path, value: object) -> None:
@@ -104,7 +104,7 @@ def _swelive_fixture(root: Path, source_sha: str = "f" * 40) -> Path:
     suite = load_suite("swelive")
     trusted = suite.trusted_tasks[SWELIVE_TASK]
     route, route_digest = load_route(
-        Path(__file__).resolve().parents[1] / "config" / "provider_route_union_alpha.v1.json"
+        Path(__file__).resolve().parents[1] / "config" / "provider_route_unbiased_pareto.v1.json"
     )
     plan = {
         "schema": suite.plan_schema,
