@@ -1926,7 +1926,14 @@ def _ensure_index_incremental_unlocked(
         # no producer ran, so nothing died — and the caller's defer window
         # waits the pressure out instead of paying minutes of doomed work.
         floor = _batch_amend_memory_floor(parent_graph, parent_manifest)
-        limit = _effective_index_memory_limit(_cgroup_snapshot())
+        # Keep the snapshot: limit alone cannot distinguish a genuinely full
+        # cgroup from a misread one, and the refusal reason is the only place
+        # the operator sees it. Run 35262214538 journaled nine refusals whose
+        # cause carried limit=0..12804096 against need=178438144 with no way
+        # to tell which. max/current decide it in one run.
+        _mem = _cgroup_snapshot()
+        limit = _effective_index_memory_limit(_mem)
+        _mem_note = f":cgroup_max={_mem.get('max')}current={_mem.get('current')}"
         if limit < floor:
             # The floor prices a whole-parent pipeline run, so on a large
             # parent inside a small cgroup it can sit permanently above the
@@ -1947,7 +1954,7 @@ def _ensure_index_incremental_unlocked(
                     return (
                         None,
                         "GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT"
-                        f":batch_amend_floor:limit={limit}need={floor}"
+                        f":batch_amend_floor:limit={limit}need={floor}{_mem_note}"
                         f":incremental_amend_uncoverable:{fallback_refusal}",
                         results,
                     )
@@ -1955,7 +1962,7 @@ def _ensure_index_incremental_unlocked(
                 return (
                     None,
                     f"GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT:batch_amend_floor:"
-                    f"limit={limit}need={floor}",
+                    f"limit={limit}need={floor}{_mem_note}",
                     results,
                 )
 
