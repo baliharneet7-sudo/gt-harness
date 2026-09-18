@@ -1391,9 +1391,21 @@ def main() -> int:
             # non-zero, harbor errored the trial, no official grade. The export
             # failure stays recorded either way; it just no longer overwrites
             # an outcome the solver already reached.
-            if exception is None and _classify_terminal(
-                None, result
-            ) not in _NON_SUBMITTED_TERMINALS:
+            # ...and only where a patch was producible at all. A
+            # terminal-bench workspace is not a git repository, so
+            # patch_baseline is empty and export raises FileNotFoundError:
+            # 'git'. Cohort 35298094010 lost four SUBMITTED runs that way -
+            # headless-terminal submitted after 73 turns - because the
+            # submission branch promoted an export failure that no run could
+            # ever have avoided. Where a baseline exists the promotion stands
+            # on both benchmarks: a run that could have produced a patch and
+            # did not is still suspect.
+            if (
+                exception is None
+                and patch_baseline
+                and _classify_terminal(None, result)
+                not in _NON_SUBMITTED_TERMINALS
+            ):
                 exception = exc
     # Whether the benchmark will see anything at all. task.toml collects
     # `git diff BASE HEAD`, so a run whose agent never committed grades against

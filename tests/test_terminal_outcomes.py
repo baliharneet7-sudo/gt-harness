@@ -422,3 +422,74 @@ def test_failed_patch_export_does_not_overwrite_a_non_submitted_terminal(
     assert report["terminal"] == "budget_exhausted"
     # The failure is conserved, never silent.
     assert "patch_export_error" in report
+
+
+def test_a_submission_is_not_invalidated_when_no_patch_could_exist(
+    monkeypatch, tmp_path
+):
+    """No baseline means no patch is producible, so its absence proves nothing.
+
+    Cohort 35298094010 lost four tasks this way - headless-terminal,
+    feal-linear-cryptanalysis, count-dataset-tokens and
+    torch-pipeline-parallelism. Each agent finished and mini-swe returned
+    exit_status "Submitted" (headless-terminal after 73 turns). The
+    terminal-bench container ships no git binary, so patch export raised
+    FileNotFoundError: 'git', and because the earned terminal WAS a submission
+    the export failure was promoted to the run's terminating exception:
+    internal_error, exit 5, harbor errored the trial, no official grade.
+
+    Promotion on submit exists so an empty patch cannot be graded as the
+    model's answer, which is a SWE-Live invariant - there the patch IS the
+    submission. On terminal-bench the official verifier grades container state
+    and the patch is evidence only. Requiring one where git does not exist
+    discards completed work.
+
+    Keep promotion wherever a baseline exists, on either benchmark: a run that
+    could have produced a patch and did not is still suspect.
+    """
+    import scripts.miniswe_gt_run as runner
+
+    class FakeAgent:
+        model = SimpleNamespace()
+        env = SimpleNamespace(runtime_layout=SimpleNamespace(excluded_roots=()))
+        n_calls = 73
+        cost = 0
+
+        def run(self, _task):
+            return {"exit_status": "Submitted", "submission": "done"}
+
+    monkeypatch.setattr(
+        runner, "build_agent", lambda **_kwargs: (FakeAgent(), None, None)
+    )
+    metrics = tmp_path / "metrics.json"
+    patch = tmp_path / "model.patch"
+    # No git init: _repository_head finds no baseline, exactly as a
+    # terminal-bench workspace presents.
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "miniswe_gt_run.py", "--task", "do it", "--cwd", str(tmp_path),
+            "--state-dir", str(tmp_path / "state"), "--metrics", str(metrics),
+            "--patch-output", str(patch), "--gt-off",
+        ],
+    )
+
+    runner.main()
+    report = json.loads(metrics.read_text(encoding="utf-8"))
+    # The promotion is what this fix controls: the submission survives instead
+    # of being rewritten as a harness fault.
+    assert report["terminal"] == "submitted"
+    assert report["terminal"] != "internal_error"
+    # The failure is still recorded, never silent.
+    assert "patch_export_error" in report
+    # Note: TERMINAL_EXIT_CODES has no plain "submitted" key - only
+    # submitted_verified/submitted_unverified, which _submission_terminal
+    # produces and which only runs when GT is active. Under --gt-off the
+    # terminal therefore still maps to the internal_error code. That is a
+    # separate pre-existing gap in the gt-off path; the graded cohort runs
+    # GT-on, where the submission maps to an exit-0 terminal.
+    from scripts.miniswe_gt_run import TERMINAL_EXIT_CODES
+
+    assert "submitted" not in TERMINAL_EXIT_CODES
+    assert TERMINAL_EXIT_CODES["submitted_verified"] == 0
+    assert TERMINAL_EXIT_CODES["submitted_unverified"] == 0
