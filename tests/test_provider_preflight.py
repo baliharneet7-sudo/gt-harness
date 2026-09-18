@@ -11,12 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "config" / "provider_route.v1.json"
 
 
-def test_paid_route_is_deepseek_relace_only() -> None:
+def test_paid_route_is_deepseek_deepinfra_fp8_only() -> None:
     """The active route: the HAR-83 benchmark model, single provider."""
     route, _ = provider_preflight.load_route(MANIFEST)
     assert route["model"] == "deepseek/deepseek-v4-flash-0731"
     assert route["provider_routing"] == {
-        "only": ["relace"],
+        "only": ["deepinfra"],
         "allow_fallbacks": False,
         "require_parameters": True,
     }
@@ -103,7 +103,7 @@ def test_live_preflight_checks_key_limit_and_exact_model(
             and body["model"] == "deepseek/deepseek-v4-flash-0731"
             and body["max_tokens"] == 16
             and body["provider"] == {
-                "only": ["relace"],
+                "only": ["deepinfra"],
                 "allow_fallbacks": False,
                 "require_parameters": True,
             }

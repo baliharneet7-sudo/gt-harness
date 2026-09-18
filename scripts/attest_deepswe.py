@@ -294,7 +294,7 @@ def attest_deepswe(
         # union-alpha's stealth preview was retired on 2026-09-17; the paid
         # SWE-Live workflow now binds the muse-spark-1.2 manifest, and the
         # attestation must load the same one it verifies against.
-        "provider_route_deepseek_v4_flash_0731.v1.json"
+        "provider_route_deepseek_v4_flash_0731_fp8.v1.json"
         if suite.suite_id == "swelive"
         else "provider_route.v1.json"
     )

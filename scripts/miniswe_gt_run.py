@@ -486,7 +486,7 @@ def _templates() -> tuple[str, str]:
 # smuggle routing constraints through GT_PROVIDER_ROUTING_JSON.
 _PROVIDER_ROUTING_BY_MODEL = {
     "openai/deepseek/deepseek-v4-flash-0731": {
-        "only": ["relace"],
+        "only": ["deepinfra"],
         "allow_fallbacks": False,
         "require_parameters": True,
     },

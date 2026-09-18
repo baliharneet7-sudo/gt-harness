@@ -31,7 +31,7 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
     assert "max-parallel: 20" in text
-    assert "options: [gate-one, remaining-19, all-20]" in text
+    assert "options: [gate-one, remaining-19, all-20, subset]" in text
     assert '"gate-one": tasks[:1]' in text
     assert '"remaining-19": tasks[1:]' in text
     assert 'TIMEOUT_MULTIPLIER: "5.0"' in text
@@ -55,7 +55,7 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert '"exact_pier_environment_executed": "PASS"' in text
     assert "-a nop" in text
     assert '"task_model_requests": 0' in text
-    assert "config/provider_route_deepseek_v4_flash_0731.v1.json" in text
+    assert "config/provider_route_deepseek_v4_flash_0731_fp8.v1.json" in text
     assert "scripts.provider_preflight" in text
     assert '"provider_route_live_canary": "PASS"' in text
     assert "GT_PROVIDER_CONTEXT_WINDOW_TOKENS: ${{ needs.pre_spend.outputs.context_window_tokens }}" in text

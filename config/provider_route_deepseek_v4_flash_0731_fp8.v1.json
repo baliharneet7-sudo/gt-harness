@@ -1,6 +1,6 @@
 {
   "schema": "gt.provider_route.v1",
-  "route_id": "openrouter-deepseek-v4-flash-0731-relace-only",
+  "route_id": "openrouter-deepseek-v4-flash-0731-deepinfra-fp8-only",
   "provider": "openrouter",
   "base_url": "https://openrouter.ai/api/v1",
   "model": "deepseek/deepseek-v4-flash-0731",
@@ -13,7 +13,7 @@
   },
   "requested_output_tokens": 16384,
   "credential_env": "OPENROUTER_API_KEY",
-  "credential_source_id": "final_openrouter_musecontributor",
+  "credential_source_id": "github-actions-secret-openrouter-new",
   "availability": {
     "key_path": "/key",
     "models_path": "/models",

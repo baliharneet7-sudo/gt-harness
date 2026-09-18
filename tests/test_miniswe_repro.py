@@ -42,14 +42,14 @@ def test_muse_route_preserves_the_baseline_xhigh_reasoning_contract(monkeypatch)
     assert kwargs["reasoning"] == {"effort": "xhigh"}
 
 
-def test_deepseek_route_forwards_relace_only_without_fallback(monkeypatch) -> None:
+def test_deepseek_route_forwards_deepinfra_only_without_fallback(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
     monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "16384")
     monkeypatch.setenv(
         "GT_PROVIDER_ROUTING_JSON",
         json.dumps(
             {
-                "only": ["relace"],
+                "only": ["deepinfra"],
                 "allow_fallbacks": False,
                 "require_parameters": True,
             }
@@ -63,7 +63,7 @@ def test_deepseek_route_forwards_relace_only_without_fallback(monkeypatch) -> No
     assert "max_completion_tokens" not in kwargs
     assert kwargs["extra_body"] == {
         "provider": {
-            "only": ["relace"],
+            "only": ["deepinfra"],
             "allow_fallbacks": False,
             "require_parameters": True,
         }
@@ -1279,7 +1279,7 @@ def test_union_alpha_route_refuses_foreign_routing(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
     monkeypatch.setenv(
         "GT_PROVIDER_ROUTING_JSON",
-        json.dumps({"only": ["relace"], "allow_fallbacks": False}),
+        json.dumps({"only": ["deepinfra"], "allow_fallbacks": False}),
     )
     with pytest.raises(ValueError, match="provider_routing_env_not_allowed"):
         _model_and_kwargs("stealth/union-alpha", 1.0)

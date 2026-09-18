@@ -8,8 +8,13 @@ on:
         description: "Run gate-one first; release remaining-19 only after an official grade"
         required: true
         type: choice
-        options: [gate-one, remaining-19, all-20]
+        options: [gate-one, remaining-19, all-20, subset]
         default: gate-one
+      subset_tasks:
+        description: "subset only: comma-separated task ids, each drawn from the frozen repair20 set"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -56,6 +61,7 @@ jobs:
         shell: bash
         env:
           COHORT_STAGE: ${{ inputs.cohort_stage }}
+          SUBSET_TASKS: ${{ inputs.subset_tasks }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$TREATMENT_SHA"
@@ -86,6 +92,15 @@ jobs:
               "remaining-19": tasks[1:],
               "all-20": tasks,
           }.get(stage)
+          if stage == "subset":
+              # A controlled experiment draws from the frozen repair20 set only,
+              # so the task_set_sha256 identity check above still binds every
+              # task that runs. Order follows the frozen list, not the input.
+              wanted = [t.strip() for t in os.environ.get("SUBSET_TASKS", "").split(",") if t.strip()]
+              unknown = sorted(set(wanted) - set(tasks))
+              if not wanted or unknown or len(set(wanted)) != len(wanted):
+                  raise SystemExit(f"invalid subset (empty, duplicate, or outside repair20): {unknown or wanted}")
+              selected = [t for t in tasks if t in set(wanted)]
           if selected is None:
               raise SystemExit(f"unsupported cohort stage: {stage}")
           dataset = Path(os.environ["RUNNER_TEMP"]) / "tb2-plan" / "terminal-bench"
@@ -284,7 +299,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m scripts.provider_preflight \
-            --manifest config/provider_route_deepseek_v4_flash_0731.v1.json \
+            --manifest config/provider_route_deepseek_v4_flash_0731_fp8.v1.json \
             --output provider-preflight.json \
             --source-sha "$TREATMENT_SHA" \
             --live
@@ -297,7 +312,7 @@ jobs:
           assert receipt["provider_ready"] is True
           assert receipt["model"] == "deepseek/deepseek-v4-flash-0731"
           assert receipt["provider_routing"] == {
-              "only": ["relace"],
+              "only": ["deepinfra"],
               "allow_fallbacks": False,
               "require_parameters": True,
           }

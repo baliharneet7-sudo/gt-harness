@@ -50,7 +50,7 @@ _PACING_KEYS = {
 #   matched cohort.
 _AUTHORIZED_ROUTES = {
     "deepseek/deepseek-v4-flash-0731": {
-        "only": ["relace"],
+        "only": ["deepinfra"],
         "allow_fallbacks": False,
         "require_parameters": True,
     },
