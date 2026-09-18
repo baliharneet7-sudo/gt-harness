@@ -32,7 +32,7 @@
                               "benchmarks",
                               "src"
                           ],
-    "model":  "meta/muse-spark-1.2-contributor",
+    "model":  "deepseek/deepseek-v4-flash-0731",
     "smoke_tasks":  20,
     "parallel":  20,
     "official_verifier":  "Harbor terminal-bench@2.0 task verifier"

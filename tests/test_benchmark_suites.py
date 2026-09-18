@@ -30,8 +30,8 @@ SWELIVE_TASKS = (
     "aws-cloudformation__cfn-lint-3749",
     "aws-cloudformation__cfn-lint-3764",
 )
-REQUESTED = "meta/muse-spark-1.2-contributor"
-EFFECTIVE = "openai/meta/muse-spark-1.2-contributor"
+REQUESTED = "deepseek/deepseek-v4-flash-0731"
+EFFECTIVE = "openai/deepseek/deepseek-v4-flash-0731"
 
 
 def _write(path: Path, value: object) -> None:
@@ -104,7 +104,7 @@ def _swelive_fixture(root: Path, source_sha: str = "f" * 40) -> Path:
     suite = load_suite("swelive")
     trusted = suite.trusted_tasks[SWELIVE_TASK]
     route, route_digest = load_route(
-        Path(__file__).resolve().parents[1] / "config" / "provider_route_muse_spark_12.v1.json"
+        Path(__file__).resolve().parents[1] / "config" / "provider_route_deepseek_v4_flash_0731.v1.json"
     )
     plan = {
         "schema": suite.plan_schema,
