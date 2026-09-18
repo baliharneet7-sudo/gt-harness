@@ -26,7 +26,7 @@ def test_paid_workflow_is_exact_miniswe_union_alpha_and_officially_graded() -> N
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent" in text
     assert "eval.pier_filtered_docker:PierFilteredDockerEnvironment" in text
-    assert "config/provider_route_unbiased_pareto.v1.json" in text
+    assert "config/provider_route_muse_spark_12.v1.json" in text
     assert "secrets.OPENROUTER_NEW" in text
     assert "max-parallel: 20" in text
     assert "multiplier=5.0" in text

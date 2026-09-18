@@ -1,5 +1,5 @@
 name: "TB2 GT smoke20: Union Alpha on 921bec20"
-run-name: "TB2-GT ${{ inputs.cohort_stage }} | unbiased/pareto | 921bec20 | p20"
+run-name: "TB2-GT ${{ inputs.cohort_stage }} | meta/muse-spark-1.2-contributor | 921bec20 | p20"
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ permissions:
 env:
   TREATMENT_SHA: ${{ github.sha }}
   GT_SOURCE_SHA: 921bec20d3dbabd12e4b442936d9259c24cdcc74
-  MODEL: unbiased/pareto
+  MODEL: meta/muse-spark-1.2-contributor
   DATASET: terminal-bench@2.0
   IMAGE_TAG: "20251031"
   TIMEOUT_MULTIPLIER: "5.0"
@@ -110,7 +110,7 @@ jobs:
               "treatment_sha": os.environ["TREATMENT_SHA"],
               "gt_source_sha": os.environ["GT_SOURCE_SHA"],
               "model": os.environ["MODEL"],
-              "effective_model": "openai/unbiased/pareto",
+              "effective_model": "openai/meta/muse-spark-1.2-contributor",
               "dataset": os.environ["DATASET"],
               "cohort_stage": stage,
               "task_count": len(selected),
@@ -284,7 +284,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m scripts.provider_preflight \
-            --manifest config/provider_route_unbiased_pareto.v1.json \
+            --manifest config/provider_route_muse_spark_12.v1.json \
             --output provider-preflight.json \
             --source-sha "$TREATMENT_SHA" \
             --live
@@ -295,9 +295,9 @@ jobs:
           receipt = json.loads(Path("provider-preflight.json").read_text(encoding="utf-8"))
           assert receipt["status"] == "PASS"
           assert receipt["provider_ready"] is True
-          assert receipt["model"] == "unbiased/pareto"
+          assert receipt["model"] == "meta/muse-spark-1.2-contributor"
           assert receipt["provider_routing"] == {
-              "only": ["unbiased"],
+              "only": ["meta"],
               "allow_fallbacks": False,
               "require_parameters": True,
           }
@@ -611,7 +611,7 @@ jobs:
             --root results/terminal-bench \
             --task-id "$TASK" \
             --model "$MODEL" \
-            --effective-model "openai/unbiased/pareto" \
+            --effective-model "openai/meta/muse-spark-1.2-contributor" \
             --treatment-sha "$TREATMENT_SHA" \
             --gt-source-sha "$GT_SOURCE_SHA" \
             --output benchmark-progress.json
@@ -664,8 +664,8 @@ jobs:
           path = Path("tb2-gt-smoke20-summary.json")
           out = json.loads(path.read_text(encoding="utf-8"))
           out.update({
-              "model": "unbiased/pareto",
-              "effective_model": "openai/unbiased/pareto",
+              "model": "meta/muse-spark-1.2-contributor",
+              "effective_model": "openai/meta/muse-spark-1.2-contributor",
               "treatment_sha": os.environ["TREATMENT_SHA"],
               "gt_source_sha": os.environ["GT_SOURCE_SHA"],
           })

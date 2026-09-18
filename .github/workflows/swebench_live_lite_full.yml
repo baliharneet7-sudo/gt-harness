@@ -1,5 +1,5 @@
 name: "SWE-Live Lite: certified GT dispatcher"
-run-name: "SWE-Live GT smoke5 | unbiased/pareto | 921bec20 | ${{ inputs.cohort_stage }}"
+run-name: "SWE-Live GT smoke5 | meta/muse-spark-1.2-contributor | 921bec20 | ${{ inputs.cohort_stage }}"
 
 # This registered workflow path intentionally remains stable. The certified
 # implementation lives in swelive_gt_harness_paid.yaml and is called from the

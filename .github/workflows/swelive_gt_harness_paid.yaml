@@ -259,7 +259,7 @@ jobs:
           if treatment != "groundtruth":
               raise SystemExit("paid smoke is GT-only; no GT-off baseline exists for SWE-bench-Live")
           provider_route, provider_route_sha256 = load_route(
-              Path("config/provider_route_unbiased_pareto.v1.json")
+              Path("config/provider_route_muse_spark_12.v1.json")
           )
           # Same declared cohort pacing as the DeepSWE workflow: smaller
           # matrix, identical jitterless-retry exposure inside each leg.
@@ -476,7 +476,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m scripts.provider_preflight \
-            --manifest config/provider_route_unbiased_pareto.v1.json \
+            --manifest config/provider_route_muse_spark_12.v1.json \
             --source-sha "${{ needs.plan.outputs.source_sha }}" \
             --output provider-gate.json \
             --live

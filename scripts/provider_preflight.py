@@ -67,6 +67,12 @@ _AUTHORIZED_ROUTES = {
         "allow_fallbacks": False,
         "require_parameters": True,
     },
+    # Contributor tier, served by Meta's own endpoint (provider tag "meta").
+    "meta/muse-spark-1.2-contributor": {
+        "only": ["meta"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
 }
 
 

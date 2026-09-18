@@ -500,6 +500,11 @@ _PROVIDER_ROUTING_BY_MODEL = {
         "allow_fallbacks": False,
         "require_parameters": True,
     },
+    "openai/meta/muse-spark-1.2-contributor": {
+        "only": ["meta"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
 }
 
 
