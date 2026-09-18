@@ -6,12 +6,38 @@ free of API keys, account emails, project IDs, and other credentials.
 
 ## Fixed experiment contract
 
-- Model: `unbiased/pareto` through OpenRouter (`https://openrouter.ai/api/v1`),
-  provider-pinned to the `unbiased` tag. **`stealth/union-alpha` is retired** -
-  OpenRouter ended the Stealth Union Alpha preview on 2026-09-17 and now serves
-  the deployment under its revealed name. Run `35283782651` died at agent turn 2
-  with `litellm.NotFoundError` carrying the provider's own notice. Any dispatch
-  against the old id 404s. Do not route the new id to the `stealth` tag.
+- Model: `meta/muse-spark-1.2-contributor` through OpenRouter
+  (`https://openrouter.ai/api/v1`), provider-pinned to the `meta` tag,
+  $0.10/M input and $0.20/M output on a 1,048,576-token context.
+  **1.2 specifically, not 1.3**: `miniswe_gt_run._model_and_kwargs` applies
+  `reasoning={"effort":"xhigh"}` on an exact match of this string, and its
+  comment states that leaving the field implicit "makes GT-on vs baseline
+  outcome comparisons invalid even when the visible model identifier is
+  identical". `eval/muse_spark_1_2_smoke20_baseline.json` is the retained
+  DeepSWE v1.1 baseline for that exact configuration
+  (`mini_swe_agent_muse_spark_1_2_xhigh`, HAR-82).
+- Model history this campaign. `stealth/union-alpha` is **retired** -
+  OpenRouter ended the Stealth Union Alpha preview on 2026-09-17 and lists no
+  `stealth/*` models at all; run `35283782651` died at agent turn 2 with
+  `litellm.NotFoundError` carrying the provider's own notice. It became
+  `unbiased/pareto`, which was pinned and proven working
+  (run `35288104554`, `officially_graded: 1`) before being replaced on cost:
+  $2.50/M and $7.50/M put a 20-task TB2 cohort near $230 against roughly $9
+  on the contributor tier. Both remain as additive allowlist history; neither
+  is on the dispatch path.
+- Repinning a model touches SEVEN consumers, not one. In order:
+  `scripts/provider_preflight.py` `_AUTHORIZED_ROUTES`,
+  `scripts/miniswe_gt_run.py` `_PROVIDER_ROUTING_BY_MODEL` (plus any
+  model-specific kwargs), `config/provider_route_*.v1.json`,
+  `tb2_miniswe_central.yml` (MODEL, run-name, three effective_model strings,
+  the model assertion AND the provider_routing assertion),
+  `swebench_live_lite_full.yml`, `swelive_gt_harness_paid.yaml`,
+  `scripts/attest_deepswe.py`'s suite-to-route map, and the frozen envelope
+  tests `test_tb2_gt_smoke_workflow.py` / `test_swelive_gt_smoke_workflow.py`
+  / `test_benchmark_suites.py` (`REQUESTED`/`EFFECTIVE`). Missing any one of
+  them fails a gate before spend - three dispatches bounced that way on
+  2026-09-17. Run the twelve suites listed in
+  `deepswe_gt_harness_product.yml` locally first.
 - Comparability warning: `unbiased/pareto` has NO GT-off baseline. The three
   TB2 GT-off baselines are (A) `D:\gt_runsull89_2026-07-29` nano-harness
   45/88, self-labelled an orientation baseline and not a paired reference;
@@ -34,7 +60,7 @@ free of API keys, account emails, project IDs, and other credentials.
 
 For each benchmark, report exactly:
 
-`Model: unbiased/pareto | Tasks completed: N | Tasks left: N | Tasks success: N | Tasks failed (incorrect): N | Tasks failed (infrastructure): N`
+`Model: meta/muse-spark-1.2-contributor | Tasks completed: N | Tasks left: N | Tasks success: N | Tasks failed (incorrect): N | Tasks failed (infrastructure): N`
 
 Only an official verifier result counts as completed. An incorrect patch is a
 graded failure. Missing setup, image, provider, parser, verifier, or artifact
@@ -58,7 +84,7 @@ new series identifier.
 - TB2 now sets both `OPENAI_API_KEY` and `OPENROUTER_API_KEY` from `secrets.OPENROUTER_NEW` in its plan and task environments, matching the proven SWE-Live route.
 - The TB2 infrastructure count exceeded five in this first series, so that series is closed. The Snowflake hashes are now bound in both plan and task jobs. The next dispatch starts a fresh TB2 series with infrastructure count 0.
 - The planner list is now limited to source-compatible central-agent, progress, provider-preflight, budget, and outcome tests in `.github/workflows/tb2_miniswe_engine.yml`. Push this fix to both benchmark accounts before retrying TB2.
-- Retry with the exact branch, model `unbiased/pareto`, `parallel=20`, `arm=certified_full`, and the documented smoke task list.
+- Retry with the exact branch, model `meta/muse-spark-1.2-contributor`, `parallel=20`, `arm=certified_full`, and the documented smoke task list.
 
 ### TB2 root cause, corrected 2026-09-17
 
