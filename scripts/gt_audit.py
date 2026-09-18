@@ -1958,12 +1958,7 @@ def _audit_native_miniswe_task(
             f"harness exception_info present: {a.exception_info}"
         )
     a.verdict_reasons.extend(a.attribution_issues)
-    attribution_red = sorted(
-        feature_id for feature_id, item in a.feature_attribution.items()
-        if item.get("status") in {
-            "TRIGGERED_DARK", "TELEMETRY_FAULT", "DELIVERED_UNEXPOSED", "EXPOSED",
-        }
-    )
+    attribution_red = attribution_red_features(a.feature_attribution)
     if attribution_red:
         a.verdict_reasons.append(
             "attribution RED feature(s): " + ", ".join(attribution_red)
@@ -2681,16 +2676,7 @@ def audit_task(task_dir: Path) -> TaskAudit:
             f"LEAK: <gt-*> tag visible in observations x{a.leak_tag_count}")
     if a.attribution_issues:
         a.verdict_reasons.extend(a.attribution_issues)
-    attribution_red = [
-        feature_id
-        for feature_id, item in a.feature_attribution.items()
-        if item.get("status") in {
-            "TRIGGERED_DARK",
-            "TELEMETRY_FAULT",
-            "DELIVERED_UNEXPOSED",
-            "EXPOSED",
-        }
-    ]
+    attribution_red = attribution_red_features(a.feature_attribution)
     if attribution_red:
         a.verdict_reasons.append(
             "attribution RED feature(s): " + ", ".join(sorted(attribution_red))
@@ -2817,6 +2803,48 @@ def audit_digest_sha256(payload: dict) -> str:
 # --------------------------------------------------------------------------- #
 # reporting
 # --------------------------------------------------------------------------- #
+
+# Statuses that mean a feature fired and the model did not get it.
+_ATTRIBUTION_RED_STATUSES = frozenset({
+    "TRIGGERED_DARK", "TELEMETRY_FAULT", "DELIVERED_UNEXPOSED", "EXPOSED",
+})
+
+
+def attribution_red_features(feature_attribution: dict) -> list[str]:
+    """Features whose non-delivery is unexplained, sorted.
+
+    A delivery-budget refusal is declined on purpose, not lost. SWE-Live run
+    35290352353 graded cleanly - real 2,738-byte patch, zero empty patches,
+    both verifiers agreeing reward 0 - and still FAILed attestation on one
+    feature: newfile_precedent TRIGGERED_DARK with reason
+    boundary_claim_ceiling, raised when candidate_ordinal exceeds
+    MAX_BOUNDARY_CLAIMS (4).
+
+    gt_engine.attribution routes abstentions by category, has no category for
+    the delivery budget, and so drops these into its else branch as
+    TRIGGERED_DARK. gt_engine is a pinned source object, but the RED verdict
+    belongs to this audit, and reporting a designed refusal as an unexplained
+    gap makes the gate cry wolf on exactly the runs that worked.
+
+    Only a status in the closed DELIVERY_REFUSAL_REASONS vocabulary is
+    excused, and only when every recorded reason is one. A feature with no
+    reasons, or with one reason outside the vocabulary, stays RED.
+    """
+    try:
+        from gt_engine.delivery_budget import DELIVERY_REFUSAL_REASONS
+    except Exception:  # noqa: BLE001 - a missing vocabulary excuses nothing
+        DELIVERY_REFUSAL_REASONS = frozenset()
+    red = []
+    for feature_id, item in (feature_attribution or {}).items():
+        if item.get("status") not in _ATTRIBUTION_RED_STATUSES:
+            continue
+        reasons = [str(r) for r in (item.get("reasons") or [])]
+        if reasons and all(r in DELIVERY_REFUSAL_REASONS for r in reasons):
+            continue
+        red.append(feature_id)
+    return sorted(red)
+
+
 def _fmt(v: object, width: int) -> str:
     s = "-" if v is None else str(v)
     return s[:width].ljust(width)

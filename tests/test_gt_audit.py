@@ -2055,3 +2055,66 @@ def test_audit_reports_zero_refreshes_when_the_journal_has_none(tmp_path):
     assert audit.graph_refresh_count == 0
     assert audit.graph_refresh_failure_count == 0
     assert audit.graph_refresh_breakdown == {}
+
+
+def test_designed_delivery_refusals_are_not_attribution_red():
+    """A budget refusal is a declined delivery, not an unexplained gap.
+
+    SWE-Live run 35290352353 graded cleanly - a real 2,738-byte patch, zero
+    empty patches, both verifiers agreeing on reward 0 - and its attestation
+    still FAILed with canonical_audit_failed_or_incomplete. The whole cause
+    was one feature:
+
+        newfile_precedent: status TRIGGERED_DARK, reasons
+        ["boundary_claim_ceiling"], deliveries [], exposed false
+
+    boundary_claim_ceiling is raised by miniswe_integration when
+    candidate_ordinal exceeds MAX_BOUNDARY_CLAIMS (4). It is a member of
+    delivery_budget.DELIVERY_REFUSAL_REASONS, a closed vocabulary of DESIGNED
+    declined deliveries, and of WINDOW_POSITIONAL_REFUSAL_REASONS, whose own
+    comment records that a later scan may admit the same payload at a lower
+    ordinal.
+
+    gt_engine.attribution routes abstentions by category and has no category
+    for the delivery budget, so these fall to its else branch and are labelled
+    TRIGGERED_DARK. gt_engine is a pinned source object and cannot be changed,
+    but the RED verdict is the audit's own, and the audit must not report a
+    designed refusal as evidence that GT lost something unexplainably.
+
+    Anything genuinely dark stays RED.
+    """
+    from gt_engine.delivery_budget import DELIVERY_REFUSAL_REASONS
+    from scripts.gt_audit import attribution_red_features
+
+    designed = {
+        "newfile_precedent": {
+            "status": "TRIGGERED_DARK",
+            "reasons": ["boundary_claim_ceiling"],
+        }
+    }
+    assert attribution_red_features(designed) == []
+
+    # Every reason in the closed vocabulary behaves the same way.
+    for reason in DELIVERY_REFUSAL_REASONS:
+        one = {"f": {"status": "TRIGGERED_DARK", "reasons": [reason]}}
+        assert attribution_red_features(one) == [], reason
+
+    # A real dark trigger is still RED.
+    unexplained = {
+        "localization": {"status": "TRIGGERED_DARK", "reasons": ["producer_abstained"]}
+    }
+    assert attribution_red_features(unexplained) == ["localization"]
+
+    # A mix reports only the genuinely dark feature.
+    mixed = {
+        "newfile_precedent": {
+            "status": "TRIGGERED_DARK", "reasons": ["boundary_claim_ceiling"]
+        },
+        "obligations": {"status": "TELEMETRY_FAULT", "reasons": ["producer_audit_fault"]},
+    }
+    assert attribution_red_features(mixed) == ["obligations"]
+
+    # A feature with no reasons recorded cannot be excused.
+    assert attribution_red_features(
+        {"x": {"status": "TRIGGERED_DARK", "reasons": []}}
+    ) == ["x"]
