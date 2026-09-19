@@ -53,6 +53,19 @@ Kept for now, not on GitHub, all small and non-git: `D:\release`,
    `D:\gt-product-source`.
 6. Not our code: handoff defects 4-7 (hardening record section 11).
 
+## 3a. Is anything still only on this disk?
+
+Run the scanner instead of searching by hand; it exits non-zero while any GT
+checkout holds work GitHub does not have:
+
+```
+python -m scripts.find_unsaved_work --fetch --write docs/internal/UNSAVED_WORK.md
+```
+
+Its output is `docs/internal/UNSAVED_WORK.md`, and `docs/internal/README.md`
+explains the routine and what the verdicts mean. Run it before deleting
+anything.
+
 ## 4. Branches on GitHub
 
 `merged` means contained in `origin/main`. `open` means not merged; it may be
