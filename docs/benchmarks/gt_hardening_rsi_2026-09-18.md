@@ -187,6 +187,24 @@ warned (`Dockerfile unparsed`); an unresolved `$ARG` base is kept and warned.
 - AST guard reads `AnnAssign` (review-9 LOW-2):
   `test_the_refusal_guard_reads_an_annotated_constant_too`.
 
+## Landed
+
+- **Commit `07a16e58`** on `codex/gt-921bec20-union-smokes` (2026-09-19),
+  pushed to `baliharneet7` and `fork`. Post-commit closure guard
+  `tests/test_product_acceptance.py`: 14 passed. `HEAD:gt_engine` =
+  `22daf78b80d74a0524de36c96d2060d411bdf5a5`.
+
+## User decisions, 2026-09-19
+
+1. YES - re-pin the GT source to fix the indexer OOM and the attribution
+   dark-trigger category.
+2. YES - fix the `command_descendant_receipt_missing` policy so a committed
+   patch is not discarded.
+3. YES - restore the 346-line `deepswe_gt_harness_product.yml` and close the
+   supported-workflow set.
+4. **NO runs.** No paid dispatch and no online test of any kind. GT is to be
+   fixed architecturally with everything mocked and stubbed.
+
 ## Verification state
 
 - Full suite (`tests/`, minus the corpus file, the post-commit closure guard
@@ -248,20 +266,24 @@ warned (`Dockerfile unparsed`); an unresolved `$ARG` base is kept and warned.
 6. Handoff defect 4: `cfn-lint-3764`'s gold patch does not resolve in its
    image (not ours; the pre-spend canary refused at zero spend).
 
-### Next steps, in order
+### Next steps, in order (revised after the decisions above)
 
-1. Commit this tree (29 files + this document + `BENCHMARK_HANDOFF.md`);
-   run `python -m pytest -q tests/test_product_acceptance.py` (post-commit
-   closure guard); verify `git rev-parse HEAD:gt_engine` is
-   `22daf78b80d74a0524de36c96d2060d411bdf5a5`; push
-   `HEAD:codex/gt-921bec20-union-smokes` to `baliharneet7` and `fork`.
-2. **Before any paid dispatch** (user authorises spend explicitly):
-   provider-free readiness → TB2 `cohort_stage: subset` with 2–3 tasks →
-   read `receipt-consistency.json` and `tb2-gt-smoke20-plan.json`
-   (`excluded`, `unresolved`) → only then the 20-task smoke at p20.
-3. SWE-Live: one gate task, release the rest only on official grading +
-   PASS attestation + diagnostic exit 0.
-4. Compare TB2 against the frozen local GT-off baseline (66/89,
-   `D:\gt_runs\miniswe_tb2_gtoff_20260731\merged_local.json`) and DeepSWE
-   against the official v1.1 leaderboard `deepseek-v4-flash` row (pass@1
-   0.5332). Never run GT-off.
+1. DONE - commit `07a16e58`, closure guard passed, pushed, pin intact.
+2. **Campaign 2, offline only**, same method (TDD, disjoint-file Opus agents,
+   adversarial review per round, exit at nothing above LOW):
+   - (a) re-pin the GT source: fix the cgroup memory-headroom read in
+     `gt_engine/indexer.py` and the dark-trigger category in
+     `gt_engine/attribution.py`; regenerate `source_object_ids`; update every
+     pin consumer; prove with mocked cgroup files and receipts.
+   - (b) `command_descendant_receipt_missing`: a missing containment receipt
+     must not discard a patch that is already committed; policy chosen from
+     the reconnaissance options and proven on the real `amoffat__sh-744`
+     artifact copy.
+   - (c) restore `deepswe_gt_harness_product.yml` from `ba51aa97` as a merge,
+     close the supported-workflow set, make the three branch-composition
+     tests pass.
+3. Commit and push after each clean review; update HAR-88's status board.
+4. No workflow dispatch and no provider call until the user explicitly
+   authorises spend. Comparison targets stay the frozen local TB2 GT-off
+   baseline (66/89) and the official DeepSWE v1.1 `deepseek-v4-flash` row
+   (pass@1 0.5332). GT-off is never run by us.
