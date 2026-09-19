@@ -318,6 +318,42 @@ fails closed on each:
   roughly $36 per 113-task DeepSWE pass. The cheaper route serves the wrong
   model, so the premium buys model identity.
 
+## 7b. Provider decision (2026-09-19, user): DeepInfra, V4 Flash 0731, fp8
+
+Live identity probe (commit `fb1a87d6`; receipts in
+`D:\gt_runs\identity_probe_20260919\`; spend well under one cent). Five
+recorded TB2-baseline first-call prompts were replayed exactly, with the
+mini-swe-agent 2.2.8 tool schema, at temperature 0, with fp8 enforced:
+
+| Host | Prompt tokens vs baseline | Thinking | Deterministic at temp 0 | Caching | Verdict |
+|---|---|---|---|---|---|
+| **DeepInfra** | **exact 5/5** | on, every replay | no | weak | **CONFORMS** |
+| StreamLake | +4 on every task | on | yes | yes | NONCONFORMING |
+| Baidu | +4 on every task | on | no | yes | NONCONFORMING |
+| DeepSeek V4.1 control | not run: DeepSeek account has no balance | | | | UNRESOLVED |
+
+**Decision: DeepInfra is the route** (already the pin in
+`config/benchmark_model.v1.json`). It is the only host that reproduces the
+baseline's tokenizer, chat template, tool schema and thinking mode exactly.
+StreamLake and Baidu add four tokens of chat template, so the model sees a
+different input; they are excluded despite being cheaper. The weights
+themselves cannot be proven: the baseline ran at temperature 1.0 and
+recorded no logprobs.
+
+Open items this decision carries:
+- **Reasoning depth.** On the five probe prompts DeepInfra reasoned for
+  10-24 tokens; the baseline reasoned for 18-63 on the same prompts (at
+  temperature 1.0, not 0). This may be a shallower thinking default (low to
+  moderate confidence). The first TB2 subset run must compare reasoning
+  tokens per call against the baseline's 4,120 calls before any
+  headline result is reported.
+- **Cost.** DeepInfra caches weakly, so budget near full input price:
+  about $15 for the 89-task TB2 set and about $137 per 113-task DeepSWE
+  pass.
+- **Revision per benchmark.** TB2 and DeepSWE baselines are 0731 (this
+  route). The SWE-bench-Live Lite baseline is 0423; it needs the 0423 slug
+  and its own identity check before a like-for-like comparison.
+
 ## 8. Dispatch runbook (only after the user authorises spend)
 
 1. `deepswe_gt_harness_product.yml` alone — zero provider calls; proves
