@@ -6,7 +6,10 @@
   "model": "deepseek/deepseek-v4-flash-0731",
   "provider_routing": {
     "only": [
-      "deepinfra"
+      "streamlake"
+    ],
+    "quantizations": [
+      "fp8"
     ],
     "allow_fallbacks": false,
     "require_parameters": true
@@ -27,8 +30,8 @@
     "model_retry_attempts": 15
   },
   "pricing": {
-    "prompt_usd_per_token": 0.00000006,
-    "completion_usd_per_token": 0.00000018
+    "prompt_usd_per_token": 0.000000044,
+    "completion_usd_per_token": 0.000000132
   },
   "expected_quantization": "fp8"
 }

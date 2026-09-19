@@ -127,7 +127,7 @@ DOES_NOT_PROVE = ["weights"]
 
 NO_CACHE_MESSAGE = "no prompt caching observed; cost estimates must assume full input price"
 
-# OpenRouter provider slugs are lower-case words ("deepinfra", "streamlake").
+# OpenRouter provider slugs are lower-case words ("streamlake", "relace").
 _PROVIDER_SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 # An override may only send a credential to the host that credential belongs
 # to. Without the pairing, ``--base-url`` plus ``--key-env`` would post any

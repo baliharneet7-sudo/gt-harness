@@ -58,31 +58,47 @@ def test_muse_route_preserves_the_baseline_xhigh_reasoning_contract(monkeypatch)
     assert kwargs["extra_body"] == {"provider": muse_routing}
 
 
-def test_deepseek_route_forwards_deepinfra_only_without_fallback(monkeypatch) -> None:
+STREAMLAKE_FP8_ROUTING = {
+    "only": ["streamlake"],
+    "quantizations": ["fp8"],
+    "allow_fallbacks": False,
+    "require_parameters": True,
+}
+
+
+def test_deepseek_route_forwards_streamlake_fp8_only_without_fallback(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
     monkeypatch.setenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "16384")
-    monkeypatch.setenv(
-        "GT_PROVIDER_ROUTING_JSON",
-        json.dumps(
-            {
-                "only": ["deepinfra"],
-                "allow_fallbacks": False,
-                "require_parameters": True,
-            }
-        ),
-    )
+    monkeypatch.setenv("GT_PROVIDER_ROUTING_JSON", json.dumps(STREAMLAKE_FP8_ROUTING))
 
     model, kwargs = _model_and_kwargs("deepseek/deepseek-v4-flash-0731", 1.0)
 
     assert model == "openai/deepseek/deepseek-v4-flash-0731"
     assert kwargs["max_tokens"] == 16_384
     assert "max_completion_tokens" not in kwargs
-    assert kwargs["extra_body"] == {
-        "provider": {
-            "only": ["deepinfra"],
-            "allow_fallbacks": False,
-            "require_parameters": True,
-        }
+    # fp8 rides on every paid request, so OpenRouter refuses an fp4 endpoint
+    # instead of the run discovering it afterwards.
+    assert kwargs["extra_body"] == {"provider": STREAMLAKE_FP8_ROUTING}
+
+
+def test_deepseek_route_refuses_the_lock_without_the_fp8_constraint(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
+    unconstrained = {k: v for k, v in STREAMLAKE_FP8_ROUTING.items() if k != "quantizations"}
+    monkeypatch.setenv("GT_PROVIDER_ROUTING_JSON", json.dumps(unconstrained))
+
+    with pytest.raises(ValueError, match="provider_routing_env_not_allowed"):
+        _model_and_kwargs("deepseek/deepseek-v4-flash-0731", 1.0)
+
+
+def test_run_layer_routing_table_mirrors_the_preflight_allowlist() -> None:
+    """The preflight certifies the route, the run layer re-checks the env lock
+    against its own table; if the two drift, a certified route cannot run."""
+    from scripts import provider_preflight
+    from scripts.miniswe_gt_run import _PROVIDER_ROUTING_BY_MODEL
+
+    assert _PROVIDER_ROUTING_BY_MODEL == {
+        f"openai/{model}": routing
+        for model, routing in provider_preflight._AUTHORIZED_ROUTES.items()
     }
 
 
@@ -1295,7 +1311,7 @@ def test_union_alpha_route_refuses_foreign_routing(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
     monkeypatch.setenv(
         "GT_PROVIDER_ROUTING_JSON",
-        json.dumps({"only": ["deepinfra"], "allow_fallbacks": False}),
+        json.dumps({"only": ["streamlake"], "allow_fallbacks": False}),
     )
     with pytest.raises(ValueError, match="provider_routing_env_not_allowed"):
         _model_and_kwargs("stealth/union-alpha", 1.0)

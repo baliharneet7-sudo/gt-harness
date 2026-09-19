@@ -13,15 +13,34 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "config" / "provider_route.v1.json"
 
 
-def test_paid_route_is_deepseek_deepinfra_fp8_only() -> None:
-    """The active route: the HAR-83 benchmark model, single provider."""
-    route, _ = provider_preflight.load_route(MANIFEST)
-    assert route["model"] == "deepseek/deepseek-v4-flash-0731"
-    assert route["provider_routing"] == {
-        "only": ["deepinfra"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    }
+# The paid route since 2026-09-19: StreamLake, chosen on the live identity
+# probe (receipts D:/gt_runs/identity_probe_20260919/identity_streamlake.json).
+# fp8 is enforced on every request, not just recorded after the fact: a
+# relace/fp4 endpoint under the identical model name scored 0/20 vs 17/20.
+STREAMLAKE_FP8_ROUTING = {
+    "only": ["streamlake"],
+    "quantizations": ["fp8"],
+    "allow_fallbacks": False,
+    "require_parameters": True,
+}
+PAID_ROUTE_MANIFESTS = (
+    "provider_route.v1.json",
+    "provider_route_deepseek_v4_flash_0731_fp8.v1.json",
+)
+
+
+def test_paid_route_is_deepseek_streamlake_fp8_only() -> None:
+    """The active route: the HAR-83 benchmark model, one provider, fp8 only."""
+    for name in PAID_ROUTE_MANIFESTS:
+        route, _ = provider_preflight.load_route(ROOT / "config" / name)
+        assert route["model"] == "deepseek/deepseek-v4-flash-0731", name
+        assert route["provider_routing"] == STREAMLAKE_FP8_ROUTING, name
+    assert (
+        provider_preflight._AUTHORIZED_ROUTES["deepseek/deepseek-v4-flash-0731"]
+        == STREAMLAKE_FP8_ROUTING
+    )
+    fp8, _ = provider_preflight.load_route(ROOT / "config" / PAID_ROUTE_MANIFESTS[1])
+    assert fp8["route_id"] == "openrouter-deepseek-v4-flash-0731-streamlake-fp8-only"
 
 
 def test_each_authorized_route_identity_loads(tmp_path: Path) -> None:
@@ -104,11 +123,7 @@ def test_live_preflight_checks_key_limit_and_exact_model(
             and key == "canary-not-a-real-key"
             and body["model"] == "deepseek/deepseek-v4-flash-0731"
             and body["max_tokens"] == 16
-            and body["provider"] == {
-                "only": ["deepinfra"],
-                "allow_fallbacks": False,
-                "require_parameters": True,
-            }
+            and body["provider"] == STREAMLAKE_FP8_ROUTING
             and "max_completion_tokens" not in body
             else {}
         ),
@@ -248,11 +263,12 @@ MODEL_ROW = {
     "top_provider": {"max_completion_tokens": 32_768},
     "pricing": CATALOG_PRICING,
 }
-# Both paid manifests pin the published deepinfra fp8 rate, so the route block
-# - not the catalog row above - prices every estimate taken against MANIFEST.
-ROUTE_PROMPT_PRICE = 6e-8
-ROUTE_COMPLETION_PRICE = 1.8e-7
-# 1 task x (17.5M in x 6e-8 + 145k out x 1.8e-7) x 1.25 safety.
+# Both paid manifests pin OpenRouter's published StreamLake rate for this model,
+# so the route block - not the catalog row above - prices every estimate taken
+# against MANIFEST.
+ROUTE_PROMPT_PRICE = 4.4e-8
+ROUTE_COMPLETION_PRICE = 1.32e-7
+# 1 task x (17.5M in x 4.4e-8 + 145k out x 1.32e-7) x 1.25 safety = 0.986425.
 DEFAULT_ESTIMATE_USD = (
     1 * (17_500_000 * ROUTE_PROMPT_PRICE + 145_000 * ROUTE_COMPLETION_PRICE) * 1.25
 )
@@ -321,7 +337,7 @@ def test_funds_check_fails_closed_when_credit_cannot_cover_the_run(
     assert receipt["error_code"] == "provider_funds_insufficient"
     assert receipt["funds_sufficient"] is False
     assert receipt["funds_verdict"] == "insufficient"
-    # 0.05 / 1.345125: the key cannot fund one run.
+    # 0.05 / 0.986425: the key cannot fund one run.
     assert receipt["funds_headroom_bucket"] == "lt_1x"
     assert receipt["estimate_usd"] == pytest.approx(DEFAULT_ESTIMATE_USD)
     assert receipt["expected_tasks"] == 1
@@ -355,7 +371,7 @@ def test_funds_check_derives_remaining_credit_from_limit_minus_usage(
     assert receipt["funds_sufficient"] is True
     assert receipt["funds_verdict"] == "sufficient"
     assert receipt["funds_reason"] is None
-    # 399.75 / 1.345125 is ~297x. The receipt says only "ten runs or more":
+    # 399.75 / 0.986425 is ~405x. The receipt says only "ten runs or more":
     # a number, however rounded, times the published estimate reconstructs the
     # balance, and a bucket boundary is all the gate ever needed.
     assert receipt["funds_headroom_bucket"] == "ge_10x"
@@ -516,9 +532,9 @@ def test_served_endpoint_identity_is_recorded_from_the_endpoints_listing(
                     "pricing": {"prompt": "0.0000009", "completion": "0.0000019"},
                 },
                 {
-                    "tag": "deepinfra/fp8",
-                    "provider_name": "DeepInfra",
-                    "context_length": 1_048_576,
+                    "tag": "streamlake/fp8",
+                    "provider_name": "StreamLake",
+                    "context_length": 1_024_000,
                     "pricing": CATALOG_PRICING,
                 },
             ],
@@ -533,10 +549,10 @@ def test_served_endpoint_identity_is_recorded_from_the_endpoints_listing(
     )
     assert receipt["status"] == "PASS"
     assert receipt["served_endpoint"] == {
-        "provider": "deepinfra",
-        "tag": "deepinfra/fp8",
+        "provider": "streamlake",
+        "tag": "streamlake/fp8",
         "quantization": "fp8",
-        "context_length": 1_048_576,
+        "context_length": 1_024_000,
         "prompt_price": pytest.approx(3e-7),
         "completion_price": pytest.approx(1.2e-6),
     }
@@ -552,7 +568,7 @@ def test_quantization_drift_on_the_pinned_provider_fails_closed(
         "_get_json",
         _fake_get(
             key_data={"limit_remaining": 10_000},
-            endpoints=[{"tag": "deepinfra/fp4", "context_length": 1_048_576}],
+            endpoints=[{"tag": "streamlake/fp4", "context_length": 1_024_000}],
         ),
     )
     monkeypatch.setattr(provider_preflight, "_post_json", _never_post)
@@ -579,7 +595,7 @@ def test_unknown_served_quantization_is_recorded_without_failing(
         "_get_json",
         _fake_get(
             key_data={"limit_remaining": 10_000},
-            endpoints=[{"provider_name": "DeepInfra", "context_length": 1_048_576}],
+            endpoints=[{"provider_name": "StreamLake", "context_length": 1_024_000}],
         ),
     )
     monkeypatch.setattr(provider_preflight, "_post_json", _fake_post(None))
@@ -686,13 +702,14 @@ def _bucket_receipt(
     return receipt, output.read_text(encoding="utf-8")
 
 
-# estimate_usd is 1.345125 for the default one-task budget on this route, so
+# estimate_usd is 0.986425 for the default one-task budget on this route, so
 # each row below is (bucket, balances that must be indistinguishable in it).
+# Boundaries: 1x = 0.986425, 3x = 2.959275, 10x = 9.86425.
 _HEADROOM_GRID = (
-    ("lt_1x", (0.11, 0.53, 1.29)),
-    ("1x_to_3x", (1.37, 2.71, 4.03)),
-    ("3x_to_10x", (4.09, 8.88, 13.44)),
-    ("ge_10x", (13.46, 99.99, 4242.42)),
+    ("lt_1x", (0.11, 0.53, 0.97)),
+    ("1x_to_3x", (1.01, 1.87, 2.93)),
+    ("3x_to_10x", (3.01, 6.66, 9.81)),
+    ("ge_10x", (9.91, 99.99, 4242.42)),
 )
 
 
@@ -873,18 +890,20 @@ def test_endpoints_url_follows_the_manifest_path_and_quotes_the_model_id(
     ]
 
 
-def test_both_paid_route_manifests_pin_the_published_fp8_price() -> None:
+def test_both_paid_route_manifests_pin_the_published_streamlake_price() -> None:
     """scripts/tb2_report.py prices a run from this block, and the preflight
-    estimates from it, so a catalog price change cannot silently move either."""
-    for name in (
-        "provider_route.v1.json",
-        "provider_route_deepseek_v4_flash_0731_fp8.v1.json",
-    ):
+    estimates from it, so a catalog price change cannot silently move either.
+
+    OpenRouter also publishes a StreamLake cache-read rate (1.4e-9/token), but
+    the pricing block admits exactly the two keys below (load_route refuses
+    any other), and tb2_report bills cached input at the prompt rate - so the
+    estimate stays an upper bound rather than gaining an unvalidated field."""
+    for name in PAID_ROUTE_MANIFESTS:
         route, _ = provider_preflight.load_route(ROOT / "config" / name)
         assert route["pricing"] == {
-            "prompt_usd_per_token": 0.00000006,
-            "completion_usd_per_token": 0.00000018,
-        }
+            "prompt_usd_per_token": 0.000000044,
+            "completion_usd_per_token": 0.000000132,
+        }, name
 
 
 # --- round 3: the consumer side of the gate ---

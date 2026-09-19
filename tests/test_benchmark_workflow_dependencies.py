@@ -115,6 +115,10 @@ def test_benchmark_model_pin_is_the_single_source_of_truth() -> None:
         route = json.loads(route_path.read_text(encoding="utf-8"))
         assert route["model"] == model, route_path.name
         assert route["provider_routing"]["only"] == pin["provider_only"], route_path.name
+        # The served format is requested on every call, not just checked after.
+        assert route["provider_routing"]["quantizations"] == [
+            route["expected_quantization"]
+        ], route_path.name
 
     # The route manifest referenced by each paid workflow, so a repin that
     # leaves one workflow bound to a retired manifest fails here.
@@ -144,6 +148,7 @@ def test_benchmark_model_pin_is_the_single_source_of_truth() -> None:
     assert f'"effective_model": "{effective}"' in tb2
     assert f'--effective-model "{effective}"' in tb2
     assert f'"only": {json.dumps(pin["provider_only"])}' in tb2
+    assert '"quantizations": ["fp8"]' in tb2
     assert model in dispatcher
 
     manifest = json.loads(
@@ -400,7 +405,8 @@ def _preflight_receipt(**overrides) -> dict:
         "provider_ready": True,
         "model": load_model_pin()["model"],
         "provider_routing": {
-            "only": ["deepinfra"],
+            "only": ["streamlake"],
+            "quantizations": ["fp8"],
             "allow_fallbacks": False,
             "require_parameters": True,
         },

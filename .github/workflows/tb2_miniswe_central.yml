@@ -758,7 +758,8 @@ jobs:
           assert receipt["provider_ready"] is True
           assert receipt["model"] == "deepseek/deepseek-v4-flash-0731"
           assert receipt["provider_routing"] == {
-              "only": ["deepinfra"],
+              "only": ["streamlake"],
+              "quantizations": ["fp8"],
               "allow_fallbacks": False,
               "require_parameters": True,
           }

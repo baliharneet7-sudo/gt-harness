@@ -671,7 +671,10 @@ def _templates() -> tuple[str, str]:
 # smuggle routing constraints through GT_PROVIDER_ROUTING_JSON.
 _PROVIDER_ROUTING_BY_MODEL = {
     "openai/deepseek/deepseek-v4-flash-0731": {
-        "only": ["deepinfra"],
+        "only": ["streamlake"],
+        # Enforced on every request: a relace/fp4 endpoint under the same
+        # model name scored 0/20 against the fp8 baseline's 17/20.
+        "quantizations": ["fp8"],
         "allow_fallbacks": False,
         "require_parameters": True,
     },

@@ -359,15 +359,15 @@ def test_openrouter_provider_only_body_is_sent_exactly(tmp_path, monkeypatch, ca
     ]
     assert receipt["does_not_prove"] == ["weights"]
     assert "native_fingerprint" not in receipt["checks"]
-    # The route's price is DeepInfra's; the receipt must say so under --provider.
-    assert receipt["pricing_provider"] == "deepinfra"
+    # The route's price is StreamLake's; the receipt must say so under --provider.
+    assert receipt["pricing_provider"] == "streamlake"
 
 
 def test_route_manifest_provider_is_the_default(tmp_path, monkeypatch, capsys):
     fake = FakeProvider(_write_refs(tmp_path))
     _run(tmp_path, monkeypatch, capsys, fake)
 
-    assert fake.calls[0]["body"]["provider"]["only"] == ["deepinfra"]
+    assert fake.calls[0]["body"]["provider"]["only"] == ["streamlake"]
 
 
 def test_invalid_provider_slug_is_refused(tmp_path, monkeypatch, capsys):
@@ -481,7 +481,7 @@ def test_served_identity_and_cost_are_recorded(tmp_path, monkeypatch, capsys):
     first = receipt["calls"][0]
     assert first["prompt_tokens"] == 1100
     assert first["completion_tokens"] == 64
-    assert first["estimated_cost_usd"] == pytest.approx(1100 * 6e-8 + 64 * 1.8e-7)
+    assert first["estimated_cost_usd"] == pytest.approx(1100 * 4.4e-8 + 64 * 1.32e-7)
     assert receipt["totals"]["estimated_cost_usd"] == pytest.approx(
         sum(c["estimated_cost_usd"] for c in receipt["calls"])
     )
@@ -556,7 +556,7 @@ def test_openrouter_sends_the_route_quantization(tmp_path, monkeypatch, capsys):
     _run(tmp_path, monkeypatch, capsys, fake)
 
     assert fake.calls[0]["body"]["provider"] == {
-        "only": ["deepinfra"],
+        "only": ["streamlake"],
         "quantizations": ["fp8"],
         "allow_fallbacks": False,
         "require_parameters": True,

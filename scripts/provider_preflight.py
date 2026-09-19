@@ -67,7 +67,7 @@ _PACING_KEYS = {
     "model_retry_attempts",
 }
 # Numeric formats we can read out of an OpenRouter endpoint tag
-# ("deepinfra/fp8", "relace/fp4"). Anything else stays "unknown", which never
+# ("streamlake/fp8", "relace/fp4"). Anything else stays "unknown", which never
 # trips the mismatch gate: an unreadable tag is not evidence of drift.
 _KNOWN_QUANTIZATIONS = frozenset({"fp4", "fp8", "int8", "bf16"})
 
@@ -92,8 +92,13 @@ _DEFAULT_SAFETY_FACTOR = 1.25
 # these identities; a silent swap to an arbitrary model or provider fails
 # here, which is the control property the hardcoded pin existed for.
 #
-# - deepseek-v4-flash-0731/relace: the HAR-83 benchmark route (the only model
-#   whose results may be cited against the frozen GT-off baselines).
+# - deepseek-v4-flash-0731/streamlake/fp8: the HAR-83 benchmark route (the
+#   only model whose results may be cited against the frozen GT-off
+#   baselines). StreamLake since 2026-09-19, chosen on the live identity probe
+#   (0731 fp8, thinking on every replay, deterministic at temperature 0, real
+#   prompt caching; prompt tokens +4 vs DeepSeek-native from its chat-template
+#   wrapper, accepted as a documented deviation). ``quantizations`` makes
+#   OpenRouter refuse a non-fp8 endpoint rather than the gate observing one.
 # - stealth/union-alpha/stealth: functional-verification route only. A $0
 #   preview model served by OpenRouter's anonymous Stealth provider -
 #   "does the machinery work" runs, never comparison evidence: the provider
@@ -101,7 +106,10 @@ _DEFAULT_SAFETY_FACTOR = 1.25
 #   matched cohort.
 _AUTHORIZED_ROUTES = {
     "deepseek/deepseek-v4-flash-0731": {
-        "only": ["deepinfra"],
+        "only": ["streamlake"],
+        # Enforced on every request: a relace/fp4 endpoint under the same
+        # model name scored 0/20 against the fp8 baseline's 17/20.
+        "quantizations": ["fp8"],
         "allow_fallbacks": False,
         "require_parameters": True,
     },
@@ -495,7 +503,7 @@ def _assess_funds(
 
 
 def _quantization(tag: str | None, declared: Any) -> str:
-    """fp8/fp4/bf16/int8 out of an endpoint tag such as "deepinfra/fp8"."""
+    """fp8/fp4/bf16/int8 out of an endpoint tag such as "streamlake/fp8"."""
     for token in re.split(r"[/_\-\s]+", (tag or "").lower()):
         if token in _KNOWN_QUANTIZATIONS:
             return token
@@ -505,7 +513,7 @@ def _quantization(tag: str | None, declared: Any) -> str:
 
 
 def _row_provider_slugs(row: dict[str, Any]) -> set[str]:
-    """Tags carry the provider slug before the "/" ("deepinfra/fp8"), and a
+    """Tags carry the provider slug before the "/" ("streamlake/fp8"), and a
     provider with a single deployment is tagged with the bare slug."""
     return {
         str(candidate).split("/", 1)[0].strip().lower()
