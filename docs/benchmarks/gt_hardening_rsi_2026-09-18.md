@@ -283,8 +283,20 @@ Run on the landed head before declaring online readiness, all offline:
   `fixtures/har64-7bbbc9d0` pushed to both campaign remotes; the fixture
   step fetches those refspecs before its SHA fetch and `cat-file` pins.
   Proven: a `--no-local` clone with the tags carries both commits and the
-  repository-intelligence tests pass in it; the full clean-clone suite on
-  `bb0736f6` is the final gate (result recorded in HAR-88).
+  repository-intelligence tests pass in it.
+- **Definitive result:** the entire suite (232 test files, closure guard
+  included, every file run exactly once in four foreground slices because
+  the host reaps idle background runs under memory pressure) in a fresh
+  `--no-local` clone of `bb0736f6` with the fixture tags: **zero failures**.
+
+**Offline verdict: ready for online.** Everything that can be proven without
+a provider call, a dispatch or Docker has been proven. What remains is
+online-only by nature and is the first thing a dispatch will tell us:
+the pinned checkouts (`harneet2512/groundtruth`, GitNexus, review-inbox)
+and the DeepSWE task-image pull in the product workflow; the runner's
+actual whitespace handling of workflow commands (defended structurally,
+so it no longer matters); provider funds and the served fp8 build (the
+preflight fails closed on both).
 
 ## Landed
 
