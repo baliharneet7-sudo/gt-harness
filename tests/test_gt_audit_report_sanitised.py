@@ -49,6 +49,18 @@ from tests.test_gt_audit import (
 PAYLOAD = "\n::stop-commands::hunter2\n::error title=Grader::TASK PASSED"
 
 
+# What a lenient parser would plausibly trim before it decides whether a line
+# is a command. REVIEW-16 MEDIUM-1: the oracle used to ask
+# ``startswith("::")`` and nothing else, so the first REVIEW-15 fix -
+# prefixing ONE SPACE to such a line - scored as clean, leaving "does
+# actions/runner trim before TryParse?" as the only thing between this
+# report and a forged verdict. That question cannot be settled offline, so
+# the oracle stops depending on it. Four characters, not ``\\s+``: the
+# report's own prose is indented and bulleted, and an oracle that strips its
+# way to a false positive gets exempted rather than obeyed.
+_LENIENT_PREFIX = " \t[*"
+
+
 def column_zero_commands(text: str) -> list[str]:
     """Every physical line of ``text`` the runner could read as a command.
 
@@ -56,11 +68,16 @@ def column_zero_commands(text: str) -> list[str]:
     rather than on ``\\n`` alone: a bare carriage return puts the cursor at
     column zero on a console too, and a guard that only knows ``\\n`` is the
     next hole.
+
+    A line is counted whatever a lenient parser would trim off its front:
+    the fix for a leading command is structural (``%3A%3A``), never a
+    space, so this must not score a displaced command as a removed one.
     """
     lines: list[str] = []
     for chunk in text.split("\r\n"):
         lines.extend(chunk.replace("\r", "\n").split("\n"))
-    return [line for line in lines if line.startswith("::")]
+    return [line for line in lines
+            if line.lstrip(_LENIENT_PREFIX).startswith("::")]
 
 
 def audit_with(**overrides) -> gt_audit.TaskAudit:
@@ -365,12 +382,214 @@ def test_a_cp1252_console_does_not_kill_the_run(tmp_path, monkeypatch, hostile):
     assert column_zero_commands(console.getvalue()) == []
 
 
-def test_a_line_separator_is_not_a_column_zero_escape(tmp_path):
-    """U+2028 ends a line for ``str.splitlines`` - so it must not reach the report."""
-    audit = audit_with(capabilities=[
-        capability_row("lsp_promotion", "DEGRADED", "x ::error title=G::PASSED"),
-    ])
+def test_a_space_displaced_command_in_a_quoted_line_is_rewritten(tmp_path):
+    """A payload displaced by a space is still a command to a parser that
+    trims. The quoted line is the one path where container bytes reach the
+    start of a physical line under nothing but an indent (review 18)."""
+    audit = audit_with(
+        ledger_present=True,
+        ledger_rows=[ledger_row(quote="head\n ::error title=G::PASSED\ntail")],
+    )
 
     rendered = gt_audit.render_report([audit], tmp_path)
 
-    assert [ln for ln in rendered.splitlines() if ln.startswith("::")] == []
+    assert column_zero_commands(rendered) == []
+    assert " %3A%3Aerror title=G::PASSED" in rendered
+
+
+def test_the_guard_strips_every_prefix_the_oracle_strips():
+    """Guard and oracle must agree on what a lenient parser would trim
+    (review 18): ``[`` and ``*`` are in the oracle set, so a name that
+    begins with them followed by ``::`` is rewritten too, lead kept."""
+    assert gt_audit._no_column_zero("[::error title=G::x") == "[%3A%3Aerror title=G::x"
+    assert gt_audit._no_column_zero("* ::warning::x") == "* %3A%3Awarning::x"
+    for prefix in (" ", "\t", "[", "*", "[ *"):
+        assert column_zero_commands(gt_audit._no_column_zero(prefix + "::error::x")) == []
+
+
+# --------------------------------------------------------------------------- #
+# REVIEW-16 MEDIUM-1: the ORACLE was the weakest part of the guard
+#
+# ``line.startswith("::")`` asks where the command sits, and a guard that asks
+# about POSITION is only as good as the parser's agreement about position. The
+# first fix for REVIEW-15 prefixed a single space to any line that began with
+# ``::`` - which this oracle then scored as clean, so the whole class went
+# green on a line that a runner trimming leading whitespace before it parses
+# would still obey. Whether ``actions/runner`` trims before ``TryParse``
+# cannot be settled offline, which is the point: the oracle must not depend on
+# the answer.
+#
+# So it lstrips what a lenient parser would plausibly trim - spaces, tabs, and
+# the two characters a log decorator might wrap a line in - and asks the
+# question again. The FIX is structural (a leading ``::`` is rewritten to
+# ``%3A%3A``), and this oracle is what makes the structural fix checkable.
+# --------------------------------------------------------------------------- #
+def test_the_oracle_counts_a_command_a_lenient_parser_would_still_read():
+    """REVIEW-16 MEDIUM-1: a whitespace prefix is not a fix, and not a pass."""
+    assert column_zero_commands(" ::error title=G::x") == [" ::error title=G::x"]
+    assert column_zero_commands("\t::stop-commands::h") == ["\t::stop-commands::h"]
+    assert column_zero_commands("  [::warning title=G::x") == ["  [::warning title=G::x"]
+    # And it still says nothing about the report's own indented prose, which
+    # is the whole reason the strip set is four characters and not \s+.
+    assert column_zero_commands("  - CAPABILITY lsp [DEGRADED]: fine") == []
+    assert column_zero_commands("      ev1   obligations   INFO   537c   MODEL-ONLY") == []
+    assert column_zero_commands("                %3A%3Astop-commands::hunter2") == []
+
+
+# --------------------------------------------------------------------------- #
+# REVIEW-16 HIGH-1/HIGH-2: a field that BEGINS with ``::``
+#
+# ``gh_escape`` leaves ``:`` alone in message mode - deliberately, because a
+# diagnostic line is mostly colons and escaping them would make every
+# annotation unreadable - so a field whose FIRST two characters are ``::``
+# survives sanitising intact. Three sites put such a field at literal column
+# zero: the table's ``task`` column, the per-task header, and the paired
+# table's name. No leading newline is needed; the payload simply IS the name.
+#
+# HIGH-2: none of this was covered. Every REVIEW-15 payload began with ``\n``,
+# so ``_safe`` neutralised it before the backstop ever saw it, and stubbing
+# ``_no_column_zero`` to the identity left all twenty tests green. The tests
+# below observe the backstop's effect on a field that genuinely reaches column
+# zero, and one of them stubs the backstop out to prove the call-site fix is
+# real rather than a shadow of it.
+# --------------------------------------------------------------------------- #
+_LEADING = "::error title=Grader::TASK PASSED"
+
+
+def test_a_task_name_that_begins_with_a_command_is_rewritten_at_source(tmp_path):
+    """The reviewer's reproduction: the name IS the command, with no newline."""
+    rendered = gt_audit.render_report([audit_with(task_name=_LEADING)], tmp_path)
+
+    assert column_zero_commands(rendered) == []
+    # Structural, not positional: the colons are gone, so it does not matter
+    # whether the runner trims before it parses.
+    table_row = next(ln for ln in rendered.splitlines() if "Grader" in ln)
+    assert table_row.startswith("%3A%3Aerror title=Grader")
+    header = next(ln for ln in rendered.splitlines() if ln.endswith("[GREEN-quiet]"))
+    assert header.startswith("%3A%3Aerror title=Grader")
+    # Still readable: only the two leading colons moved.
+    assert "title=Grader" in rendered
+
+
+def test_a_paired_table_name_that_begins_with_a_command_is_rewritten():
+    gt = audit_with(task_name=_LEADING, reward=1.0)
+    base = audit_with(task_name=_LEADING, reward=0.0)
+
+    rendered = gt_audit.render_paired([gt], [base])
+
+    assert column_zero_commands(rendered) == []
+    assert any(ln.startswith("%3A%3Aerror title=Grader")
+               for ln in rendered.splitlines())
+
+
+def test_the_source_fix_holds_with_the_backstop_stubbed(tmp_path, monkeypatch):
+    """HIGH-2: the call sites must carry the fix, not lean on the guard.
+
+    With ``_no_column_zero`` replaced by the identity the report must still be
+    clean - otherwise the twenty tests above were only ever testing the
+    backstop, and a renderer that stops calling it is silently unguarded.
+    """
+    monkeypatch.setattr(gt_audit, "_no_column_zero", lambda text: text)
+
+    for audit in (audit_with(task_name=_LEADING), poisoned_audit()):
+        assert column_zero_commands(
+            gt_audit.render_report([audit], tmp_path)
+        ) == [], audit.task_name
+    assert column_zero_commands(gt_audit.render_paired(
+        [audit_with(task_name=_LEADING)], [audit_with(task_name=_LEADING)]
+    )) == []
+
+
+def test_the_backstop_rewrites_a_leading_command_structurally():
+    """And the guard itself, called directly - HIGH-2's other half.
+
+    A space prefix is a bet on the parser. ``%3A%3A`` is gh_escape's own
+    property-mode spelling of a colon, so the line still says what it said and
+    cannot be read as a command by any parser at any indentation.
+    """
+    assert gt_audit._no_column_zero("::error title=G::x") == "%3A%3Aerror title=G::x"
+    assert gt_audit._no_column_zero("ok\r\n\t::warning::x") == "ok\r\n\t%3A%3Awarning::x"
+    assert gt_audit._no_column_zero("ok\r\n::notice::x") == "ok\r\n%3A%3Anotice::x"
+    assert gt_audit._no_column_zero("ok\r::notice::x") == "ok\r%3A%3Anotice::x"
+    # A ``::`` that is not at column zero is left exactly as it was: the report
+    # is full of them and none is a command.
+    # Review 17: the parser, the design goal and this file's oracle all ask
+    # about the first NON-WHITESPACE characters, not literal index 0. A
+    # space- or tab-displaced opener must be rewritten too, with the lead kept.
+    assert gt_audit._no_column_zero(" ::error title=G::x") == " %3A%3Aerror title=G::x"
+    assert gt_audit._no_column_zero("ok\r\n\t::warning::x") == "ok\r\n\t%3A%3Awarning::x"
+    assert column_zero_commands(gt_audit._no_column_zero(" ::error title=G::x")) == []
+    assert gt_audit._no_column_zero("  - a::b") == "  - a::b"
+    assert gt_audit._no_column_zero("") == ""
+
+
+def test_a_quoted_line_that_begins_with_a_command_is_rewritten_too(tmp_path):
+    """The indent alone is a position, and a position is not a guarantee."""
+    audit = audit_with(
+        ledger_present=True,
+        ledger_rows=[ledger_row(quote="head\n::error title=G::PASSED\ntail")],
+    )
+
+    rendered = gt_audit.render_report([audit], tmp_path)
+
+    assert column_zero_commands(rendered) == []
+    assert any("%3A%3Aerror title=G" in ln for ln in rendered.splitlines())
+
+
+def test_the_cli_never_emits_a_command_for_a_task_named_like_one(tmp_path, capsys):
+    """End to end, the way the paid workflows run it: name off result.json."""
+    task = poisoned_run(tmp_path, evidence="fine")
+    result = json.loads((task / "result.json").read_text(encoding="utf-8"))
+    result["task_name"] = _LEADING
+    (task / "result.json").write_text(json.dumps(result), encoding="utf-8")
+
+    rc = gt_audit.main([str(tmp_path)])
+
+    assert rc in (0, 1)
+    out = capsys.readouterr().out
+    assert column_zero_commands(out) == []
+    assert "%3A%3Aerror title=Grader" in out
+
+
+# --------------------------------------------------------------------------- #
+# REVIEW-16 LOW-1: a container printed as a repr is single-line, not bounded
+#
+# ``f"{a.gt_delivery_kinds}"`` is safe from column zero because ``repr``
+# escapes the line breaks inside the keys, and that is the whole reason these
+# six were left alone. It is not a BOUND: the dict carries one key per
+# delivery kind the container named, and a run that names ten thousand of them
+# writes one report line of a quarter of a megabyte. Every other field in this
+# report answers to ANNOTATION_FIELD_LIMIT; these now do too.
+# --------------------------------------------------------------------------- #
+def test_a_pathological_container_repr_is_bounded(tmp_path):
+    big = {f"kind-{index}": index for index in range(10_000)}
+    audit = audit_with(
+        gt_delivery_kinds=big,
+        delivery_consumption_summary=big,
+        graph_surface_receipt_present=True,
+        graph_surface_counts=big,
+        graph_projection_surface_hits=big,
+        evidence_router_admitted=1,
+        evidence_router_reasons=big,
+        verification_plan_evaluated=True,
+        verification_plan_decisions=[f"decision-{index}" for index in range(10_000)],
+    )
+
+    rendered = gt_audit.render_report([audit], tmp_path)
+
+    assert column_zero_commands(rendered) == []
+    # Every one of the six is cut, and each is cut to the SAME bound as every
+    # other field in this report.
+    assert rendered.count(ANNOTATION_TRUNCATION) >= 6
+    bounded = ANNOTATION_FIELD_LIMIT + len(ANNOTATION_TRUNCATION)
+    for name in ("GT delivery kinds", "GT delivery consumption",
+                 "Evidence router", "Verification plan"):
+        line = next(ln for ln in rendered.splitlines() if name in ln)
+        assert len(line) <= bounded + 100, (name, len(line))
+    # The ceiling is per FIELD, never per line - REVIEW-13 MEDIUM-1's rule,
+    # and the reason the first draft of this test was wrong at 600. The
+    # graph-receipt line carries TWO bounded containers (``surfaces=`` and
+    # ``hits=``) plus its host text, so it reaches ~1,142 characters and that
+    # is the correct answer: bounding the composed LINE instead would spend
+    # the budget on the first container and truncate the second away.
+    assert max(len(ln) for ln in rendered.splitlines()) <= 2 * bounded + 200

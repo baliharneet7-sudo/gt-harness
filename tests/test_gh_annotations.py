@@ -16,6 +16,9 @@ a verdict nothing produced.
 """
 from __future__ import annotations
 
+import io
+import sys
+
 import pytest
 
 from scripts.gh_annotations import (
@@ -25,6 +28,7 @@ from scripts.gh_annotations import (
     ANNOTATION_SEPARATOR_ALLOWANCE,
     ANNOTATION_TRUNCATION,
     MAX_ESCAPED_FIELD,
+    emit_line,
     gh_command,
     gh_command_escaped,
     gh_escape,
@@ -278,3 +282,94 @@ def test_the_separator_allowance_is_what_the_real_lines_need():
     assert ANNOTATION_SEPARATOR_ALLOWANCE >= len(
         "[GT][CAPABILITY][] required= evidence=" + "[GT][] task= phase= cause="
     )
+
+
+# --------------------------------------------------------------------------- #
+# emit_line: the other half of "a container's bytes must not end the run"
+#
+# The escapers above decide what a line MEANS to the runner. This decides what
+# it costs to WRITE. It lives here rather than in either caller for the reason
+# this module exists at all: REVIEW-15 grew the same routine privately in
+# scripts/gt_audit.py and scripts/diagnose_benchmark_run.py in one review, and
+# two copies of a safety routine is one copy that gets forgotten.
+# --------------------------------------------------------------------------- #
+_HOSTILE = "boundary  emoji \U0001f600 cjk 中文 accented na\xefve"
+
+
+def _cp1252_console() -> tuple[io.BytesIO, io.TextIOWrapper]:
+    """A console with a codepage that cannot hold most of the world."""
+    buffer = io.BytesIO()
+    return buffer, io.TextIOWrapper(buffer, encoding="cp1252", newline="\n")
+
+
+def test_emit_line_survives_a_console_that_cannot_spell_the_text():
+    """``print`` would raise UnicodeEncodeError here and take the run with it."""
+    buffer, console = _cp1252_console()
+
+    emit_line(_HOSTILE, console)
+    console.flush()
+
+    written = buffer.getvalue().decode("cp1252")
+    # Lossy only where the codepage genuinely has nothing: cp1252 HAS an
+    # i-diaeresis, so it survives, and what it lacks is readable rather than
+    # silently dropped.
+    assert "na\xefve" in written
+    assert "\\u4e2d\\u6587" in written
+    assert "\\U0001f600" in written
+    assert "\\u2028" in written
+    assert written.endswith("\n")
+
+
+def test_emit_line_leaves_a_line_the_console_can_hold_byte_identical():
+    """The downgrade must not touch text that was never at risk."""
+    buffer, console = _cp1252_console()
+
+    emit_line("[GT][CAPABILITY][DEGRADED] lsp_promotion evidence=na\xefve", console)
+    console.flush()
+
+    assert buffer.getvalue().decode("cp1252") == (
+        "[GT][CAPABILITY][DEGRADED] lsp_promotion evidence=na\xefve\n"
+    )
+
+
+def test_emit_line_writes_a_stream_with_no_encoding_through_untouched():
+    """io.StringIO and pytest's capture have no codepage to fail against.
+
+    Guessing one and downgrading against it would corrupt text that could
+    never have raised - so a stream without ``encoding`` is written as-is.
+    """
+    stream = io.StringIO()
+
+    emit_line(_HOSTILE, stream)
+
+    assert stream.getvalue() == _HOSTILE + "\n"
+
+
+def test_emit_line_resolves_the_default_stream_per_call(monkeypatch):
+    """A caller that wrapped stderr must get the wrapper, not import-time's."""
+    stream = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", stream)
+
+    emit_line("to stderr by default")
+
+    assert stream.getvalue() == "to stderr by default\n"
+
+
+def test_emit_line_adds_no_command_and_escapes_nothing():
+    """It PRINTS what it is given: composition is still the escapers' job.
+
+    This is what keeps the AST guard in tests/test_verify_run_receipts.py
+    counting the same commands after the move - ``emit_line`` owns no ``::``
+    literal and builds no line, so routing a print through it changes what a
+    module can survive, never what it says.
+    """
+    stream = io.StringIO()
+
+    emit_line(gh_command("error", "T", _INJECTION), stream)
+    emit_line("  - CAPABILITY lsp_promotion [DEGRADED]: fine", stream)
+
+    lines = stream.getvalue().split("\n")
+    assert [line for line in lines if line.startswith("::")] == [
+        gh_command("error", "T", _INJECTION)
+    ]
+    assert lines[1] == "  - CAPABILITY lsp_promotion [DEGRADED]: fine"

@@ -32,6 +32,8 @@ https://docs.github.com/actions/reference/workflow-commands-for-github-actions
 
 from __future__ import annotations
 
+import sys
+
 __all__ = [
     "ANNOTATION_FIELD_ALLOWANCE",
     "ANNOTATION_FIELD_LIMIT",
@@ -41,6 +43,7 @@ __all__ = [
     "MAX_ESCAPED_FIELD",
     "GH_MESSAGE_ESCAPES",
     "GH_PROPERTY_ESCAPES",
+    "emit_line",
     "gh_command",
     "gh_command_escaped",
     "gh_escape",
@@ -108,6 +111,60 @@ ANNOTATION_SEPARATOR_ALLOWANCE = 256
 ANNOTATION_LINE_LIMIT = (
     MAX_ESCAPED_FIELD * ANNOTATION_FIELD_ALLOWANCE + ANNOTATION_SEPARATOR_ALLOWANCE
 )
+
+
+def emit_line(line: str, stream: object = None) -> None:
+    """One human line to a console, on ANY codepage it cannot spell.
+
+    The counterpart to the escapers above, and here for the same reason they
+    are: this module already owns the rule that a CI widget must not be able
+    to lose a run over the bytes it read out of a container, and the escapers
+    only cover what such a line MEANS to the runner. What it costs to WRITE is
+    the other half.
+
+    Every caller of this module prints container-derived text - a capability's
+    ``evidence``, a diagnostic's ``cause``, a quoted transcript slice - to a
+    console whose codepage it does not choose. On cp1252, which is what a
+    local run against a downloaded artifact gets on Windows, a ``\u2028``, an
+    emoji or a CJK character raises UnicodeEncodeError out of ``print``; the
+    traceback escapes, every LATER row and annotation is lost and the process
+    exits 1 - and rc 1 is a real verdict in at least two callers, so a crash
+    must never be able to spell it. Same failure shape as REVIEW-14 HIGH-1: one
+    row's text ending the whole render.
+
+    It never raises on a codepage it cannot spell, which is the only failure
+    it undertakes to absorb. REVIEW-16 LOW-2: a closed stream, a broken pipe
+    or a full disk still raises, deliberately - those are conditions about
+    the DESTINATION, not about the bytes, and a writer that swallowed them
+    would report a run whose output nobody received.
+
+    The text is downgraded BEFORE the write rather than retried after a failed
+    one, because a partially written line would be duplicated by the retry.
+    The downgrade is lossy only where the console genuinely cannot hold the
+    character: cp1252 has an i-diaeresis, so it survives, and the ones it
+    lacks come out as readable ``\\uXXXX`` escapes.
+
+    ``stream`` is resolved PER CALL and defaults to ``sys.stderr`` - a caller
+    that wrapped or captured the stream (a test, a harness, a runner) must get
+    the wrapper, not whatever this module saw at import. A stream with no
+    ``encoding`` (io.StringIO, pytest's capture) is written through untouched:
+    it has no codepage to fail against, and downgrading against a guessed one
+    would corrupt text that was never at risk.
+    """
+    target = sys.stderr if stream is None else stream
+    encoding = getattr(target, "encoding", None)
+    if encoding:
+        errors = getattr(target, "errors", None) or "strict"
+        try:
+            line.encode(encoding, errors)
+        except (UnicodeEncodeError, LookupError, TypeError, ValueError):
+            try:
+                line = line.encode(encoding, "backslashreplace").decode(
+                    encoding, "replace"
+                )
+            except (LookupError, TypeError, ValueError):
+                line = line.encode("ascii", "backslashreplace").decode("ascii")
+    print(line, file=target)
 
 
 def gh_escape(value: object, *, is_property: bool = False) -> str:

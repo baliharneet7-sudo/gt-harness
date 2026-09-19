@@ -5,11 +5,29 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
+import re
 from pathlib import Path
 
+# Launched by path (python scripts/diagnose_benchmark_run.py) the repository
+# root is not on sys.path and neither gt_engine nor the shared annotation
+# builder can be imported; every workflow uses python -m, but the path form
+# must keep working too (review 14 MEDIUM-1, review 15 follow-up).
+if __package__ in (None, ""):
+    import sys as _sys
+
+    _REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
+    if _REPOSITORY_ROOT not in _sys.path:
+        _sys.path.insert(0, _REPOSITORY_ROOT)
+
 from gt_engine.run_diagnostics import diagnose_artifact_root
-from scripts.gh_annotations import gh_command, gh_command_escaped, gh_escape
+from scripts.gh_annotations import (
+    ANNOTATION_FIELD_LIMIT,
+    ANNOTATION_TRUNCATION,
+    emit_line,
+    gh_command,
+    gh_command_escaped,
+    gh_escape,
+)
 from scripts.gt_audit import annotated_capability_rows
 
 # REVIEW-12 MEDIUM. Every line this module prints to stderr lands in the same
@@ -210,15 +228,14 @@ def _annotate(kind: str, title: str, line: str) -> None:
     closed DiagnosticCode value or a literal, and the length is an integer.
     """
     try:
-        print(gh_command_escaped(kind, title, line), file=sys.stderr)
+        emit_line(gh_command_escaped(kind, title, line))
     except ValueError:
-        print(
+        emit_line(
             gh_command(
                 "error",
                 "Diagnostics renderer",
                 f"{title}: line could not be rendered ({len(line)} chars)",
-            ),
-            file=sys.stderr,
+            )
         )
 
 
@@ -226,6 +243,56 @@ def _lsp_annotation(row: dict) -> str:
     """`` [VERDICT: detail]`` for an annotated row, else ``""``."""
     verdict = str(row.get("lsp_no_op_verdict") or "")
     return f" [{verdict}: {row.get('lsp_no_op_detail')}]" if verdict else ""
+
+
+# REVIEW-15 MEDIUM: GITHUB_STEP_SUMMARY IS A TABLE ------------------------- #
+#
+# The escaping above is the RUNNER's syntax and stops at the runner. The step
+# summary is markdown, where a row ends at a newline and a cell ends at ``|``
+# - and both characters are legal inside a capability row's ``evidence``, a
+# diagnostics row's ``task_id`` and everything else this widget reads off an
+# artifact the model wrote inside its own container. A planted
+# ``broken |<LF>| dense_retrieval | WORKING | yes | yes | all good |`` closed
+# the real cell, ended the real row and added a SECOND row asserting that a
+# capability worked, in the one widget whose job is to say which did not.
+#
+# ``%0A`` would be wrong here (markdown does not decode it), so the treatment
+# is markdown's: the row separator becomes a space and the cell separator is
+# backslash-escaped. Same bound and same ASCII truncation marker as
+# gh_escape, from the same module, for the same reason - a model-writable
+# field is unbounded and one planted string otherwise buries the widget.
+#
+# Everything ``str.splitlines`` treats as a terminator is folded, not only
+# CR/LF: the summary file is read back by tooling that splits it, and a
+# renderer that stops one character short of its reader is the same hole one
+# layer up.
+_MD_ROW_BREAKS = re.compile(r"[\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
+def _md_cell(value: object) -> str:
+    """One artifact-derived markdown cell: one row, one cell, bounded.
+
+    The bound is applied to the RAW text and the escaping runs after it, so a
+    ``\\|`` can never be cut in half - a lone trailing backslash would escape
+    the pipe the RENDERER wrote and merge this cell into the next.
+
+    Host-computed literals stay raw - the column headers, ``yes``/``no``
+    and ``**NO**`` - because passing them through would make the diff lie
+    about which fields are the untrusted ones. The fingerprint IS treated
+    even though it is a host-computed digest today: it is read out of the
+    same mapping as the two fields beside it, and a cell that is safe only
+    because of what the producer currently puts in it is the next hole.
+    """
+    text = _MD_ROW_BREAKS.sub(" ", str(value))
+    if len(text) > ANNOTATION_FIELD_LIMIT:
+        text = text[:ANNOTATION_FIELD_LIMIT] + ANNOTATION_TRUNCATION
+    # Review 18: escape the backslash FIRST, or a container-written "\|" becomes
+    # an escaped backslash followed by a live pipe and a permissive renderer
+    # splits the row there. A backtick would close the code span the
+    # fingerprint is rendered in and backslash escapes are inert inside a
+    # code span, so it is replaced, not escaped. All after the bound.
+    text = text.replace("\\", "\\\\").replace("|", "\\|")
+    return text.replace("`", "'")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -252,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             f"phase={gh_escape(event.phase)} "
             f"cause={gh_escape(event.normalized_cause)}"
         )
-        print(line, file=sys.stderr)
+        emit_line(line)
         if os.environ.get("GITHUB_ACTIONS") == "true":
             annotation = "error" if event.severity == "ERROR" else "warning"
             _annotate(annotation, event.code.value, line)
@@ -297,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
             f"evidence={gh_escape(row.get('evidence'))}"
             f"{gh_escape(_lsp_annotation(row))}"
         )
-        print(line, file=sys.stderr)
+        emit_line(line)
         if os.environ.get("GITHUB_ACTIONS") == "true":
             severity = "error" if row.get("required") else "warning"
             _annotate(severity, "capability_not_working", line)
@@ -309,7 +376,8 @@ def main(argv: list[str] | None = None) -> int:
             "| Task | Primary | Fingerprint |", "|---|---|---|",
         ]
         lines.extend(
-            f"| {row['task_id']} | {row['primary_diagnostic']} | `{row['fingerprint'][:16]}` |"
+            f"| {_md_cell(row['task_id'])} | {_md_cell(row['primary_diagnostic'])} "
+            f"| `{_md_cell(row['fingerprint'][:16])}` |"
             for row in payload["tasks"]
         )
         if capabilities:
@@ -318,15 +386,23 @@ def main(argv: list[str] | None = None) -> int:
                 "| Capability | State | Required | Worked | Evidence |",
                 "|---|---|---|---|---|",
             ])
+            # The evidence and the verdict are bounded SEPARATELY, and the
+            # order matters: ``evidence`` is model-written and the
+            # ``[VERDICT: ...]`` after it is the harness's answer to "was
+            # promoting nothing right here?". One bound over the composed cell
+            # spends the budget on the container's bytes and cuts the verdict
+            # off - REVIEW-13 MEDIUM-1, in markdown this time.
             lines.extend(
-                f"| {row.get('capability')} | {row.get('state')} | "
+                f"| {_md_cell(row.get('capability'))} | {_md_cell(row.get('state'))} | "
                 f"{'yes' if row.get('required') else 'no'} | "
                 f"{_worked(row)} | "
-                f"{row.get('evidence')}{_lsp_annotation(row)} |"
+                f"{_md_cell(row.get('evidence'))}{_md_cell(_lsp_annotation(row))} |"
                 for row in capabilities
             )
             if degraded:
-                names = ", ".join(str(row.get("capability")) for row in degraded)
+                names = ", ".join(
+                    _md_cell(row.get("capability")) for row in degraded
+                )
                 lines.extend(["", f"**These did not work: {names}**"])
         with Path(summary_path).open("a", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")

@@ -3668,6 +3668,7 @@ _PATH_LAUNCHED_SCRIPTS = (
     "scripts/verify_run_receipts.py",
     "scripts/provider_preflight.py",
     "scripts/gt_task_visibility.py",
+    "scripts/diagnose_benchmark_run.py",
 )
 
 

@@ -110,7 +110,7 @@ from gt_engine.event_journal import (  # noqa: E402
 )
 from gt_engine.replay import build_iteration_replay  # noqa: E402
 from gt_engine.request_history import load_provider_request  # noqa: E402
-from scripts.gh_annotations import gh_escape  # noqa: E402
+from scripts.gh_annotations import emit_line, gh_escape  # noqa: E402
 from scripts.lsp_no_op import (  # noqa: E402
     EXPECTED,
     UNEXPECTED,
@@ -3106,6 +3106,38 @@ _REPORT_LINE_SPLIT = re.compile(
 )
 
 
+# What a leading ``::`` is rewritten to, and it is gh_escape's own spelling:
+# ``GH_PROPERTY_ESCAPES`` percent-encodes a colon as ``%3A`` in property mode.
+# REVIEW-16 HIGH-1. The first fix for REVIEW-15 DISPLACED such a line by one
+# space, which is a bet that actions/runner does not trim leading whitespace
+# before it parses - a bet that cannot be settled offline and does not need to
+# be taken. Rewriting the two colons removes the command from the line
+# STRUCTURALLY: there is nothing left for any parser at any indentation to
+# read, and the text still says what it said.
+_COMMAND_OPENER = "::"
+_COMMAND_OPENER_ESCAPED = "%3A%3A"
+
+
+def _no_leading_command(text: str) -> str:
+    """``text``, with a LEADING workflow-command opener spelled out instead.
+
+    Only the first pair after any leading blank or list marker: the report
+    is full of ``::`` - every ledger status reason, every ``a::b`` in a
+    quoted path - and none of those is a command.
+    """
+    # Review 17: the runner trims leading whitespace before it looks for the
+    # opener, and so does the test oracle - a space- or tab-displaced ``::``
+    # is still a command. Ask about the first non-whitespace characters and
+    # keep the lead, so an indented quote line stays indented.
+    # The strip set is the same one the test oracle uses: a lenient parser
+    # that trims blanks and list markers before looking for the opener.
+    stripped = text.lstrip(" \t[*")
+    if not stripped.startswith(_COMMAND_OPENER):
+        return text
+    lead = text[: len(text) - len(stripped)]
+    return lead + _COMMAND_OPENER_ESCAPED + stripped[len(_COMMAND_OPENER):]
+
+
 def _safe(value: object) -> str:
     """One artifact-derived field: single line, bounded, command-escaped.
 
@@ -3116,8 +3148,32 @@ def _safe(value: object) -> str:
     otherwise bury every line around it in the step log; the ``--json``
     receipt keeps the field whole, so nothing is lost, only the log line is
     bounded.
+
+    REVIEW-16 HIGH-1: ``gh_escape`` leaves ``:`` alone in message mode, on
+    purpose - a diagnostic line is mostly colons and escaping them would make
+    every annotation unreadable - so a field whose first two characters are
+    ``::`` comes back out of it unchanged. The rewrite is applied to EVERY
+    sanitised field rather than only to the three that sit at literal column
+    zero, because "column zero" is a question about the parser: a field one
+    indent in is at column zero for any reader that trims, and an indent is a
+    position, not a guarantee.
     """
-    return gh_escape(_REPORT_LINE_BREAKS.sub(" ", str(value)))
+    return _no_leading_command(
+        gh_escape(_REPORT_LINE_BREAKS.sub(" ", str(value)))
+    )
+
+
+def _safe_name(value: object) -> str:
+    """A field that lands at LITERAL column zero, with nothing in front of it.
+
+    Three sites: the table's ``task`` column, the per-task header, and the
+    paired table's name - all of them a ``task_name``, which comes off
+    ``result.json`` in the trial directory. They are named rather than left to
+    ``_safe`` because they are the ones REVIEW-16 HIGH-1 reproduced through
+    the CLI, and because a reader changing this renderer should be able to see
+    which interpolations have no prefix protecting them at all.
+    """
+    return _safe(value)
 
 
 def _safe_block(value: object, indent: str) -> list[str]:
@@ -3143,15 +3199,27 @@ def _no_column_zero(text: str) -> str:
     """The backstop: nothing this report emits may start a workflow command.
 
     Every free-text field above is sanitised at its own call site, which is
-    the fix. This is the guard, and it is deliberately last: the defect class
-    is a NEW interpolation added later without the call-site treatment, and a
-    guard that only covers the fields that exist today covers the wrong thing.
-    Host-written report text never begins with ``::``, so a line this has to
-    touch is by construction a field that escaped sanitising.
+    the fix; ``_safe`` and ``_safe_name`` already rewrite a leading opener, so
+    in a correct renderer this changes nothing. It is here for the defect
+    class rather than for today's fields: a NEW interpolation added later
+    without the call-site treatment, which is exactly how the three
+    column-zero sites got there.
+
+    REVIEW-16 LOW-3: this used to claim that host-written report text never
+    begins with ``::`` and that any line it touched was therefore a field that
+    escaped sanitising. The second half was false when it was written - the
+    task name reached column zero through ``_safe``, which does not touch
+    colons, so the guard was firing on the intended path and quietly making a
+    forged verdict one parser-behaviour away.
+
+    REVIEW-16 HIGH-1: and it fired by prefixing ONE SPACE, which moves the
+    command without removing it. Whether actions/runner trims before it parses
+    cannot be established offline, so the rewrite is structural instead - the
+    same ``%3A%3A`` the call sites use.
     """
     parts = _REPORT_LINE_SPLIT.split(text)
     return "".join(
-        " " + part if (index % 2 == 0 and part.startswith("::")) else part
+        _no_leading_command(part) if index % 2 == 0 else part
         for index, part in enumerate(parts)
     )
 
@@ -3175,7 +3243,7 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
             tok = f"{a.in_tokens or 0}/{a.out_tokens or 0}"
         er = None if a.error_rate is None else f"{a.error_rate:.0%}"
         gt_col = f"{a.gt_deliveries}L" if a.ledger_present else str(a.gt_deliveries)
-        out.append(_fmt(_safe(a.task_name), 34) + _fmt(a.verdict, 16)
+        out.append(_fmt(_safe_name(a.task_name), 34) + _fmt(a.verdict, 16)
                    + _fmt(a.stop_reason and _safe(a.stop_reason), 12)
                    + _fmt(a.iterations, 6) + _fmt(tok, 16) + _fmt(a.reward, 8)
                    + _fmt(gt_col, 5) + _fmt(er, 6))
@@ -3183,15 +3251,19 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
     out.append("gt column: deliveries ('NL' = N sealed rows from gt_ledger.jsonl = "
                "ledger truth; bare N = transcript heuristic, no ledger)")
     for a in audits:
-        out.append(f"\n{_safe(a.task_name)} [{a.verdict}]")
+        out.append(f"\n{_safe_name(a.task_name)} [{a.verdict}]")
         for r in a.verdict_reasons:
             out.append(f"  - {_safe(r)}")
         if a.gt_delivery_kinds:
-            out.append(f"  - GT delivery kinds: {a.gt_delivery_kinds}")
+            # REVIEW-16 LOW-1: the repr is single-LINE (it escapes the
+            # breaks inside its keys) but it was never BOUNDED - one key
+            # per kind the container named. _safe gives it the same
+            # ANNOTATION_FIELD_LIMIT every other field answers to.
+            out.append(f"  - GT delivery kinds: {_safe(a.gt_delivery_kinds)}")
         if a.delivery_consumption_summary:
             out.append(
                 "  - GT delivery consumption: "
-                f"{a.delivery_consumption_summary}"
+                f"{_safe(a.delivery_consumption_summary)}"
             )
         if a.gt_overhead_chars:
             src = "sealed (ledger)" if a.ledger_present else "observable"
@@ -3246,25 +3318,25 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
             out.append(
                 "  - Graph receipt: "
                 f"available={a.graph_available}, "
-                f"surfaces={a.graph_surface_counts}, "
+                f"surfaces={_safe(a.graph_surface_counts)}, "
                 "projection="
                 f"{a.graph_projection_file_count} files/"
                 f"{a.graph_projection_symbol_count} symbols/"
                 f"{a.graph_projection_node_count} nodes, "
-                f"hits={a.graph_projection_surface_hits}"
+                f"hits={_safe(a.graph_projection_surface_hits)}"
             )
         if a.evidence_router_admitted or a.evidence_router_suppressed:
             out.append(
                 "  - Evidence router: "
                 f"admitted={a.evidence_router_admitted}, "
                 f"suppressed={a.evidence_router_suppressed}, "
-                f"reasons={a.evidence_router_reasons}"
+                f"reasons={_safe(a.evidence_router_reasons)}"
             )
         if a.verification_plan_evaluated:
             out.append(
                 "  - Verification plan: "
                 f"applied={a.verification_plan_applied}, "
-                f"decisions={a.verification_plan_decisions}"
+                f"decisions={_safe(a.verification_plan_decisions)}"
             )
         # Capability rows that did not report WORKING, plus any row carrying a
         # no-op verdict. A capability that worked needs no line here; one that
@@ -3381,51 +3453,18 @@ def render_paired(gt: list[TaskAudit], base: list[TaskAudit]) -> str:
         tb = f"{b.in_tokens or 0}/{b.out_tokens or 0}" if b else None
         tg = f"{g.in_tokens or 0}/{g.out_tokens or 0}" if g else None
         it = f"{b.iterations if b else '-'}/{g.iterations if g else '-'}"
-        out.append(_fmt(_safe(name), 34) + _fmt(rb, 9) + _fmt(rg, 9) + _fmt(delta, 6)
+        out.append(_fmt(_safe_name(name), 34) + _fmt(rb, 9) + _fmt(rg, 9) + _fmt(delta, 6)
                    + _fmt(tb, 14) + _fmt(tg, 14) + _fmt(it, 9)
                    + _fmt(g.gt_deliveries if g else None, 9) + flag)
     out.append("-" * 110)
     return _no_column_zero("\n".join(out))
 
 
-def _stream_safe(text: str, stream: object) -> str:
-    """``text``, downgraded to what THIS stream can actually encode.
-
-    ``main`` reconfigures stdout/stderr to UTF-8 where it can, but a stream
-    that has been wrapped or captured has no ``reconfigure`` and keeps the
-    console's codepage. The report quotes arbitrary container bytes, so on a
-    cp1252 console ``print`` raises UnicodeEncodeError, the traceback escapes
-    and the process exits 1 - and rc 1 is a real verdict here (a RED task), so
-    a crash must never be able to spell it. The text is downgraded BEFORE the
-    write rather than retried after one, because a partially written line
-    would be duplicated by the retry.
-    """
-    encoding = getattr(stream, "encoding", None)
-    if not encoding:
-        return text
-    errors = getattr(stream, "errors", None) or "strict"
-    try:
-        text.encode(encoding, errors)
-        return text
-    except (UnicodeEncodeError, LookupError, TypeError, ValueError):
-        pass
-    try:
-        return text.encode(encoding, "backslashreplace").decode(encoding, "replace")
-    except (LookupError, TypeError, ValueError):
-        return text.encode("ascii", "backslashreplace").decode("ascii")
-
-
-def _emit(text: str, stream=None) -> None:
-    """The only place this tool writes a report to a console."""
-    stream = sys.stdout if stream is None else stream
-    print(_stream_safe(text, stream), file=stream)
-
-
 def main(argv: list[str] | None = None) -> int:
     # The report can quote arbitrary transcript bytes; never let a cp1252
     # console kill the auditor (the exact failure class it exists to catch).
     # A stream without reconfigure - wrapped, captured, already detached -
-    # keeps its codepage, which is what _stream_safe is for.
+    # keeps its codepage, which is what gh_annotations.emit_line is for.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             try:
@@ -3448,19 +3487,21 @@ def main(argv: list[str] | None = None) -> int:
 
     run_dir = Path(args.run_dir)
     if not run_dir.is_dir():
-        _emit(f"gt_audit: not a directory: {run_dir}", sys.stderr)
+        emit_line(f"gt_audit: not a directory: {run_dir}", sys.stderr)
         return 2
     audits = audit_run(run_dir)
-    _emit(render_report(audits, run_dir))
+    # stdout, explicitly: this is the report the workflows capture, and
+    # emit_line defaults to stderr like every other caller.
+    emit_line(render_report(audits, run_dir), sys.stdout)
 
     base_audits: list[TaskAudit] | None = None
     if args.baseline:
         base_dir = Path(args.baseline)
         if not base_dir.is_dir():
-            _emit(f"gt_audit: not a directory: {base_dir}", sys.stderr)
+            emit_line(f"gt_audit: not a directory: {base_dir}", sys.stderr)
             return 2
         base_audits = audit_run(base_dir)
-        _emit(render_paired(audits, base_audits))
+        emit_line(render_paired(audits, base_audits), sys.stdout)
 
     if args.json_out:
         payload: dict = {

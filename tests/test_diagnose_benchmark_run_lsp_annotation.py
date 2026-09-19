@@ -12,10 +12,13 @@ and run_diagnostics' to decide, and stay byte-identical either way.
 """
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 
 import scripts.diagnose_benchmark_run as diagnose
+from scripts.gh_annotations import ANNOTATION_FIELD_LIMIT, ANNOTATION_TRUNCATION
 
 _NO_OP_EVIDENCE = "terminal_no_op:nothing_promotable"
 
@@ -86,6 +89,7 @@ def _run(
     diagnostics: list | None = None,
     *,
     github_actions: bool = False,
+    tasks: list[dict] | None = None,
 ) -> tuple[str, str]:
     """Render one report; return (stderr, step summary markdown).
 
@@ -93,9 +97,14 @@ def _run(
     widget emits workflow-command lines is the thing under test in the
     injection cases below, and inheriting the runner's own value would make
     every other case here mean something different on CI than on a laptop.
+
+    ``tasks`` overrides the task table, which is derived from ``rows``
+    otherwise. The task table carries its own artifact-derived fields
+    (``task_id``, ``primary_diagnostic``) and they need to be plantable
+    independently of a capability row.
     """
     payload = {
-        "tasks": [
+        "tasks": tasks if tasks is not None else [
             {"task_id": row["task_id"], "primary_diagnostic": "none",
              "fingerprint": "a" * 40}
             for row in rows
@@ -803,3 +812,274 @@ def test_the_fallback_annotation_is_fixed_text_and_one_line(
     assert "hunter2" not in commands[0]
     assert "stop-commands" not in commands[0]
     assert not any(line.startswith("::stop-commands") for line in stderr.split("\n"))
+
+
+# --- REVIEW-15 MEDIUM: the step summary is a TABLE, and a cell can forge a row
+#
+# ``GITHUB_STEP_SUMMARY`` is markdown, and a markdown table row ends at a
+# newline and splits on ``|``. Both of those characters are legal inside a
+# capability row's ``evidence`` - written inside the container the model
+# controls - and the renderer interpolated the field straight into the row. So
+# a planted ``broken |<LF>| dense_retrieval | WORKING | yes | yes | all good |``
+# closed the real cell, ended the real row and wrote a SECOND row claiming a
+# capability worked, in a widget whose whole job is to say which capabilities
+# did not. The escaping the stderr lines got (REVIEW-11/12) does not apply
+# here: ``%0A`` is the RUNNER's syntax, not markdown's.
+_MD_INJECTION = "broken |\n| dense_retrieval | WORKING | yes | yes | all good |"
+
+# A cell boundary is an UNESCAPED pipe. Splitting on every ``|`` would count
+# the escaped ones as boundaries and report the forged row as a wide row
+# instead of as a contained cell - which is the difference under test.
+def _split_row(line: str) -> list[str]:
+    """Split a table row on pipes that are NOT escaped, counting backslashes.
+
+    Review 18: a lookbehind for one backslash scores ``\\|`` (an escaped
+    backslash followed by a live pipe) as escaped, which is exactly the
+    breakout a permissive renderer performs. Count the run of backslashes
+    before each pipe: an even run leaves the pipe live.
+    """
+    cells: list[str] = []
+    current: list[str] = []
+    run = 0
+    for ch in line:
+        if ch == "\\":
+            run += 1
+            current.append(ch)
+            continue
+        if ch == "|" and run % 2 == 0:
+            cells.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+        run = 0
+    cells.append("".join(current))
+    return cells
+
+_CAPABILITY_HEADER = "| Capability | State | Required | Worked | Evidence |"
+_TASK_HEADER = "| Task | Primary | Fingerprint |"
+
+
+def _table(summary: str, header: str) -> list[list[str]]:
+    """The data rows under ``header``, each split into its cells."""
+    lines = summary.split("\n")
+    start = lines.index(header)
+    rows: list[list[str]] = []
+    for line in lines[start + 2:]:  # +1 is the |---|---| separator
+        if not line.startswith("|"):
+            break
+        rows.append([cell.strip() for cell in _split_row(line)[1:-1]])
+    return rows
+
+
+def _unescaped(cell: str) -> str:
+    """The cell's text as a reader sees it rendered."""
+    return cell.replace("\\|", "|").replace("\\\\", "\\")
+
+
+def test_a_planted_evidence_cell_cannot_forge_a_capability_row(
+    tmp_path, monkeypatch, capsys
+):
+    """The forged row must land INSIDE one cell, as text, and nowhere else."""
+    rows = [_capability_row("t", evidence=_MD_INJECTION), _working_row("t")]
+
+    _, summary = _run(tmp_path, monkeypatch, capsys, rows)
+
+    table = _table(summary, _CAPABILITY_HEADER)
+    assert len(table) == 2, table
+    assert all(len(row) == 5 for row in table), table
+    planted, honest = table
+    # The honest DEGRADED row is intact - state, columns and all.
+    assert planted[:4] == ["lsp_promotion", "DEGRADED", "yes", "**NO**"]
+    assert _unescaped(planted[4]).startswith("broken |")
+    assert "dense_retrieval | WORKING | yes | yes | all good" in _unescaped(planted[4])
+    # And the dense_retrieval row is the one the producer sealed, not the one
+    # the payload tried to write.
+    assert honest == [
+        "dense_retrieval", "WORKING", "yes", "yes", "dense_index_ready_query_ready",
+    ]
+
+
+def test_a_planted_capability_name_or_state_cannot_forge_a_row(
+    tmp_path, monkeypatch, capsys
+):
+    """``capability`` and ``state`` come off the same container-written row."""
+    rows = [_capability_row("t", capability=_MD_INJECTION, state=_MD_INJECTION)]
+
+    _, summary = _run(tmp_path, monkeypatch, capsys, rows)
+
+    table = _table(summary, _CAPABILITY_HEADER)
+    assert len(table) == 1, table
+    assert len(table[0]) == 5, table[0]
+
+
+def test_a_planted_task_id_or_diagnostic_cannot_forge_a_task_row(
+    tmp_path, monkeypatch, capsys
+):
+    """The task table interpolates two artifact-derived fields of its own."""
+    tasks = [
+        {"task_id": _MD_INJECTION, "primary_diagnostic": _MD_INJECTION,
+         "fingerprint": "a" * 40},
+    ]
+
+    _, summary = _run(tmp_path, monkeypatch, capsys, [], tasks=tasks)
+
+    table = _table(summary, _TASK_HEADER)
+    assert len(table) == 1, table
+    assert len(table[0]) == 3, table[0]
+    assert "dense_retrieval | WORKING" in _unescaped(table[0][0])
+
+
+def test_the_did_not_work_callout_cannot_forge_a_row(tmp_path, monkeypatch, capsys):
+    """The bold call-out names capabilities, and the name is model-written."""
+    rows = [_capability_row("t", capability=_MD_INJECTION)]
+
+    _, summary = _run(tmp_path, monkeypatch, capsys, rows)
+
+    callout = next(line for line in summary.split("\n")
+                   if line.startswith("**These did not work:"))
+    assert callout.endswith("**")
+    assert "dense_retrieval" in callout
+
+
+def test_a_five_thousand_character_evidence_cell_is_bounded(
+    tmp_path, monkeypatch, capsys
+):
+    """An unbounded cell buries the whole widget; the JSON keeps it whole."""
+    rows = [_capability_row("t", evidence="A" * 5000)]
+
+    _, summary = _run(tmp_path, monkeypatch, capsys, rows)
+
+    cell = _table(summary, _CAPABILITY_HEADER)[0][4]
+    assert ANNOTATION_TRUNCATION in cell
+    assert len(cell) < ANNOTATION_FIELD_LIMIT + 100
+
+
+def test_the_host_verdict_survives_a_maximal_evidence_cell(
+    tmp_path, monkeypatch, capsys
+):
+    """REVIEW-13's rule again, in markdown: bound each field, never the cell.
+
+    ``evidence`` is model-written and the ``[VERDICT: ...]`` that follows it is
+    the harness's answer to "was promoting nothing right here?". A single bound
+    over the composed cell spends the budget on the container's bytes and cuts
+    the verdict off - the one part of the cell the container cannot forge.
+    """
+    _plant_task(tmp_path, "t", [{
+        "schema": "gt.lsp_promotion_task.v1",
+        "status": "no_op",
+        "languages_promotable": ["rust"],
+        "languages_attempted": ["rust"],
+        "languages_completed": [],
+        "languages_unavailable": [],
+    }])
+    rows = [_capability_row("t", evidence=_NO_OP_EVIDENCE + "x" * 5000)]
+
+    _, summary = _run(tmp_path, monkeypatch, capsys, rows)
+
+    cell = _table(summary, _CAPABILITY_HEADER)[0][4]
+    assert "[UNEXPECTED:" in cell
+    assert "rust" in cell
+
+
+# --- REVIEW-15 LOW: a console that cannot spell the evidence ----------------
+#
+# The human ``[GT]`` lines go to stderr BEFORE the annotations and before the
+# summary is written. On a cp1252 console - which is what a local run against
+# a downloaded artifact gets on Windows - a `` ``, an emoji or a CJK
+# character in ``evidence`` raises UnicodeEncodeError out of ``print``, and the
+# traceback takes every later row, every annotation and the whole summary with
+# it. The bytes come from the container, so the console's codepage is not
+# something this tool gets to assume.
+_HOSTILE = "boundary  emoji \U0001f600 cjk 中文 accented na\xefve"
+
+
+def _run_on_a_cp1252_console(tmp_path, monkeypatch, rows) -> tuple[str, str]:
+    """``main`` with stderr wrapped in a console that cannot hold the text."""
+    payload = {
+        "tasks": [{"task_id": row["task_id"], "primary_diagnostic": "none",
+                   "fingerprint": "a" * 40} for row in rows],
+        "capabilities": rows,
+    }
+
+    class _Report:
+        diagnostics: list = []
+        exit_code = 0
+
+        def to_mapping(self):
+            return payload
+
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(diagnose, "diagnose_artifact_root", lambda *a, **k: _Report())
+    buffer = io.BytesIO()
+    console = io.TextIOWrapper(buffer, encoding="cp1252", newline="\n")
+    monkeypatch.setattr(sys, "stderr", console)
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+
+    assert diagnose.main(["--root", str(tmp_path)]) == 0
+
+    console.flush()
+    return (buffer.getvalue().decode("cp1252", "replace"),
+            summary.read_text(encoding="utf-8"))
+
+
+def test_a_cp1252_console_loses_no_row_and_no_summary(tmp_path, monkeypatch):
+    rows = [
+        _capability_row("t", capability=f"cap{index}", evidence=_HOSTILE)
+        for index in range(4)
+    ]
+
+    stderr, summary = _run_on_a_cp1252_console(tmp_path, monkeypatch, rows)
+
+    # Four human lines, four annotations, and the summary that follows them.
+    # Counted by LINE START: the annotation carries the human line as its
+    # message, so a substring count sees every row twice.
+    human = [line for line in stderr.split("\n")
+             if line.startswith("[GT][CAPABILITY][DEGRADED]")]
+    assert len(human) == 4, stderr
+    assert len(_commands(stderr)) == 4, stderr
+    assert "## GroundTruth diagnostic summary" in summary
+    assert len(_table(summary, _CAPABILITY_HEADER)) == 4
+    # The downgrade is lossy only where the console genuinely cannot spell
+    # the character: cp1252 HAS an i-diaeresis, so it survives, and the ones
+    # it lacks come out as readable escapes rather than as a dead process.
+    assert "na\xefve" in human[0]
+    assert "\\u4e2d" in human[0] and "\\U0001f600" in human[0]
+
+
+def test_a_cp1252_console_still_refuses_the_workflow_command_payload(
+    tmp_path, monkeypatch
+):
+    """The downgrade must not re-open REVIEW-11: still one line per row."""
+    rows = [_capability_row("t", evidence=_HOSTILE + _INJECTION)]
+
+    stderr, _ = _run_on_a_cp1252_console(tmp_path, monkeypatch, rows)
+
+    assert len(_commands(stderr)) == 1, stderr
+    assert not any(line.startswith("::stop-commands") for line in stderr.split("\n"))
+
+
+def test_an_escaped_pipe_in_a_cell_cannot_free_the_next_pipe(tmp_path, monkeypatch, capsys):
+    """Review 18: a written backslash-pipe must not become an escaped backslash
+    followed by a LIVE pipe. The backslash is escaped first, so the Worked
+    column keeps the host verdict whichever GFM implementation renders it."""
+    payload = "dense_retrieval" + "\\|WORKING\\|yes\\|yes"
+    rows = [_capability_row("t", evidence=payload), _working_row("t")]
+
+    _, summary = _run(tmp_path, monkeypatch, capsys, rows)
+
+    table = _table(summary, _CAPABILITY_HEADER)
+    assert len(table) == 2, table
+    planted, honest = table
+    assert planted[:4] == ["lsp_promotion", "DEGRADED", "yes", "**NO**"], planted
+    assert _unescaped(planted[4]).startswith(payload), planted[4]
+    assert honest[0] == "dense_retrieval"
+
+
+def test_a_backtick_cannot_close_the_fingerprint_code_span():
+    """Backslash escapes are inert inside a code span, so a backtick is
+    replaced, not escaped (review 18)."""
+    cell = diagnose._md_cell("`aaaaaaaa`[x](ht")
+    assert "`" not in cell
+    assert cell.startswith("'aaaaaaaa'")
