@@ -6,7 +6,15 @@ free of API keys, account emails, project IDs, and other credentials.
 
 ## Fixed experiment contract
 
-- Model: `meta/muse-spark-1.2-contributor` through OpenRouter
+- Model (current, 2026-09-19): `deepseek/deepseek-v4-flash-0731`, provider
+  `deepinfra` only, **fp8**, $0.06/M input and $0.18/M output. Single source
+  of truth `config/benchmark_model.v1.json`; route manifest
+  `config/provider_route_deepseek_v4_flash_0731_fp8.v1.json`. The `relace`
+  route that preceded it served fp4 - a quantization confound against the
+  fp8 GT-off baseline - and the preflight now refuses any served build
+  whose quantization is not fp8. The paragraph below is the earlier muse
+  contract, kept as history.
+- Model (history): `meta/muse-spark-1.2-contributor` through OpenRouter
   (`https://openrouter.ai/api/v1`), provider-pinned to the `meta` tag,
   $0.10/M input and $0.20/M output on a 1,048,576-token context.
   **1.2 specifically, not 1.3**: `miniswe_gt_run._model_and_kwargs` applies
@@ -60,7 +68,7 @@ free of API keys, account emails, project IDs, and other credentials.
 
 For each benchmark, report exactly:
 
-`Model: meta/muse-spark-1.2-contributor | Tasks completed: N | Tasks left: N | Tasks success: N | Tasks failed (incorrect): N | Tasks failed (infrastructure): N`
+`Model: deepseek/deepseek-v4-flash-0731 | Tasks completed: N | Tasks left: N | Tasks success: N | Tasks failed (incorrect): N | Tasks failed (infrastructure): N`
 
 Only an official verifier result counts as completed. An incorrect patch is a
 graded failure. Missing setup, image, provider, parser, verifier, or artifact
@@ -84,7 +92,10 @@ new series identifier.
 - TB2 now sets both `OPENAI_API_KEY` and `OPENROUTER_API_KEY` from `secrets.OPENROUTER_NEW` in its plan and task environments, matching the proven SWE-Live route.
 - The TB2 infrastructure count exceeded five in this first series, so that series is closed. The Snowflake hashes are now bound in both plan and task jobs. The next dispatch starts a fresh TB2 series with infrastructure count 0.
 - The planner list is now limited to source-compatible central-agent, progress, provider-preflight, budget, and outcome tests in `.github/workflows/tb2_miniswe_engine.yml`. Push this fix to both benchmark accounts before retrying TB2.
-- Retry with the exact branch, model `meta/muse-spark-1.2-contributor`, `parallel=20`, `arm=certified_full`, and the documented smoke task list.
+- Retry (superseded 2026-09-19): the model is now `deepseek/deepseek-v4-flash-0731`
+  on `deepinfra` fp8, and the first paid dispatch is a 2-3 task `cohort_stage:
+  subset`, not p20 - see the dispatch runbook in
+  `docs/benchmarks/gt_hardening_rsi_2026-09-18.md` section 8.
 
 ### TB2 root cause, corrected 2026-09-17
 
@@ -232,6 +243,11 @@ latest artifact manifests. Do not ask the user to restate the model, source
 commit, verifier, parallelism, or failure policy.
 
 ## Safe dispatch sequence
+
+Superseded on 2026-09-19 by the runbook in
+`docs/benchmarks/gt_hardening_rsi_2026-09-18.md` section 8 (provider-free
+product workflow first, then a 2-3 task TB2 subset, then the smoke). The
+steps below are the original sequence and still describe the SWE-Live gate.
 
 1. Run provider-free readiness and exact-source verification.
 2. Run one gate task for SWE-Live. Release the remaining four only when the gate has official grading, PASS attestation, diagnostic exit 0, and all required capabilities WORKING.

@@ -1,400 +1,361 @@
-# GT harness hardening — RSI campaign, 2026-09-18
+# GT harness hardening — the complete record (2026-09-18 → 2026-09-19)
 
-Single tracking document for the offline hardening pass that followed the
-2026-09-17 smokes. Everything here was done with mocks, stubs and copies of
-already-downloaded artifacts: **no provider call, no GitHub dispatch, no
-Docker, zero spend.** Linear: HAR-88 (this document is its body; the file is
-the source of truth).
+**Verdict: offline is done; the harness is ready for online.** Every claim in
+this document was proven with mocks, stubs, real-artifact copies and fresh
+clones — **no provider call, no GitHub dispatch, no Docker, zero spend.**
+Nothing runs online until the user authorises spend.
 
-Worktree `D:\w\t`, branch `codex/tb2-gt-union-921bec20`, base commit
-`a03ad260`. The campaign branch on GitHub is
-`baliharneet7-sudo/gt-harness@codex/gt-921bec20-union-smokes`.
+Ticket: **HAR-88** (`done_and_dusted`) mirrors this file; this file is the
+source of truth. Worktree `D:\w\t`, branch `codex/tb2-gt-union-921bec20`,
+pushed as `codex/gt-921bec20-union-smokes` on remotes `baliharneet7` and
+`fork`. Base commit `a03ad260`. Delta through `8272fce9`: 91 files,
++21,042 / −335.
 
-## Rules that governed the work
+---
 
-1. **Pinned source objects were never edited in campaign 1**: `gt_engine/`,
-   `gt_harness/`, `eval/`, `vendor/`, `nano/`, `gt_finalstand/`,
-   `pyproject.toml`, `conftest.py`; `gt_engine` stayed tree `22daf78b...`
-   through commit `07a16e58`. **Campaign 2 re-pinned `gt_engine`** by the
-   user's decision: commit `89d5494d` edits `gt_engine/indexer.py` and
-   `gt_engine/attribution.py` only; commit `88fc821c` sets the manifest's
-   `source_object_ids.gt_engine` to `9d987079019f523035d7e276a551952e2048566a`,
-   keeps `gt_source_commit` at `921bec20` (import provenance of the seven
-   unchanged objects) and records `gt_source_patch_commit = 89d5494d`.
-2. **No GT-off run, ever** (CLAUDE.md). Step limit stays 100, the frozen
-   baseline's value.
-3. **Every fix is TDD**: failing test first, then the fix, both outputs shown
-   by the implementing agent.
-4. **Every round is reviewed adversarially** by a separate Opus reviewer that
-   reproduces findings on copies of real artifact trees
-   (`.tmp-swelive-35249057348`, `.tmp-swelive-35241999929`) rather than
-   reading diffs. Exit criterion: a review with nothing above LOW.
-5. Workflow YAML is CRLF; edits were byte-level. Whole-file rewrites are
-   defects.
+## 1. What this was
 
-## Method
+After roughly $700 and eight months without a benchmark result, and after
+the 2026-09-17 smokes died on infrastructure, the user redirected the work:
+find the gaps in GT, fix them with Opus agents, review adversarially,
+iterate until nothing above LOW remains, and prove everything offline. The
+harness had to stop being able to report a false pass, a false model, a
+false quantization, or a silently shrunk task cohort — and had to stop
+losing graded work to its own infrastructure.
 
-Orchestrator (Fable 5.1) → two Opus fix agents per round on disjoint files →
-full pytest suite → Opus adversarial review → next round. Nine rounds.
+## 2. Method
 
-| Round | Review verdict | Headline |
-|---|---|---|
-| 1 | 1 CRITICAL | attestation exact set-equality vs 8 new preflight fields |
-| 2 | 1 CRITICAL + 4 HIGH | verifier step pointed one level above Pier receipts |
-| 3 | 3 HIGH | phantom `*_count` keys; unbounded rglob; test resolved `$root` itself |
-| 4 | 2 HIGH | `except OSError` missed `UnicodeDecodeError`; `_trial_roots` expanded a checkout |
-| 5 | 1 HIGH | `_inside_a_trial` parent-NAME rule rejected depth-2 SWE-bench trials |
-| 6 | 2 HIGH + 1 MEDIUM | crashed check → rc 0 (false green); `NaN` crashes `_int`; joiner ate `#` lines |
-| 7 | 1 HIGH + 1 MEDIUM + 4 LOW | bare trial dir counted as resolved → rc 0; joiner not BuildKit-faithful |
-| 8 | 0 HIGH, 4 MEDIUM + 4 LOW | corrupt receipt misnamed; trial-dir mode; ONBUILD heredoc; CI coverage hole |
-| 9 | **APPROVE — 0 C / 0 H / 0 M / 3 LOW** | merge criterion met |
+- **Orchestrator** (Fable 5.1) → per round, two to four **Opus fix agents**
+  on disjoint files → full pytest suite → **Opus adversarial reviewer** who
+  reproduces findings on copies of real artifact trees
+  (`.tmp-swelive-35249057348`, `.tmp-swelive-35241999929`,
+  `.tmp-swelive-35238155998`, the `.research/` attribution traces) rather
+  than reading diffs → next round.
+- **Exit criterion per campaign:** a review reporting nothing above LOW.
+- **TDD everywhere:** failing test first, fix, both outputs shown.
+- **Pinned source objects** (`gt_engine/`, `gt_harness/`, `eval/`,
+  `vendor/`, `nano/`, `gt_finalstand/`, `pyproject.toml`, `conftest.py`)
+  were untouched in campaign 1; campaign 2 edited **only**
+  `gt_engine/indexer.py` and `gt_engine/attribution.py` by the user's
+  explicit decision and re-pinned the manifest.
+- Nineteen reviews in total. Approvals: 9 (campaign 1), 12 (campaign 2
+  round 3), 19 (campaign 2 round 5). Every commit reviewed before push
+  except one docs commit that swept in staged code (§9).
 
-After review 9 the orchestrator closed two of its three LOWs directly (see
-"Closed after review 9").
+## 3. Commits, oldest first
 
-## What was fixed
+| SHA | What |
+|---|---|
+| `07a16e58` | Campaign 1: receipt verifier, fp8 route + funds preflight, BuildKit-faithful planner exclusion, type-based terminal classifier, LSP no-op annotation, reporting tools. |
+| `4c7eaf81` | Record. |
+| `89d5494d` | Campaign 2 rounds 1–3: cgroup-true index headroom, honest attribution, gradable containment loss, product workflow restored with its shipped content, workflow set closed. |
+| `88fc821c` | Manifest re-pin: `source_object_ids.gt_engine` = `9d987079019f523035d7e276a551952e2048566a`; `gt_source_commit` stays `921bec20`; `gt_source_patch_commit` = `89d5494d`. |
+| `e023467f` | Record + handoff. |
+| `f28cdf99` | Round 4: one escaper for every workflow-command line (`scripts/gh_annotations.py`), bounded per field, guarded module set discovered by walk. |
+| `99ebf5c5` | Docs commit that **also carries** the first `gt_audit.py` sanitisation pass (staged by an agent when the commit ran; see §9). |
+| `604a6289` | Record correction for `99ebf5c5`. |
+| `1a0d1084` | Round 5: `gt_audit.py` report and diagnostics summary cannot carry a workflow command or a forged table row; shared `emit_line`; diagnose path-launchable. |
+| `f089cd2e` | Record. |
+| `07659df3` | Lint on the last three touched test files. |
+| `bb0736f6` | **Readiness fix found by the final check-up:** product workflow fetches the fixture commits through `fixtures/*` tags before pinning them by SHA. |
+| `15245280`, `8272fce9` | Record of the final check-up and the definitive result. |
 
-### Provider route and spend gate (`scripts/provider_preflight.py`, `config/provider_route*.json`, paid workflows)
+Tags on both campaign remotes, **never to be deleted**:
+`fixtures/har41-e56c7ef1` → `e56c7ef17eaffee36c80ff4dde4f0cd3991c4dcd`,
+`fixtures/har64-7bbbc9d0` → `7bbbc9d0b7f02f8cdaab79ad82ee86884b738eb5`.
 
-- Route pinned to `deepseek/deepseek-v4-flash-0731` on `deepinfra` only
-  (fp8, $0.06/M in, $0.18/M out). The earlier `relace` route was fp4 — a
+## 4. What changed, by area
+
+### 4.1 Model, provider route, spend gate
+- Model single source of truth `config/benchmark_model.v1.json`:
+  `deepseek/deepseek-v4-flash-0731`, provider `deepinfra` only, **fp8**,
+  $0.06/M in, $0.18/M out. The earlier `relace` route served **fp4** — a
   quantization confound against the fp8 baseline
-  (`fp_a18b46594c_prod0820_fp8_kvcache_20260402`).
-- `expected_quantization` fail-closed (`provider_quantization_mismatch`);
-  `served_endpoint` / `fingerprint_available` recorded; witnesses
-  `served_build_unverified`, `served_quantization_unverified`.
-- Funds-sufficiency preflight: `--expected-tasks` (wired from the planner's
-  post-exclusion `task_count`), per-task token assumptions, safety factor;
-  `funds_verdict ∈ {sufficient, insufficient, unbounded_key, pricing_unavailable}`.
-  Balance privacy via coarse `funds_headroom_bucket` (`lt_1x … ge_10x`), not a
-  ratio (a ratio was invertible to the balance).
-- `PLANNED_TASK_COUNT` assertion in every paid workflow (`::error` +
-  `SystemExit(1)` on mismatch).
-- Model single source of truth: `config/benchmark_model.v1.json`; all seven
-  consumers repinned and pinned by tests.
+  (`fp_a18b46594c_prod0820_fp8_kvcache_20260402`). All seven consumers of
+  the model string are repinned and pinned by tests.
+- `scripts/provider_preflight.py`: `expected_quantization` fails closed
+  (`provider_quantization_mismatch`); `served_endpoint`,
+  `fingerprint_available`, witnesses `served_build_unverified` /
+  `served_quantization_unverified`; **funds-sufficiency** gate sized by
+  the planner's post-exclusion `task_count` with a coarse
+  `funds_headroom_bucket` (a ratio was invertible to the balance).
+  `PLANNED_TASK_COUNT` assertion in every paid workflow.
+- `scripts/attest_deepswe.py`: exact set-equality with the preflight
+  receipt plus a producer→consumer JOIN test; bound errors for funds,
+  expected-tasks and quantization mismatches.
 
-### Attestation (`scripts/attest_deepswe.py`)
-
-- `PROVIDER_GATE_FIELDS` exact set-equality with the preflight receipt, plus
-  a producer→consumer JOIN test so a new preflight field cannot silently
-  desync.
-- Bound errors: `provider_gate_funds_insufficient`,
-  `provider_gate_funds_verdict_missing`, `provider_gate_expected_tasks_*`,
-  `provider_gate_quantization_mismatch`.
-
-### Terminal classification (`scripts/miniswe_gt_run.py`, classifier region only)
-
+### 4.2 Terminal classification (`scripts/miniswe_gt_run.py`)
 - Terminal chosen by exception **type** (MRO walk gated on the
-  litellm/openai module root), not by substrings in messages. The `"status"`
-  substring match that graded a git failure as `provider_failed` is gone.
-- `OSError`/`SubprocessError` → `internal_error`; `Submitted` gated on the
-  `minisweagent` root; `TERMINAL_EXIT_CODES["submitted"] = 0`.
+  litellm/openai module root), never by message substrings. The `"status"`
+  substring that graded a git failure as `provider_failed` is gone.
 - Patch-export failure is promoted to the run's terminal only when a
-  submission was claimed and the earned terminal is not in
-  `_NON_SUBMITTED_TERMINALS` (`budget_exhausted` keeps its exit 0).
+  submission was claimed; `budget_exhausted` keeps exit 0.
+- **Containment policy** (campaign 2): `command_descendant_receipt_missing`
+  and `command_descendants_not_reaped` used to raise inside a `finally`,
+  skipping publish and exiting 5 so harbor errored the trial and the
+  verifier never collected a patch that was already committed (run
+  35256147148, 4,660 bytes graded as empty). Now: a witness when the
+  workspace holds work (`capture_complete: false`, gap named,
+  `submission_patch_state` recorded), fatal only on a pristine tree and
+  raised after publish; three consecutive gaps end the run with terminal
+  **`containment_lost`, exit 0**, so the workspace is graded. The
+  sub-case (`worker_start_failed` vs `containment_unwitnessed`) is
+  detected from the interpreter's own bytes in the shared spool.
 
-### Receipt-consistency verifier (`scripts/verify_run_receipts.py`, NEW)
+### 4.3 Receipt-consistency verifier (`scripts/verify_run_receipts.py`, new)
+Runs after every TB2 task job over the Pier job directory. Seven checks;
+**UNKNOWN is never a pass**; rc 1 = contradiction only, rc 2 = unresolved,
+receipt always written, WARNINGs annotated in the job log.
+- One ancestor `_inside_a_trial` rule shared byte-for-byte with
+  `tb2_report.py` and `diagnose_benchmark_run.py` (agreement test + AST
+  hash); a symlink/junction escaping the root is never a search root.
+- A crashed check is `crashed: true`, counted, **rc 2** (it used to become
+  UNKNOWN and the job went green). `_int` is the only numeric conversion
+  and rejects `NaN`/`Infinity`. A contradiction cannot be downgraded by an
+  unwritable `--json`.
+- Refusals, all rc 2 with `task_id: null`: `no_trial_found`,
+  `no_run_receipt` (a trial dir that wrote nothing — the real run
+  35241999929 shape, previously rc 0 with six UNKNOWNs), `ambiguous_trial`,
+  `read_error` (a receipt on disk but unparseable), `no_decidable_check`
+  (receipts parse but decide nothing). Every branch runs on CI from
+  synthetic fixtures; an AST guard binds every code to `RESOLUTION_ERRORS`.
+- Workflow cross-read step: rc 1 → contradiction, rc 2 → unresolved, other
+  non-zero → "checker did not run", rc 0 without the file → error; every
+  non-zero path fails the job.
 
-Reads a task's receipts against each other after every task job
-(`tb2_miniswe_central.yml` `always()` step). Six checks; **UNKNOWN is never a
-pass**; rc 1 = contradiction only, rc 2 = unresolved, receipt always written.
+### 4.4 TB2 planner: Alpine/musl exclusion (`tb2_miniswe_central.yml`)
+`config/tb2_unsupported_tasks.v1.json` ∪ a BuildKit-faithful parse of the
+Dockerfile's **final stage**: heredocs only on `RUN`/`COPY`/`ADD` (incl.
+`ONBUILD`), `<<-`, quoted/escaped `<<`, `$((1<<3))`, `<<<`,
+`\`-continuation with `\\[ \t]*$` semantics, comment and empty continuation
+lines dropped without ending the continuation, `# escape=` directive
+(BOM-tolerant, unknown key ends the block, duplicate falls back), lines split
+on `\n` only, leading whitespace before `FROM`, ARG-scoped `${VAR}`. No-FROM
+and unresolved-ARG Dockerfiles are kept and warned. `task_count` is computed
+after exclusions; the plan receipt carries `excluded` and `unresolved`.
 
-- Trial resolution: bounded `_TRIAL_GLOBS`, first depth wins,
-  `AmbiguousTrialError` → rc 2; unified ancestor `_inside_a_trial` rule with
-  `Path.resolve()` shared byte-for-byte with `tb2_report.py` and
-  `diagnose_benchmark_run.py` (agreement test + AST hash); a candidate that
-  resolves outside the root (symlink/junction) is never a search root.
-- `CHECK_IDS` static; a check that raises is recorded `crashed: true`,
-  counted in `checks_crashed`, and **main returns 2** (round 7: previously a
-  crashed check became UNKNOWN and the job went green).
-- `_int` is the only numeric conversion and rejects non-finite values
-  (`json.loads` accepts `NaN`/`Infinity`; `int(nan)` raised into the crash
-  handler).
-- Exit precedence: contradiction (rc 1) is decided on disk and cannot be
-  downgraded by an unwritable `--json`.
-- Resolution refusals, all rc 2 with `task_id: null` and a
-  `resolution_detail`: `no_trial_found`, `no_run_receipt` (a trial directory
-  exists but wrote neither `gt-run.json` nor `miniswe_report.json` — the
-  real run-35241999929 shape, which previously exited 0 with six UNKNOWNs),
-  `ambiguous_trial`, `read_error` (a run receipt exists on disk but is
-  unparseable or not an object; a healthy receipt beside it does not rescue
-  it), `no_decidable_check` (both receipts parse but every check is UNKNOWN
-  and none crashed — the third door to the same false pass).
-- Trial-dir mode (root is the trial) reports what the trial wrote instead of
-  "wrong path".
-- Synthetic `_pier_tree` / `_dead_pier_tree` fixtures so every refusal branch
-  executes on CI, where the untracked real trees do not exist (116 tests run
-  with the real trees hidden; only the real-tree layer skips).
-- AST guard: every literal or variable handed to `build_unresolved_receipt`
-  is in `RESOLUTION_ERRORS` and named in the module docstring
-  (`Assign` and `AnnAssign`).
+### 4.5 GT engine (campaign 2, authorised pinned edits)
+- `gt_engine/indexer.py`: the headroom guard read a hard-coded
+  `/sys/fs/cgroup` (v2 only) and turned an unreadable `memory.current` into
+  `limit=0`, refusing graph refreshes on a missing file rather than missing
+  memory (run 35262214538: `limit=0..12804096` vs `need=178438144`, an
+  11-node parent priced at 170 MiB). Now it resolves the process's own
+  controller (v1 and v2) with ordering **identical** to
+  `gt_harness.cgroup.memory_snapshot` (agreement-tested on the reference's
+  fixtures plus double-`cgroup2`-mount and cgroup-namespace cases); a kernel
+  without `memory.peak` keeps its ceiling; `limit_state` / `cgroup_version`
+  / `headroom_basis` ride on every refusal and receipt; the amend floor
+  scales with parent size (11 nodes: 178,438,144 → 67,289,088; 15,600 and
+  above unchanged). Inside a cgroup namespace (the benchmark's case) nothing
+  changes — HEAD already read the task cgroup there. A 256 MiB container
+  with 144 MiB resident still refuses under the 128 MiB reserve: that is
+  handoff defect 7's true shape and needs container memory, not code.
+- `gt_engine/attribution.py`: a designed delivery-budget refusal
+  (`boundary_claim_ceiling`, `localization_task_ceiling`, …) reached the
+  audit projection as an eligible `feature.evaluated` row and was labelled
+  `TRIGGERED_DARK`. Refusals are now accumulated per feature and resolved
+  in a post-pass: any dark reason wins and every reason survives in any
+  arrival order; a feature whose only dark-side evidence is a designed
+  refusal is `SUPPRESSED_WITH_REASON`. Status is identical to HEAD on every
+  local artifact; reasons are set-equal except that a refusal now survives
+  onto a higher-status record (intended). A tracked fixture proves the delta
+  against HEAD's module in CI. The audit-side excuse in `gt_audit.py` stays
+  as defence in depth.
 
-### Workflow cross-read step (`tb2_miniswe_central.yml`)
+### 4.6 Workflow-command and report safety (campaign 2 rounds 4–5)
+The GitHub Actions runner parses **every** stdio line for `::` commands;
+several tools printed container-written bytes into that stream.
+- `scripts/gh_annotations.py` (new): `gh_escape` (bound 512 on the raw
+  field, then `%`/`\r`/`\n` escaped; `:`/`,` too for properties),
+  `gh_command`, `gh_command_escaped`, `gh_verbatim` (a caller-defect trap
+  whose line limit is derived from the measured worst escaped field —
+  1,550 × 8 + 256 — after the original 4,096 ignored the 3× escape
+  expansion and let a percent-dense field crash the renderer), and
+  `emit_line` (never raises on a codepage it cannot spell).
+- `scripts/verify_run_receipts.py`, `scripts/diagnose_benchmark_run.py`,
+  `scripts/provider_preflight.py`, `scripts/gt_task_visibility.py` all
+  build their `::` lines through it; the diagnostics renderer is contained
+  per row with a fixed-text fallback; the `GITHUB_STEP_SUMMARY` table cells
+  are bounded, backslash-escaped **before** pipe-escaped (verified against
+  python-markdown, markdown-it-py and mistune plus a 20k-case fuzz), and
+  backticks are replaced, not escaped.
+- `scripts/gt_audit.py::render_report` printed raw container-written
+  fields (task name, stop reason, agent error, ledger status/quote,
+  capability evidence) to stdout in both paid attestation workflows —
+  invisible to a `::`-literal guard because the module owns no such
+  literal. Every artifact-derived field is now escaped and bounded, a
+  leading `::` after any blank or list marker is rewritten to `%3A%3A`
+  (structural, because whether the runner trims leading whitespace cannot
+  be settled offline), the multi-line ledger quote keeps its lines under a
+  16-space indent with a 20-line budget, a backstop rewrites rather than
+  shifts, and an end-to-end sink test drives `main()` with the payload in
+  every field. Guard ⊇ test oracle, proven over 341 prefix combinations;
+  stubbing the guard or the source fix each fails a named test.
+- An AST guard walks `scripts/**` and `gt_engine/**`, counts command
+  literals (including the bare-`"::"` f-string head), refuses `+`/`%`/
+  `.format`/`.join`-built commands, and requires every discovered module to
+  be listed. Its stated limit: it cannot see a command printed without a
+  `::` literal (that is why `gt_audit` needed its own sink test).
 
-- Root is `results/terminal-bench${JOB_NAME:+/$JOB_NAME}` (the Pier job
-  directory). Branch order: rc 1 → "Receipt contradiction" (names
-  `checks_crashed`), rc 2 → "Receipts unresolved" (names `resolution_error`
-  and `checks_crashed`), any other non-zero → "Receipt checker did not run"
-  (an exit the checker does not define, e.g. signal death), rc 0 without the
-  receipt file → error. Absent-file suffix on every branch. Every non-zero
-  path exits 1.
+### 4.7 Product workflow and shipped content
+- `.github/workflows/deepswe_gt_harness_product.yml` merged back from
+  `ba51aa97`: immutable product pins, pinned checkouts, producer identity,
+  lineage, failure IDs, RED evidence, provider-free arms, verified producer
+  staging, **the full suite** — keeping the 921bec20 object-pin step and
+  the workflow lint; `workflow_call`/`dispatch` only; no concurrency group
+  (it would have made three callers on one ref cancel each other).
+- The content the suite reads is tracked again: `.githooks/` (auto-push
+  now **opt-in** via `GNX_AUTOPUSH=1`, refused on `main|master|release/*`;
+  receipt digests re-derived and asserted), `docs/historical-workflows/`
+  (the exact FS-023 blob, LF-pinned because the finalstand hasher reads raw
+  bytes), and the swelive corpus task `cyclotruc__gitingest-94` (never
+  merged onto this lineage; its absence aborted collection with zero tests
+  run). A cheap step runs `--collect-only` and the formerly-failing tests
+  before the 30-minute suite.
+- Supported workflow set closed at 11: `central_provider_free.yml`,
+  `deepswe_cache_images.yml`, `deepswe_gt_harness_product.yml`,
+  `deepswe_gt_harness_product_p0731.yaml`, `deepswe_miniswe_central.yml`,
+  `swebench_live_lite_full.yml`, `swelive_gt_harness_paid.yaml`,
+  `task_progress.yml`, `tb2_cache_images.yml`, `tb2_miniswe_central.yml`,
+  `tb2_miniswe_engine.yml`. Twenty-one superseded lanes (including the only
+  scheduled workflow, which ran unattended with a secret, and every GT-off
+  baseline lane) moved to `.github/workflows-archive/` as pure renames.
+- **Fixture commits** `e56c7ef1` (HAR-41) and `7bbbc9d0` (HAR-64) sit on a
+  side lineage reachable from no branch, tag or remote ref; they existed
+  only as dangling objects in this worktree, so a fresh CI checkout could
+  not have fetched them and the provider-free gate that fronts every paid
+  lane would have gone red on its fixture step. Found by the final offline
+  check-up in a `--no-local` clone; fixed by the `fixtures/*` tags and a
+  refspec fetch before the SHA pins (`bb0736f6`).
 
-### TB2 planner: Alpine/musl exclusion (`tb2_miniswe_central.yml`)
-
-Excluded tasks come from `config/tb2_unsupported_tasks.v1.json`
-(`qemu-alpine-ssh`) ∪ a Dockerfile parse of the **final stage's** base image.
-The parser is now BuildKit-faithful on every shape the reviewers threw at it:
-heredoc bodies skipped (only on `RUN`/`COPY`/`ADD`, including `ONBUILD`-wrapped),
-`<<-` indented terminators, quoted/escaped `<<`, `$((1<<3))`, `<<<`,
-`\`-continuations joined with `\\[ \t]*$` semantics, comment and empty
-continuation lines dropped without ending the continuation, `# escape=`
-directive (top-of-file block, BOM-tolerant, unknown key ends the block,
-duplicate falls back), lines split on `\n` only (Python's `splitlines`
-invented stages on `\f`/`\x85`/`U+2028`), leading whitespace before `FROM`,
-`ARG`-scoped `${VAR}` resolution. A Dockerfile with no `FROM` is kept and
-warned (`Dockerfile unparsed`); an unresolved `$ARG` base is kept and warned.
-`task_count` is computed after exclusions; the plan receipt carries
-`excluded` and `unresolved`.
-
-### Reporting and audit
-
-- `scripts/tb2_report.py` (NEW): per-task table with model column, cost from
-  manifest pricing (refuses to print `$0.00` silently), `--baseline` parser,
-  bounded walks, non-finite values shown as `-` and excluded from totals.
-- `scripts/gt_audit.py`: `attribution_red_features()` excuses
-  `DELIVERY_REFUSAL_REASONS`; LSP no-op annotation
-  (`scripts/lsp_no_op.py`, EXPECTED/UNEXPECTED/UNKNOWN/NOT_APPLICABLE);
+### 4.8 Reporting and audit
+- `scripts/tb2_report.py` (new): per-task table with model column, cost
+  from manifest pricing (refuses a silent `$0.00`), baseline parser,
+  bounded walks, non-finite values shown as `-`.
+- `scripts/gt_audit.py`: delivery-refusal excusal, LSP no-op annotation,
   `oom_kill_during_index` requires rc −9 AND `initial_index_failed`.
-- `scripts/diagnose_benchmark_run.py`: LSP annotation in stderr and step
-  summary; bounded globs.
+- `scripts/diagnose_benchmark_run.py`: LSP annotation, bounded globs,
+  launchable by path with the repository root resolved **before** an
+  installed older `gt_engine` can shadow it (a real hazard on this machine).
 
-### Workflow composition
+## 5. Every review, in one table
 
-- `tb2_miniswe_engine.yml`: import guard fails fast naming `inline-engine`
-  when `eval.gt_central_agent` is absent (it is absent on the pinned branch
-  by design); `task_progress`/`merge` guarded on `plan` success; timeouts.
-- `deepswe_miniswe_central.yml`: adapter is
-  `eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent` (the only one
-  that exists); pip install before the guard; guarded progress job.
-- `central_provider_free.yml`: ruff target guarded when the module is absent.
-- `tb2_miniswe_central.yml`: `cohort_stage: subset` + `subset_tasks`;
-  `summarize` runs `always() && needs.plan.result == 'success'` with a
-  30-minute timeout.
-
-## Closed after review 9 (orchestrator, TDD)
-
-- `no_decidable_check` refusal (review-9 LOW-1): `{}`, `{"unrelated": 1}` and
-  an other-schema object as `gt-run.json` now exit 2; one decidable check is
-  enough to resolve. Tests: `test_a_run_receipt_that_decides_nothing_is_not_a_resolved_run[*]`,
-  `test_one_decidable_check_is_enough_to_resolve_a_run`.
-- AST guard reads `AnnAssign` (review-9 LOW-2):
-  `test_the_refusal_guard_reads_an_annotated_constant_too`.
-
-## Campaign 2 (2026-09-19): decisions 1-3, offline
-
-Same method: TDD, disjoint-file Opus agents, adversarial review per round.
-Reviews 10-19. Landed as `89d5494d` (code), `88fc821c` (manifest re-pin),
-`f28cdf99` (workflow-command escaping, round 4) and `1a0d1084` (audit report
-and diagnostics summary, round 5).
-
-| Round | Review verdict | Headline |
+| # | Verdict | What it found |
 |---|---|---|
-| 1 | 1 CRITICAL + 1 HIGH + 2 MEDIUM + 4 LOW | restored full-suite step could never pass (`.githooks/`, `docs/historical-workflows/` deleted by `c464bc57`); attribution fix laundered dark reasons across records |
-| 2 | 1 CRITICAL + 3 HIGH + 6 MEDIUM + 5 LOW | `test_swelive_corpus.py` aborted collection on a clean checkout (corpus never merged onto this lineage); `::warning` lines carried unescaped model-writable bytes into the Actions command parser; auto-push hook as tracked content; stale hook digest |
-| 3 | **APPROVE - 0 C / 0 H / 0 M / 3 LOW** (one MEDIUM outside the set, fixed in round 4) | merge criterion met |
-| 4 | reviews 13/14/15: 2 MEDIUM -> 1 HIGH (escape-expansion arithmetic) -> clean staged set; CRITICAL found upstream in `gt_audit.py` | one shared escaper (`scripts/gh_annotations.py`) for every workflow-command line, bounded per field, module set discovered by walk; landed `f28cdf99` |
-| 5 | reviews 16-19: 2 HIGH -> 1 MEDIUM -> 1 MEDIUM -> **APPROVE (0 C / 0 H / 0 M / 3 LOW)** | `gt_audit.py::render_report` printed raw container-written fields to the runner's stdout in both paid workflows (the review-11 class one module upstream, invisible to a `::`-literal guard) - every artifact-derived field escaped and bounded, a leading `::` after any blank or list marker rewritten structurally (`%3A%3A`), multi-line quote indented per line with a 20-line budget, end-to-end sink test through `main()`; diagnostics step-summary cells escape the backslash before the pipe (verified against three renderers) and drop backticks; one shared `emit_line`; diagnose launchable by path with the repo root resolved before an installed `gt_engine`. Landed `1a0d1084`. `99ebf5c5` also carries the first `gt_audit.py` pass (swept in; see `604a6289`). |
+| 1 | 1 C | attestation exact set-equality vs 8 new preflight fields |
+| 2 | 1 C + 4 H | verifier step pointed one level above Pier receipts |
+| 3 | 3 H | phantom `*_count` keys; unbounded rglob; test resolved `$root` itself |
+| 4 | 2 H | `except OSError` missed `UnicodeDecodeError`; `_trial_roots` expanded a checkout |
+| 5 | 1 H | `_inside_a_trial` parent-NAME rule rejected depth-2 SWE-bench trials |
+| 6 | 2 H + 1 M | crashed check → rc 0; `NaN` crashed `_int`; joiner ate `#` lines |
+| 7 | 1 H + 1 M + 4 L | bare trial dir counted as resolved → rc 0; joiner not BuildKit-faithful |
+| 8 | 4 M + 4 L | corrupt receipt misnamed; trial-dir mode; ONBUILD heredoc; CI coverage hole |
+| **9** | **APPROVE** (3 L) | campaign 1 done |
+| 10 | 1 C + 1 H + 2 M + 4 L | restored full-suite step could never pass (`.githooks/`, `docs/historical-workflows/` deleted by `c464bc57`); attribution laundered dark reasons across records; cgroup receipt lied on fallback |
+| 11 | 1 C + 3 H + 6 M + 5 L | `test_swelive_corpus` aborted collection on a clean checkout; unescaped model bytes reached the Actions command parser; auto-push hook as tracked content; stale hook digest |
+| **12** | **APPROVE** (3 L; 1 M outside the set) | campaign 2 rounds 1–3 done |
+| 13 | 2 M + 3 L | composed-line bound could truncate the host verdict; guard module list hand-typed |
+| 14 | 1 H + 2 M + 3 L | line limit ignored 3× escape expansion → renderer crash on adversarial input |
+| 15 | 1 C (outside the set) + 1 M + 2 L | `gt_audit.py` still printed raw container fields to stdout |
+| 16 | 2 H + 1 M + 3 L | column-zero backstop shifted by a space (positional, untested); oracle blind to it |
+| 17 | 1 M + 2 L | guard tested index 0 while parser/oracle test first non-blank |
+| 18 | 1 M + 3 L | `_md_cell` escaped the pipe but not the backslash; backtick escape inert in a code span |
+| **19** | **APPROVE** (3 L) | campaign 2 done |
 
-What changed:
+## 6. Final offline check-up (2026-09-19)
 
-- `gt_engine/indexer.py`: own-cgroup resolution (v1+v2) with ordering
-  identical to `gt_harness.cgroup.memory_snapshot`, pinned by an agreement
-  test (double-`cgroup2`-mount and cgroup-namespace fixtures); a kernel
-  without `memory.peak` keeps its ceiling; unreadable `memory.current` is no
-  longer `limit=0`; `limit_state`/`cgroup_version`/`headroom_basis` on every
-  refusal and receipt; amend floor scales with parent size (11 nodes:
-  178,438,144 -> 67,289,088). Inside a cgroup namespace nothing changes -
-  HEAD already read the task cgroup there; a 256 MiB container with 144 MiB
-  resident still refuses under the 128 MiB reserve (handoff defect 7's true
-  shape; needs container memory, not code).
-- `gt_engine/attribution.py`: designed delivery-budget refusals are
-  `SUPPRESSED_WITH_REASON` unless any dark reason exists on the feature, in
-  any arrival order; every reason survives on the record. Status identical
-  to HEAD on every local artifact; reasons set-equal except refusals now
-  survive onto higher-status records (intended). Tracked fixture proves the
-  delta against HEAD's module in CI.
-- `scripts/miniswe_gt_run.py`: `command_descendant_receipt_missing` and
-  `command_descendants_not_reaped` are witnesses when the workspace holds
-  work, fatal only on a pristine tree, raised after publish; three
-  consecutive gaps -> terminal `containment_lost`, exit 0, workspace graded.
-  Verifier: seventh check `containment_gap_reported`; every `::` line
-  escaped (bound 512, then percent/CR/LF); gap names whitelisted;
-  `truncated` => WARNING.
-- `.github/workflows/deepswe_gt_harness_product.yml`: merged back from
-  `ba51aa97` with the 921bec20 pin step and the workflow lint kept;
-  `workflow_call`/`dispatch` only; shipped content restored (`.githooks/`
-  with opt-in auto-push and re-derived digests, `docs/historical-workflows/`
-  as the exact FS-023 blob LF-pinned, corpus task `cyclotruc__gitingest-94`);
-  `--collect-only` runs first. Supported set closed at 11 workflows; 21
-  lanes archived to `.github/workflows-archive/` as pure renames.
-- Full suite on the final tree: one failure,
-  `test_repository_snapshot_and_ci_are_wired`, red only in a dirty worktree
-  (validator scans untracked scratch), green on the staged tree.
+| Gate | Result |
+|---|---|
+| Object pin (local replica of the CI gate) | all eight ids match HEAD |
+| `validate_product_workflow` on both product workflows | `[]` |
+| `workflow_lint` on the three paid lanes | 0 violations |
+| RED-evidence producer check | `pass` |
+| `pytest --collect-only` | exit 0, no collection errors |
+| All 11 supported workflows | parse |
+| ruff over every Python file changed since `a03ad260` | clean except one deliberate `B017` |
+| **Entire suite (232 files, closure guard included) in a fresh `--no-local` clone of `bb0736f6` with the fixture tags** | **zero failures** — run as four foreground slices because the host reaps idle background runs under memory pressure; every file ran exactly once |
 
-Verification caveat for `1a0d1084`: the final full-suite run on that exact
-tree was stopped by the host for memory pressure and not repeated; the last
-completed full suite (one edit behind, before the `_md_cell`/prefix-set
-change) showed only the dirty-worktree validator test, and the six test
-files touched since are 389/389 green. Re-run the suite on `1a0d1084`
-before any dispatch.
+## 7. What online will tell us that offline cannot
 
-Residuals after campaign 2 (LOW, documented): a leading IPv6 literal in a
-quoted transcript line (`[::1]:8080`) is display-rewritten to `[%3A%3A1]`
-(deliberate: the guard strips the same prefixes as the oracle; the JSON
-receipt keeps the bytes); one test documents a 612-char cell bound where
-the guarantee is 1,038; one duplicated assertion; `scripts/validate_failure_ids.py`
-scans untracked paths; `.githooks/pre-commit`'s failure gate self-disables
-off its recorded HEAD (inert by design - decide whether to keep it);
-`indexer.py` resolver docstring says "same parse" where it means "same parse
-on well-formed input".
+Online-only by nature; the first dispatch answers them and the harness
+fails closed on each:
+- the pinned external checkouts (`harneet2512/groundtruth`, GitNexus,
+  review-inbox) and the DeepSWE task-image pull in the product workflow;
+- provider funds and the served fp8 build (`provider_preflight` refuses at
+  zero spend on either);
+- the runner's real whitespace handling of workflow commands (defended
+  structurally, so it no longer matters).
 
-## Final offline check-up (2026-09-19)
+## 8. Dispatch runbook (only after the user authorises spend)
 
-Run on the landed head before declaring online readiness, all offline:
+1. `deepswe_gt_harness_product.yml` alone — zero provider calls; proves
+   the checkouts, the fixture tags, the image cache and the full suite on a
+   runner.
+2. `tb2_miniswe_central.yml` with `cohort_stage: subset` and two or three
+   `subset_tasks` at fp8 pricing (cents). Read, per task:
+   `receipt-consistency.json` (rc and every check), `tb2-gt-smoke20-plan.json`
+   (`excluded`, `unresolved`, `task_count`), the provider preflight receipt
+   (`funds_verdict`, quantization), and `python -m scripts.tb2_report`.
+3. Only then the 20-task smoke at p20. SWE-Live: one gate task; release
+   the rest only on official grading + PASS attestation + diagnostic exit 0.
+4. Count only `gt.benchmark_progress.v1` (`officially_graded`, `passed`,
+   `infrastructure_failed`); a green job is not a graded task.
+5. Compare TB2 against the frozen local GT-off baseline (66/89) and DeepSWE
+   against the official v1.1 leaderboard `deepseek-v4-flash` row (pass@1
+   0.5332). **Never run GT-off.** Step limit stays 100.
 
-- Object pin replica: all eight `source_object_ids` match HEAD;
-  `gt_source_commit` `921bec20`, `gt_source_patch_commit` `89d5494d`.
-- `validate_product_workflow` on both product workflows: `[]`;
-  `workflow_lint` on the three paid lanes: 0 violations; RED-evidence
-  producer check: `pass`; `pytest --collect-only`: exit 0; all 11 supported
-  workflows parse; ruff over every Python file changed since `a03ad260`:
-  clean except one deliberate `B017` (`07659df3` fixed the rest).
-- Full suite in a **fresh `--no-local` clone** of the landed head (what CI
-  sees; closure guard included): one failure,
-  `test_gt_repository_intelligence.py::test_archive_reviewed_head_binds_copied_source_blobs`,
-  which had always passed in the worktree. Cause: the two fixture commits
-  the product workflow fetches by bare SHA (`e56c7ef1` HAR-41, `7bbbc9d0`
-  HAR-64) sit on a side lineage reachable from no branch, tag or
-  remote-tracking ref - they existed only as dangling objects in this
-  worktree, so a fresh CI checkout could not fetch them either and the
-  provider-free gate that fronts every paid lane would have gone red on
-  its fixture step. **This was an online-readiness blocker found offline.**
-- Fix `bb0736f6`: lightweight tags `fixtures/har41-e56c7ef1` and
-  `fixtures/har64-7bbbc9d0` pushed to both campaign remotes; the fixture
-  step fetches those refspecs before its SHA fetch and `cat-file` pins.
-  Proven: a `--no-local` clone with the tags carries both commits and the
-  repository-intelligence tests pass in it.
-- **Definitive result:** the entire suite (232 test files, closure guard
-  included, every file run exactly once in four foreground slices because
-  the host reaps idle background runs under memory pressure) in a fresh
-  `--no-local` clone of `bb0736f6` with the fixture tags: **zero failures**.
+## 9. Operating rules learned (they cost real time)
 
-**Offline verdict: ready for online.** Everything that can be proven without
-a provider call, a dispatch or Docker has been proven. What remains is
-online-only by nature and is the first thing a dispatch will tell us:
-the pinned checkouts (`harneet2512/groundtruth`, GitNexus, review-inbox)
-and the DeepSWE task-image pull in the product workflow; the runner's
-actual whitespace handling of workflow commands (defended structurally,
-so it no longer matters); provider funds and the served fp8 build (the
-preflight fails closed on both).
+- Commit **by pathspec** (`git commit -F - -- <paths>`) whenever an agent
+  may have staged files: `99ebf5c5` swept in `gt_audit.py` under a docs
+  message and was already pushed before anyone noticed.
+- The `block-no-verify` hook rejects any command containing both
+  `git commit` and a bare ` -n ` token (e.g. `tail -n 2`).
+- The Bash tool halves backslashes in heredocs and `re.sub` interprets
+  escapes in replacement templates; build backslash-bearing bytes from
+  `chr(92)` and use slice replacement.
+- The host reaps idle background runs under memory pressure; run long
+  suites in foreground slices.
+- Never trust a worktree for reachability: prove CI-visible state in a
+  `--no-local` clone (that is how the fixture-tag blocker was found).
+- Verify before claiming: two agents' "no-op on real data" claims and one
+  "closed" claim were overturned by reviewers who reproduced them.
 
-## Landed
+## 10. Residuals (LOW, accepted)
 
-- **Commit `07a16e58`** on `codex/gt-921bec20-union-smokes` (2026-09-19),
-  pushed to `baliharneet7` and `fork`. Post-commit closure guard
-  `tests/test_product_acceptance.py`: 14 passed. `HEAD:gt_engine` =
-  `22daf78b80d74a0524de36c96d2060d411bdf5a5`.
+- Test files over the 800-line ceiling (`test_verify_run_receipts.py`
+  ~3.4k, `test_tb2_gt_smoke_workflow.py` ~1.6k, `test_tb2_report.py` ~1.3k).
+- `_trial_task_id` on a flat hash-less `amoffat__sh-744/` dir (unreachable
+  from the shipped emitter; documented by a test).
+- `tb2_report.has_metrics` keys off presence of `gt-run.json`, not the
+  finiteness of its numbers.
+- `scripts/validate_failure_ids.py` scans untracked working-tree paths, so
+  its test is red in any dirty worktree (green on a clean tree).
+- `.githooks/pre-commit`'s failure gate self-disables off its recorded HEAD
+  (inert by design; decide whether to keep it).
+- A leading IPv6 `[::1]` literal in a quoted transcript line is
+  display-rewritten (deliberate; the JSON receipt keeps the bytes); one test
+  documents a tighter cell bound than guaranteed; one duplicated assertion.
+- `test_graph_publication_lock_serializes_two_real_processes` flaked once
+  under load on Windows (`PermissionError` on a byte-range lock, code
+  untouched since `97efb7f0`; CI is Linux/fcntl).
 
-## User decisions, 2026-09-19
+## 11. Decisions resolved and still open
 
-1. YES - re-pin the GT source to fix the indexer OOM and the attribution
-   dark-trigger category.
-2. YES - fix the `command_descendant_receipt_missing` policy so a committed
-   patch is not discarded.
-3. YES - restore the 346-line `deepswe_gt_harness_product.yml` and close the
-   supported-workflow set.
-4. **NO runs.** No paid dispatch and no online test of any kind. GT is to be
-   fixed architecturally with everything mocked and stubbed.
+Resolved by the user on 2026-09-19: (1) re-pin the GT source — done;
+(2) containment-receipt policy — done; (3) restore the product workflow and
+close the set — done; (4) **no runs of any kind** without authorisation.
 
-## Verification state
+Still open, none of them code we own: handoff defect 4 (`cfn-lint-3764`'s
+gold patch does not resolve in its image), defect 5 (`total_cost` reads 0.0
+because tokens do not reach the Pier receipt — `tb2_report.py` computes it
+from pricing), defect 6 (~10% no-tool-call responses burn turns against the
+step limit — model behaviour, visible in the report), defect 7's residual
+(container memory).
 
-- Full suite (`tests/`, minus the corpus file, the post-commit closure guard
-  and five deselected tests that need live artifacts) has produced **the same
-  12 pre-existing failures and nothing else** after every round since round 2:
-  `test_failure_id_validator` ×1, `test_failure_ids` ×4,
-  `test_gt_finalstand` ×4, `test_product_workflow` ×3. Nine are environmental
-  (no `.githooks/`, missing local artifacts); three are branch-composition
-  contracts (commit `c7e5d424` gutted `deepswe_gt_harness_product.yml`
-  346→93 lines; supported-workflow set 7 vs 32 present). None is touched by
-  this work.
-- `tests/test_product_acceptance.py` (`source_closure_differs_from_head`)
-  fails on any dirty tree by design; it is run after the commit.
-- ruff clean on every file this campaign touched.
+## 12. How to resume
 
-## What is left
-
-### LOW residuals (accepted, documented)
-
-1. Test files exceed the 800-line style ceiling:
-   `tests/test_verify_run_receipts.py` (~2.7k), `tests/test_tb2_gt_smoke_workflow.py`
-   (~1.6k), `tests/test_tb2_report.py` (~1.3k). Natural seams exist (round
-   banners). Split in a follow-up, not under active review.
-2. `_trial_task_id` splits a flat `amoffat__sh-744/` directory (no hash) at
-   the last `__`. Unreachable from the shipped emitter
-   (`gt_harness/runtime_receipts.py` raises `task_id_required`, so
-   `gt-run.json` always names the task) and TB2 ids carry no `__`; pinned by
-   a test that documents it.
-3. `tb2_report.has_metrics` keys off the presence of `gt-run.json`, not on
-   whether its numbers were finite; a receipt full of `NaN` counts as "has
-   metrics" with every column `-`.
-4. `find_progress` parses the harness JSON tree before the strict receipt
-   read raises — wasted I/O on a refusal path, harmless.
-5. `diagnose_benchmark_run` prefixes reach depth 0/1/2 only.
-
-### Open decisions (need the user, not code)
-
-1. **Re-pin the GT source** to fix two defects that live in pinned files and
-   cannot be fixed from the workflow: the OOM in `gt_engine/indexer.py`
-   (`GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT` refused 9 graph refreshes under
-   TB2 cgroups; handoff defect 7) and the dark-trigger category in
-   `gt_engine/attribution.py`. Editing them breaks the 921bec20 pin
-   (`GT_SOURCE_OBJECT_MISMATCH`), which was tried and reverted (`80044a4a`).
-2. Whether to restore the 346-line `deepswe_gt_harness_product.yml` from
-   `ba51aa97` (merge, not revert) and extend/close the 7-workflow supported
-   set — the three branch-composition test failures.
-3. Handoff defect 3: `command_descendant_receipt_missing` (`miniswe_gt_run.py`)
-   kills a run whose work is already committed (`amoffat__sh-744`,
-   `committed_patch_bytes: 4660`); 2 of 4 SWE-Live tasks died this way.
-   Needs a policy decision on whether a missing containment receipt is fatal
-   when the patch is on disk.
-4. Handoff defect 5: `total_cost` is 0.0 against 22.8M input tokens — tokens
-   are metered in the GT receipt but do not reach the Pier/Harbor receipt.
-   `tb2_report.py` now computes cost from manifest pricing, which is the
-   workaround, not the fix.
-5. Handoff defect 6: ~10% no-tool-call responses (`FormatError` →
-   `GT_PROVIDER_MALFORMED_RESPONSE`) burn turns against `STEP_LIMIT: 100`.
-   Model behaviour, not harness; visible in the report.
-6. Handoff defect 4: `cfn-lint-3764`'s gold patch does not resolve in its
-   image (not ours; the pre-spend canary refused at zero spend).
-
-### Next steps, in order (revised after the decisions above)
-
-1. DONE - commit `07a16e58`, closure guard passed, pushed, pin intact.
-2. **Campaign 2, offline only**, same method (TDD, disjoint-file Opus agents,
-   adversarial review per round, exit at nothing above LOW):
-   - (a) re-pin the GT source: fix the cgroup memory-headroom read in
-     `gt_engine/indexer.py` and the dark-trigger category in
-     `gt_engine/attribution.py`; regenerate `source_object_ids`; update every
-     pin consumer; prove with mocked cgroup files and receipts.
-   - (b) `command_descendant_receipt_missing`: a missing containment receipt
-     must not discard a patch that is already committed; policy chosen from
-     the reconnaissance options and proven on the real `amoffat__sh-744`
-     artifact copy.
-   - (c) restore `deepswe_gt_harness_product.yml` from `ba51aa97` as a merge,
-     close the supported-workflow set, make the three branch-composition
-     tests pass.
-3. Commit and push after each clean review; update HAR-88's status board.
-4. No workflow dispatch and no provider call until the user explicitly
-   authorises spend. Comparison targets stay the frozen local TB2 GT-off
-   baseline (66/89) and the official DeepSWE v1.1 `deepseek-v4-flash` row
-   (pass@1 0.5332). GT-off is never run by us.
+Read HAR-88's status board, then this file. Check `git status` in `D:\w\t`
+and that both remotes are at the head this file names. Do not ask the user
+to restate the model, source pin, verifier, parallelism or failure policy —
+they are all here and in `config/`. Do not dispatch without authorisation.
