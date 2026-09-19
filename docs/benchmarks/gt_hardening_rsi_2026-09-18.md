@@ -258,6 +258,34 @@ off its recorded HEAD (inert by design - decide whether to keep it);
 `indexer.py` resolver docstring says "same parse" where it means "same parse
 on well-formed input".
 
+## Final offline check-up (2026-09-19)
+
+Run on the landed head before declaring online readiness, all offline:
+
+- Object pin replica: all eight `source_object_ids` match HEAD;
+  `gt_source_commit` `921bec20`, `gt_source_patch_commit` `89d5494d`.
+- `validate_product_workflow` on both product workflows: `[]`;
+  `workflow_lint` on the three paid lanes: 0 violations; RED-evidence
+  producer check: `pass`; `pytest --collect-only`: exit 0; all 11 supported
+  workflows parse; ruff over every Python file changed since `a03ad260`:
+  clean except one deliberate `B017` (`07659df3` fixed the rest).
+- Full suite in a **fresh `--no-local` clone** of the landed head (what CI
+  sees; closure guard included): one failure,
+  `test_gt_repository_intelligence.py::test_archive_reviewed_head_binds_copied_source_blobs`,
+  which had always passed in the worktree. Cause: the two fixture commits
+  the product workflow fetches by bare SHA (`e56c7ef1` HAR-41, `7bbbc9d0`
+  HAR-64) sit on a side lineage reachable from no branch, tag or
+  remote-tracking ref - they existed only as dangling objects in this
+  worktree, so a fresh CI checkout could not fetch them either and the
+  provider-free gate that fronts every paid lane would have gone red on
+  its fixture step. **This was an online-readiness blocker found offline.**
+- Fix `bb0736f6`: lightweight tags `fixtures/har41-e56c7ef1` and
+  `fixtures/har64-7bbbc9d0` pushed to both campaign remotes; the fixture
+  step fetches those refspecs before its SHA fetch and `cat-file` pins.
+  Proven: a `--no-local` clone with the tags carries both commits and the
+  repository-intelligence tests pass in it; the full clean-clone suite on
+  `bb0736f6` is the final gate (result recorded in HAR-88).
+
 ## Landed
 
 - **Commit `07a16e58`** on `codex/gt-921bec20-union-smokes` (2026-09-19),
