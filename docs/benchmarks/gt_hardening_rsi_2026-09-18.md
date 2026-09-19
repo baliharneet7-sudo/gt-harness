@@ -193,8 +193,9 @@ warned (`Dockerfile unparsed`); an unresolved `$ARG` base is kept and warned.
 ## Campaign 2 (2026-09-19): decisions 1-3, offline
 
 Same method: TDD, disjoint-file Opus agents, adversarial review per round.
-Reviews 10-15. Landed as `89d5494d` (code), `88fc821c` (manifest re-pin)
-and `f28cdf99` (workflow-command escaping, round 4).
+Reviews 10-19. Landed as `89d5494d` (code), `88fc821c` (manifest re-pin),
+`f28cdf99` (workflow-command escaping, round 4) and `1a0d1084` (audit report
+and diagnostics summary, round 5).
 
 | Round | Review verdict | Headline |
 |---|---|---|
@@ -202,7 +203,7 @@ and `f28cdf99` (workflow-command escaping, round 4).
 | 2 | 1 CRITICAL + 3 HIGH + 6 MEDIUM + 5 LOW | `test_swelive_corpus.py` aborted collection on a clean checkout (corpus never merged onto this lineage); `::warning` lines carried unescaped model-writable bytes into the Actions command parser; auto-push hook as tracked content; stale hook digest |
 | 3 | **APPROVE - 0 C / 0 H / 0 M / 3 LOW** (one MEDIUM outside the set, fixed in round 4) | merge criterion met |
 | 4 | reviews 13/14/15: 2 MEDIUM -> 1 HIGH (escape-expansion arithmetic) -> clean staged set; CRITICAL found upstream in `gt_audit.py` | one shared escaper (`scripts/gh_annotations.py`) for every workflow-command line, bounded per field, module set discovered by walk; landed `f28cdf99` |
-| 5 | in progress (review 16 pending) | `gt_audit.py::render_report` printed raw container-written fields to the runner's stdout in both paid workflows (the review-11 class, one module upstream, invisible to a `::`-literal guard) - every artifact-derived field now escaped, multi-line `quote` indented per physical line with a 20-line budget, column-zero backstop, end-to-end sink test; diagnose step-summary cells bounded then pipe-escaped; stream-safe emitter shared. **Record correction:** commit `99ebf5c5` (subject "docs: record round 4") also carries `scripts/gt_audit.py` and `tests/test_gt_audit_report_sanitised.py` - they were staged by the round-5 agent when that docs commit ran and were swept in; the message does not describe them. Not rewritten (already on both remotes); reviewed under review 16. |
+| 5 | reviews 16-19: 2 HIGH -> 1 MEDIUM -> 1 MEDIUM -> **APPROVE (0 C / 0 H / 0 M / 3 LOW)** | `gt_audit.py::render_report` printed raw container-written fields to the runner's stdout in both paid workflows (the review-11 class one module upstream, invisible to a `::`-literal guard) - every artifact-derived field escaped and bounded, a leading `::` after any blank or list marker rewritten structurally (`%3A%3A`), multi-line quote indented per line with a 20-line budget, end-to-end sink test through `main()`; diagnostics step-summary cells escape the backslash before the pipe (verified against three renderers) and drop backticks; one shared `emit_line`; diagnose launchable by path with the repo root resolved before an installed `gt_engine`. Landed `1a0d1084`. `99ebf5c5` also carries the first `gt_audit.py` pass (swept in; see `604a6289`). |
 
 What changed:
 
@@ -240,7 +241,18 @@ What changed:
   `test_repository_snapshot_and_ci_are_wired`, red only in a dirty worktree
   (validator scans untracked scratch), green on the staged tree.
 
-Residuals after campaign 2 (LOW, documented): `scripts/validate_failure_ids.py`
+Verification caveat for `1a0d1084`: the final full-suite run on that exact
+tree was stopped by the host for memory pressure and not repeated; the last
+completed full suite (one edit behind, before the `_md_cell`/prefix-set
+change) showed only the dirty-worktree validator test, and the six test
+files touched since are 389/389 green. Re-run the suite on `1a0d1084`
+before any dispatch.
+
+Residuals after campaign 2 (LOW, documented): a leading IPv6 literal in a
+quoted transcript line (`[::1]:8080`) is display-rewritten to `[%3A%3A1]`
+(deliberate: the guard strips the same prefixes as the oracle; the JSON
+receipt keeps the bytes); one test documents a 612-char cell bound where
+the guarantee is 1,038; one duplicated assertion; `scripts/validate_failure_ids.py`
 scans untracked paths; `.githooks/pre-commit`'s failure gate self-disables
 off its recorded HEAD (inert by design - decide whether to keep it);
 `indexer.py` resolver docstring says "same parse" where it means "same parse
