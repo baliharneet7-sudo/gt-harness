@@ -1,6 +1,6 @@
 # GT harness hardening — the complete record (2026-09-18 → 2026-09-19)
 
-**Verdict: offline is done; the harness is ready for online.** Every claim in
+**Verdict: offline is done; the harness is ready for online** — with one comparability qualifier: the DeepSWE leaderboard row ran at reasoning effort `max` and the harness sends none (§7a). Every claim in
 this document was proven with mocks, stubs, real-artifact copies and fresh
 clones — **no provider call, no GitHub dispatch, no Docker, zero spend.**
 Nothing runs online until the user authorises spend.
@@ -285,6 +285,38 @@ fails closed on each:
   zero spend on either);
 - the runner's real whitespace handling of workflow commands (defended
   structurally, so it no longer matters).
+
+## 7a. Model identity and comparability (checked 2026-09-19, offline + public metadata)
+
+- **Served model.** The pin `deepseek/deepseek-v4-flash-0731` on DeepInfra is
+  **V4 Flash 0731** (284B/13B MoE, fp8, $0.06 in / $0.18 out / $0.015 cache
+  read per 1M, per OpenRouter's public endpoint listing). It is **not**
+  V4.1 Flash, a different architecture listed 2026-09-10. DeepSeek's own
+  API has **retired** V4 Flash: the name `deepseek-v4-flash` there now
+  serves V4.1, so the first-party route is ruled out for any comparison.
+- **TB2 frozen GT-off (66/89)** recorded `Served snapshot: official
+  DeepSeek-V4-Flash-0731`, fingerprint
+  `fp_a18b46594c_prod0820_fp8_kvcache_20260402` on all 4,120 responses, no
+  reasoning kwarg. **Same model as the pin; like-for-like.**
+- **DeepSWE frozen GT-off (4/10)**: `deepseek:native`, fingerprint
+  `a26a7955944dc5c60445bff77fac9c8e`, revision unrecorded. The file is at
+  `D:\gt_runs\deepswe_gtoff_31824834187\deepswe-central-31824834187-merged\DEEPSWE_EVALUATION_RESULTS.json`
+  (SHA-256 `707d7eb7...` as recorded).
+- **DeepSWE v1.1 leaderboard row (pass@1 0.5332)** is
+  `mini_swe_agent_deepseek_v4_flash_max`: **reasoning effort `max`**. The
+  harness sends no reasoning field for this model
+  (`scripts/miniswe_gt_run.py::_model_and_kwargs` sets one only for the
+  retired muse model). **Until reasoning effort is matched, the DeepSWE
+  leaderboard comparison is not like-for-like.** Open decision for the user:
+  pin `reasoning={"effort": "max"}` for DeepSWE lanes only (TB2 stays at the
+  default to match its own baseline). Residual unknown: whether DeepSeek
+  native and DeepInfra default thinking mode the same way; the first TB2
+  subset run shows it.
+- **Cost correction.** On the leaderboard's workload (19.8M input, 99.4%
+  cache hits, 108K output per task) DeepInfra's cache price makes the pin
+  about $0.32/task vs about $0.14 off-peak on DeepSeek's own API. That means
+  roughly $36 per 113-task DeepSWE pass. The cheaper route serves the wrong
+  model, so the premium buys model identity.
 
 ## 8. Dispatch runbook (only after the user authorises spend)
 
