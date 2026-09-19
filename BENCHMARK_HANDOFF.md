@@ -183,6 +183,34 @@ Stuck runs whose `plan` failed leave a non-terminating progress job and stay
 `in_progress` forever, leaking concurrency. Plain cancel does not clear them;
 `POST .../force-cancel` does.
 
+## Offline hardening, 2026-09-18 (HAR-88)
+
+Nine rounds of fix -> full suite -> adversarial Opus review, all offline (no
+provider call, no dispatch, no Docker). Review 9 approved with nothing above
+LOW. The complete record - every fix, the severity trend, the twelve
+pre-existing test failures, the LOW residuals, the open decisions and the
+dispatch plan - is `docs/benchmarks/gt_hardening_rsi_2026-09-18.md`, mirrored
+in Linear HAR-88. Read that before dispatching anything.
+
+Three things it changes for the next dispatch:
+
+1. The provider route is `deepseek/deepseek-v4-flash-0731` on `deepinfra`
+   only (fp8). The `relace` route was fp4 - a confound against the fp8
+   baseline. `config/benchmark_model.v1.json` is the model's single source
+   of truth.
+2. Every TB2 task job now ends with `scripts.verify_run_receipts` over the
+   Pier job directory. rc 1 means the receipts contradict each other, rc 2
+   means nothing was resolved (`resolution_error` says which way), and a
+   green job with `receipt-consistency.json` absent is an error. Read that
+   file before counting a task.
+3. The planner excludes Alpine/musl final stages by parsing the Dockerfile
+   the way BuildKit does and reports `excluded` / `unresolved` in
+   `tb2-gt-smoke20-plan.json`; the funds preflight is sized by the
+   post-exclusion `task_count`.
+
+Defects 3-7 in the list above are still open; the document says what each
+needs.
+
 ## How state carries between sessions
 
 There is no hidden model memory between GitHub jobs. Continuity is explicit:

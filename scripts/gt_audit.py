@@ -110,6 +110,12 @@ from gt_engine.event_journal import (  # noqa: E402
 )
 from gt_engine.replay import build_iteration_replay  # noqa: E402
 from gt_engine.request_history import load_provider_request  # noqa: E402
+from scripts.lsp_no_op import (  # noqa: E402
+    EXPECTED,
+    UNEXPECTED,
+    UNKNOWN,
+    classify_lsp_no_op,
+)
 
 # --------------------------------------------------------------------------- #
 # transcript parsing (nano CLI rich-panel format, tee'd without ANSI)
@@ -821,6 +827,10 @@ class TaskAudit:
     # tool health
     tool_results: int = 0
     tool_errors: int = 0
+    # host-side run evidence (the sealed diagnostics document and the
+    # supervisor report), not the transcript
+    capabilities: list[dict] = field(default_factory=list)
+    memory_pressure: dict = field(default_factory=dict)
     # parser honesty
     unparsed_lines: int = 0
     unparsed_samples: list[str] = field(default_factory=list)
@@ -1987,7 +1997,206 @@ def _audit_native_miniswe_task(
     return a
 
 
+# --------------------------------------------------------------------------- #
+# host-side run evidence: capability rows and memory pressure
+#
+# Neither lives in the transcript. gt_session seals the capability rows into
+# the task's diagnostics.json and gt_session is pinned, so nothing below moves
+# a state or a verdict: it annotates what a row already says and surfaces what
+# the artifact already recorded.
+# --------------------------------------------------------------------------- #
+_DIAGNOSTICS_SCHEMA = "gt.diagnostics.v1"
+# gt_session reports lsp_promotion DEGRADED with this evidence whenever the
+# promoter found nothing to promote. That one string covers a task with no
+# LSP-serviceable language, where promoting nothing is correct (extract-elf is
+# a C/ELF task; run 35293191813 reported exactly this), and a task whose
+# serviceable language was never promoted, which is a real fault. The
+# promotion receipts separate them.
+_LSP_NO_OP_MARKERS = ("no_op", "nothing_promotable")
+# Worst-first: one faulted receipt is never laundered by a clean neighbour.
+_LSP_VERDICT_RANK = {UNEXPECTED: 3, UNKNOWN: 2, EXPECTED: 1}
+_INDEX_OOM_RETURNCODE = -9
+_INDEX_ABORT_REASON_PREFIX = "initial_index_failed"
+_GRAPH_REFRESH_FAILED_CODE = "GT_GRAPH_REFRESH_FAILED"
+_INDEX_HEADROOM_CAUSE = "gt_index_memory_headroom_insufficient"
+
+
+def _read_json_document(path: Path) -> dict | None:
+    """One JSON object, or None. An unreadable file is never an empty one."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def task_diagnostics_document(task_dir: Path) -> dict:
+    """The sealed diagnostics document for this task, or ``{}``.
+
+    miniswe_gt_run copies the in-container document to the receipt directory
+    (``<task>/agent/``) because ``gt-state/<task_id>/`` reached the artifact
+    nearly empty in run 34062325608. emit_task_diagnostics drops a
+    host-synthesized document one level down, under
+    ``agent/gt-state/<task_id>/``, precisely when the copy in ``agent/`` exists
+    but is malformed - so a document that fails the schema check is skipped
+    rather than shadowing the good one. The FIRST valid document wins: the two
+    locations hold copies of each other, and reading both would double every
+    refusal counted below.
+    """
+    candidates = [task_dir / "agent" / "diagnostics.json"]
+    candidates.extend(
+        sorted((task_dir / "agent" / "gt-state").glob("*/diagnostics.json"))
+    )
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        document = _read_json_document(candidate)
+        if document is not None and document.get("schema") == _DIAGNOSTICS_SCHEMA:
+            return document
+    return {}
+
+
+def lsp_promotion_receipts(task_dir: Path) -> list[dict | None]:
+    """Every ``gt.lsp_promotion_task.v1`` receipt the task exported.
+
+    Unreadable blobs are kept as None so they classify UNKNOWN. Dropping them
+    would let a corrupt receipt read as a clean run.
+    """
+    return [
+        _read_json_document(path)
+        for path in sorted(
+            (task_dir / "agent" / "gt-state").glob("*/lsp_receipts/*.json")
+        )
+    ]
+
+
+def classify_task_lsp_no_op(task_dir: Path) -> tuple[str, str]:
+    """Worst verdict across the task's promotion receipts.
+
+    UNEXPECTED > UNKNOWN > EXPECTED. Receipts that are not no-ops classify
+    NOT_APPLICABLE and are ignored; when nothing is left the answer is UNKNOWN,
+    never EXPECTED - a capability row claiming a no-op with no receipt to show
+    for it is unexplained, not correct.
+    """
+    classified = [classify_lsp_no_op(r) for r in lsp_promotion_receipts(task_dir)]
+    ranked = [item for item in classified if item[0] in _LSP_VERDICT_RANK]
+    if not ranked:
+        return UNKNOWN, (
+            "no no_op promotion receipt under agent/gt-state/*/lsp_receipts/ "
+            f"({len(classified)} receipt(s) read)"
+        )
+    return max(ranked, key=lambda item: _LSP_VERDICT_RANK[item[0]])
+
+
+def annotated_capability_rows(task_dir: Path, document: dict) -> list[dict]:
+    """Capability rows as sealed, plus the no-op verdict where it applies.
+
+    Rows are copied, never edited in place, and the row's own ``state`` and
+    ``evidence`` bytes are left exactly as gt_session wrote them - the pinned
+    engine owns those. The two added keys say which of the two opposite
+    situations behind ``terminal_no_op:nothing_promotable`` this task is.
+    """
+    rows: list[dict] = []
+    for raw in document.get("capabilities") or ():
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        if str(row.get("capability") or "") == "lsp_promotion" and any(
+            marker in str(row.get("evidence") or "")
+            for marker in _LSP_NO_OP_MARKERS
+        ):
+            verdict, detail = classify_task_lsp_no_op(task_dir)
+            row["lsp_no_op_verdict"] = verdict
+            row["lsp_no_op_detail"] = detail
+        rows.append(row)
+    return rows
+
+
+# The collectors write the report to exactly these places, in this order of
+# authority. A TB2 task directory also holds the task's whole repository
+# checkout, so an unbounded rglob walks that checkout once per task and, worse,
+# can pick a vendored look-alike out of it as this run's own report - a fixture
+# in site-packages deciding whether we report an OOM kill. A new collector
+# layout is added here deliberately, never discovered by walking.
+_MINISWE_REPORT_GLOBS = (
+    "agent/miniswe_report.json",
+    "miniswe_report.json",
+    "artifacts/miniswe_report.json",
+    "official-evaluator/miniswe_report.json",
+    "agent/gt-state/*/miniswe_report.json",
+)
+
+
+def _task_miniswe_report(task_dir: Path) -> dict:
+    """The task's Mini-SWE report, searched only where the harness writes it."""
+    for pattern in _MINISWE_REPORT_GLOBS:
+        for path in sorted(task_dir.glob(pattern)):
+            document = _read_json_document(path)
+            if document is not None:
+                return document
+    return {}
+
+
+def task_memory_pressure(task_dir: Path, document: dict) -> dict:
+    """What memory pressure cost this task, from evidence already on disk.
+
+    Cohort 35298094010 lost write-compressor and sanitize-git-repo to the GT
+    indexer being SIGKILLed during initial indexing, and other runs journaled
+    GT_GRAPH_REFRESH_FAILED rows caused by
+    GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT. Both facts were in the artifact and
+    in neither the console report nor the JSON audit.
+    """
+    supervisor = _task_miniswe_report(task_dir).get("supervisor")
+    supervisor = supervisor if isinstance(supervisor, dict) else {}
+    # Returncode -9 alone is not an index OOM: the supervisor SIGKILLs on its
+    # own deadline too, and calling that memory pressure would cry wolf on
+    # every timeout. Only the initial-index abort reason names the indexer.
+    oom_kill = (
+        supervisor.get("child_returncode") == _INDEX_OOM_RETURNCODE
+        and str(supervisor.get("reason") or "").startswith(
+            _INDEX_ABORT_REASON_PREFIX
+        )
+    )
+    refusals = 0
+    headroom = 0
+    for row in document.get("diagnostics") or ():
+        if not isinstance(row, dict):
+            continue
+        # Occurrences, not rows: seal() aggregates by fingerprint, and run
+        # 35178222629 journaled 58 headroom refusals on one task that collapse
+        # into a single row. Counting rows would report that as one.
+        count = row.get("occurrence_count")
+        count = count if isinstance(count, int) and count > 0 else 1
+        if str(row.get("code") or "") == _GRAPH_REFRESH_FAILED_CODE:
+            refusals += count
+        # The cause is free text the producer stamps (`amend_refused:<code>`),
+        # so both the raw and the normalized spelling are searched.
+        cause = f"{row.get('cause') or ''} {row.get('normalized_cause') or ''}"
+        if _INDEX_HEADROOM_CAUSE in cause.casefold():
+            headroom += count
+    return {
+        "oom_kill_during_index": bool(oom_kill),
+        "graph_refresh_refusals": refusals,
+        "headroom_refusals": headroom,
+    }
+
+
 def audit_task(task_dir: Path) -> TaskAudit:
+    """Audit one task, then annotate it with the host-side run evidence.
+
+    The annotation runs after the artifact audit and deliberately touches
+    neither the verdict nor the verdict reasons: gt_session owns the capability
+    state and is pinned, and this reporting exists so a reader can tell a
+    correct no-op from a fault, not so the gate can change its mind.
+    """
+    audit = _audit_task_artifacts(task_dir)
+    document = task_diagnostics_document(task_dir)
+    audit.capabilities = annotated_capability_rows(task_dir, document)
+    audit.memory_pressure = task_memory_pressure(task_dir, document)
+    return audit
+
+
+def _audit_task_artifacts(task_dir: Path) -> TaskAudit:
     rj = _load_result_json(task_dir)
     trajectory_path, journal_path, native_issues = _native_miniswe_paths(task_dir)
     if trajectory_path is not None:
@@ -2845,6 +3054,15 @@ def attribution_red_features(feature_attribution: dict) -> list[str]:
     return sorted(red)
 
 
+_MEMORY_PRESSURE_KEYS = (
+    "oom_kill_during_index", "graph_refresh_refusals", "headroom_refusals",
+)
+
+
+def _pressure_total(audits: list[TaskAudit], key: str) -> int:
+    return sum(int((a.memory_pressure or {}).get(key) or 0) for a in audits)
+
+
 def _fmt(v: object, width: int) -> str:
     s = "-" if v is None else str(v)
     return s[:width].ljust(width)
@@ -2950,6 +3168,28 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
                 f"applied={a.verification_plan_applied}, "
                 f"decisions={a.verification_plan_decisions}"
             )
+        # Capability rows that did not report WORKING, plus any row carrying a
+        # no-op verdict. A capability that worked needs no line here; one that
+        # promoted nothing needs to say WHICH kind of nothing (run 35293191813
+        # is the correct kind and read identically to a fault).
+        for row in a.capabilities:
+            verdict = str(row.get("lsp_no_op_verdict") or "")
+            annotation = (
+                f" [{verdict}: {row.get('lsp_no_op_detail')}]" if verdict else ""
+            )
+            if row.get("state") == "WORKING" and not annotation:
+                continue
+            out.append(
+                f"  - CAPABILITY {row.get('capability')} [{row.get('state')}]: "
+                f"{row.get('evidence')}{annotation}"
+            )
+        pressure = a.memory_pressure or {}
+        if any(pressure.get(key) for key in _MEMORY_PRESSURE_KEYS):
+            out.append(
+                "  - MEMORY PRESSURE: "
+                + ", ".join(f"{key}={pressure.get(key)}"
+                            for key in _MEMORY_PRESSURE_KEYS)
+            )
         for n in a.notes:
             out.append(f"  - note: {n}")
         for s in a.unparsed_samples:
@@ -3002,6 +3242,17 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
                 + str(sum(bool(item["response_observed"]) for item in items))
             )
         out.append("-" * 104)
+    # Stated at zero as well: a reader must be able to see that the question
+    # was asked. Cohort 35298094010 lost two tasks to an index OOM and the
+    # report's silence was indistinguishable from a run with no pressure.
+    out.append(
+        "\nMEMORY PRESSURE TOTALS: "
+        f"{sum(1 for a in audits if (a.memory_pressure or {}).get('oom_kill_during_index'))}"
+        " task(s) OOM-killed during initial index, "
+        f"{_pressure_total(audits, 'graph_refresh_refusals')}"
+        " graph-refresh refusal(s), "
+        f"{_pressure_total(audits, 'headroom_refusals')} headroom refusal(s)"
+    )
     out.append("\nSUMMARY: " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     return "\n".join(out)
 

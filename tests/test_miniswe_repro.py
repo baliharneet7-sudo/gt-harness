@@ -34,12 +34,28 @@ MAX_TOOL_OUTPUT_CHARS = 16_000
 
 
 def test_muse_route_preserves_the_baseline_xhigh_reasoning_contract(monkeypatch) -> None:
+    # The muse id was later added to _PROVIDER_ROUTING_BY_MODEL, so with a
+    # gateway configured the route now REFUSES unless the provider lock is
+    # pinned in the environment: an unset GT_PROVIDER_ROUTING_JSON reaches
+    # json.loads("") and raises provider_routing_env_invalid. That refusal is
+    # the point of the lock, not a defect, so the test supplies the lock
+    # instead of weakening it - and pins it here so no ambient value can
+    # decide what this test measures. The reasoning contract below is
+    # unchanged and is still what this test is about.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
+    monkeypatch.delenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", raising=False)
+    muse_routing = {
+        "only": ["meta"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    }
+    monkeypatch.setenv("GT_PROVIDER_ROUTING_JSON", json.dumps(muse_routing))
 
     model, kwargs = _model_and_kwargs("meta/muse-spark-1.2-contributor", 1.0)
 
     assert model == "openai/meta/muse-spark-1.2-contributor"
     assert kwargs["reasoning"] == {"effort": "xhigh"}
+    assert kwargs["extra_body"] == {"provider": muse_routing}
 
 
 def test_deepseek_route_forwards_deepinfra_only_without_fallback(monkeypatch) -> None:

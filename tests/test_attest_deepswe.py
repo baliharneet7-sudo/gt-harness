@@ -14,6 +14,7 @@ from gt_harness.runtime_receipts import issue_runtime_receipts
 from scripts.attest_deepswe import _total_cost, attest_deepswe, main
 from scripts.gt_audit import artifact_corpus_sha256, audit_digest_sha256
 from scripts.provider_preflight import load_route
+from scripts.provider_preflight import run as run_provider_preflight
 from tests.conftest import write_certifiable_graph
 
 TASK = "abs-module-cache-flags"
@@ -109,6 +110,22 @@ def _fixture(
             "context_window_tokens": 131072,
             "reserved_output_tokens": route["requested_output_tokens"],
             "context_window_source": "openrouter:/models",
+            "funds_sufficient": True,
+            "funds_verdict": "sufficient",
+            "funds_reason": None,
+            "estimate_usd": 1.345125,
+            "funds_headroom_bucket": "ge_10x",
+            "expected_tasks": 1,
+            "pricing_source": "route_manifest:pricing",
+            "served_endpoint": {
+                "provider": "deepinfra",
+                "tag": "deepinfra/fp8",
+                "quantization": "fp8",
+                "context_length": 1_048_576,
+                "prompt_price": 6e-8,
+                "completion_price": 1.8e-7,
+            },
+            "fingerprint_available": False,
         },
     )
     job = root / "tasks" / "job"
@@ -979,6 +996,49 @@ def test_unknown_provider_gate_field_fails_without_leaking_value(
     assert "SECRET_CANARY" not in json.dumps(receipt)
 
 
+def test_preflight_receipt_satisfies_the_attested_gate_field_set(
+    tmp_path: Path,
+) -> None:
+    """Producer and consumer joined. The gate above is hand-written, so an
+    exact-set check could only ever be tested against a receipt that never
+    existed: every new preflight key would spend the whole paid run and then
+    fail attestation on the way out."""
+    repo_root = Path(__file__).resolve().parents[1]
+    receipt = run_provider_preflight(
+        manifest=repo_root / "config" / "provider_route.v1.json",
+        output=tmp_path / "produced-gate.json",
+        source_sha="f" * 40,
+        live=False,
+    )
+
+    assert set(receipt) == attest_module.PROVIDER_GATE_FIELDS
+    # An account balance must never reach an uploaded artifact, which is what
+    # `account_amounts_recorded: False` promises: the only dollar figure the
+    # receipt carries is the estimate, which is published pricing times a
+    # declared token budget.
+    assert receipt["account_amounts_recorded"] is False
+    assert [key for key in receipt if key.endswith("_usd")] == ["estimate_usd"]
+    assert [key for key in receipt if "balance" in key or "credit" in key] == []
+
+
+def test_synthetic_gate_fixture_carries_the_producer_field_set(
+    tmp_path: Path,
+) -> None:
+    """The fixture the rest of this module mutates must stay the shape the
+    preflight actually writes."""
+    _fixture(tmp_path)
+    gate = json.loads((tmp_path / "provider-gate.json").read_text(encoding="utf-8"))
+    repo_root = Path(__file__).resolve().parents[1]
+    produced = run_provider_preflight(
+        manifest=repo_root / "config" / "provider_route.v1.json",
+        output=tmp_path / "produced-gate.json",
+        source_sha="f" * 40,
+        live=False,
+    )
+
+    assert set(gate) == set(produced)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1222,3 +1282,127 @@ def test_f10_uncounted_real_call_still_fails_closed(tmp_path: Path) -> None:
     """
     with pytest.raises(ValueError, match="provider_call_count_mismatch"):
         _fixture(tmp_path, bootstrap_calls=1, declare_bootstrap=False)
+
+
+# --- round 3: the admitted gate fields are read, not merely tolerated ---
+#
+# Every one of the nine pre-spend fields was optional and unread, so a receipt
+# with the funds block absent attested exactly like one that said "sufficient"
+# and the witness wrote None for both. Below: what each field now binds.
+
+
+def _gate(root: Path) -> dict[str, object]:
+    return json.loads((root / "provider-gate.json").read_text(encoding="utf-8"))
+
+
+def test_a_gate_that_priced_the_run_short_cannot_attest(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    gate = _gate(tmp_path)
+    gate.update(funds_sufficient=False, funds_verdict="insufficient")
+    _write(tmp_path / "provider-gate.json", gate)
+
+    receipt = _attest(tmp_path)
+
+    assert receipt["status"] == "FAIL"
+    assert "provider_gate_funds_insufficient" in receipt["errors"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ({"funds_verdict": None}, "provider_gate_funds_verdict_missing"),
+        ({"expected_tasks": None}, "provider_gate_expected_tasks_missing"),
+        ({"expected_tasks": "1"}, "provider_gate_expected_tasks_missing"),
+        ({"expected_tasks": 2}, "provider_gate_expected_tasks_mismatch"),
+    ],
+)
+def test_live_gate_funds_fields_are_required_and_bound_to_the_plan(
+    tmp_path: Path, mutation: dict[str, object], expected: str
+) -> None:
+    """mode == "live" is the paid path: a receipt that says nothing about the
+    money it was supposed to check is not a gate."""
+    _fixture(tmp_path)
+    gate = _gate(tmp_path)
+    gate.update(mutation)
+    _write(tmp_path / "provider-gate.json", gate)
+
+    receipt = _attest(tmp_path)
+
+    assert receipt["status"] == "FAIL"
+    assert expected in receipt["errors"]
+
+
+def test_served_quantization_drift_from_the_route_manifest_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """The fp8 baseline against a relace/fp4 endpoint under the same model
+    name scored 0/20 against 17/20: the name alone is not the identity."""
+    _fixture(tmp_path)
+    gate = _gate(tmp_path)
+    gate["served_endpoint"] = dict(gate["served_endpoint"], quantization="fp4")
+    _write(tmp_path / "provider-gate.json", gate)
+
+    receipt = _attest(tmp_path)
+
+    assert receipt["status"] == "FAIL"
+    assert "provider_gate_quantization_mismatch" in receipt["errors"]
+
+
+@pytest.mark.parametrize("quantization", ["unknown", None])
+def test_an_unreadable_served_quantization_is_witnessed_not_refused(
+    tmp_path: Path, quantization: object
+) -> None:
+    """"unknown" is the preflight's sentinel for an unreadable endpoint tag,
+    not an observation of drift: refusing on it would close the gate on
+    missing evidence after the run has already been paid for."""
+    _fixture(tmp_path)
+    gate = _gate(tmp_path)
+    if quantization is None:
+        gate["served_endpoint"] = None
+    else:
+        gate["served_endpoint"] = dict(
+            gate["served_endpoint"], quantization=quantization
+        )
+    _write(tmp_path / "provider-gate.json", gate)
+
+    receipt = _attest(tmp_path)
+
+    assert "provider_gate_quantization_mismatch" not in receipt["errors"]
+    assert receipt["provider_gate"]["served_quantization_unverified"] is True
+
+
+def test_a_missing_provider_fingerprint_is_witnessed_not_treated_as_failure(
+    tmp_path: Path,
+) -> None:
+    """OpenRouter answers system_fingerprint: null. That is its limitation,
+    so it is a named field in the witness rather than an error."""
+    _fixture(tmp_path)
+
+    receipt = _attest(tmp_path)
+
+    assert receipt["provider_gate"]["fingerprint_available"] is False
+    assert receipt["provider_gate"]["served_build_unverified"] is True
+    assert not any("fingerprint" in error for error in receipt["errors"])
+
+    gate = _gate(tmp_path)
+    gate["fingerprint_available"] = True
+    _write(tmp_path / "provider-gate.json", gate)
+
+    assert _attest(tmp_path)["provider_gate"]["served_build_unverified"] is False
+
+
+def test_a_gate_missing_an_admitted_field_is_no_longer_tolerated(
+    tmp_path: Path,
+) -> None:
+    """Round 2 admitted the pre-spend fields as optional so pre-existing
+    receipts could still attest. Both fixtures now carry the producer's exact
+    field set, so the subset window is closed: the check is set equality."""
+    _fixture(tmp_path)
+    gate = _gate(tmp_path)
+    del gate["funds_headroom_bucket"]
+    _write(tmp_path / "provider-gate.json", gate)
+
+    receipt = _attest(tmp_path)
+
+    assert receipt["status"] == "FAIL"
+    assert "provider_gate_fields_invalid" in receipt["errors"]

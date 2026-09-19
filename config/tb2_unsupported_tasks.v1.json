@@ -1,0 +1,12 @@
+{
+  "schema": "gt.tb2_unsupported_tasks.v1",
+  "dataset": "terminal-bench@2.0",
+  "rationale": "The GT wheel pulls in cryptography, which publishes no musl wheel, so groundtruth-mcp cannot be installed inside an Alpine task image. In cohort 35298094010 qemu-alpine-ssh was scored as an infrastructure failure for this reason. A task the harness cannot enter is excluded from the cohort: neither graded nor infrastructure-failed.",
+  "detection": "The planner also detects these dynamically. For each selected task it parses Dockerfile and environment/Dockerfile, takes the image reference of the FINAL build stage (the FROM of the last logical instruction line: comment lines dropped and backslash-continued lines joined the way Docker does it, heredoc bodies a RUN writes skipped, and leading whitespace before the instruction ignored), and excludes the task when that reference names an Alpine base: a repository path token equal to 'alpine', or a tag token - splitting the tag on '-' - equal to 'alpine' or 'alpine<version>'. Only the final stage decides the runtime libc, so an earlier 'FROM alpine AS builder' does not exclude a glibc task, and a name that merely contains the word (ghcr.io/org/alpine-builder) is not the distro. A Dockerfile the planner reads no FROM out of at all excludes nothing: the task is kept and the run warns 'Dockerfile unparsed', because an unparsed file is a gap in the planner rather than evidence about the task. This file is the static fallback the planner unions with the detected set, so the exclusion holds even when the dataset layout changes.",
+  "tasks": [
+    {
+      "task": "qemu-alpine-ssh",
+      "reason": "unsupported_platform:musl"
+    }
+  ]
+}

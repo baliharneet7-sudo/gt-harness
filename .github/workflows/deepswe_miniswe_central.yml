@@ -5,8 +5,8 @@
 # The v1.1 task contract is executed by the pinned Pier runner.  Pier is the
 # Harbor-compatible orchestrator that creates the separate verifier environment,
 # runs verifier.collect hooks (including the commit-to-patch collector), and
-# grades the pristine verifier checkout.  Mini-SWE still runs through the
-# host-owned eval.gt_central_agent:MiniSweCentralAgent import.
+# grades the pristine verifier checkout.  Mini-SWE runs through the one Pier
+# adapter this repository actually carries, eval/pier_gt_harness_adapter.py.
 name: DeepSWE Mini-SWE central evaluation
 
 on:
@@ -113,6 +113,11 @@ env:
   # force MiniMax routing for unrelated OpenRouter models.
   GT_OPENROUTER_PROVIDER_ONLY: ""
   GT_OPENROUTER_DATA_COLLECTION: allow
+  # Single literal for the guard in `plan` and the `pier run` invocation in
+  # `run`.  Run 35259343723 showed what an unresolvable adapter costs: 20 task
+  # jobs fanned out and every one died on the missing agent module.  The guard
+  # below resolves this exact string in the planner, before any fan-out.
+  AGENT_IMPORT_PATH: "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent"
 
 jobs:
   plan:
@@ -152,6 +157,79 @@ jobs:
       - name: Resolve exact GT revision
         id: gt
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Install the central runtime the guard resolves against
+        # The guard below must be able to fail on a missing adapter rather
+        # than on a missing dependency of an adapter that is present.  The
+        # TB2 engine workflow installs before it resolves for exactly this
+        # reason; without an install the planner sees every adapter as "on
+        # disk but not importable" and the guard decays into a file-exists
+        # check that no longer protects the fan-out.
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e . "mini-swe-agent==2.2.8"
+      - name: Resolve the exact agent import path before any matrix fan-out
+        env:
+          CHECKOUT_REF: ${{ inputs.ref }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          python - <<'EOF'
+          import importlib, importlib.util, os, sys
+
+          # The run job passes this string to --agent-import-path.  Run
+          # 35259343723 (TB2 engine) fanned out 20 task jobs that all died on a
+          # missing agent module, so resolve it here, in the planner, where a
+          # failure costs one job instead of the whole matrix.
+          target = os.environ["AGENT_IMPORT_PATH"]
+          module, _, symbol = target.partition(":")
+          ref = os.environ.get("CHECKOUT_REF") or "(default)"
+          fatal = (
+              f"::error::agent module '{module}' is not importable on ref '{ref}'. "
+              "The only Pier adapter this repository carries is "
+              "eval/pier_gt_harness_adapter.py; the historical eval/pier_gt_adapter.py "
+              "path exists on no branch. Fix AGENT_IMPORT_PATH before dispatching."
+          )
+          try:
+              spec = importlib.util.find_spec(module)
+          except ModuleNotFoundError as exc:
+              # find_spec imports the PARENT package, so this exception is
+              # not necessarily about the target: eval/__init__.py reaching
+              # for an uninstalled third-party dependency raises here too.
+              # Swallowing both as "spec = None" turned a dependency gap
+              # into a false "adapter missing" verdict, so blame the target
+              # only when the name that went missing IS the target or the
+              # package that contains it.
+              missing = getattr(exc, "name", "") or ""
+              if missing == module or module.startswith(f"{missing}."):
+                  print(fatal)
+                  sys.exit(1)
+              print(f"::warning::resolving {module} raised ModuleNotFoundError "
+                    f"for unrelated dependency '{missing}'; the task job "
+                    "installs the full runtime")
+              sys.exit(0)
+          if spec is None:
+              print(fatal)
+              sys.exit(1)
+          try:
+              loaded = importlib.import_module(module)
+          except ImportError as exc:
+              missing = getattr(exc, "name", "") or ""
+              if missing == module or module.startswith(f"{missing}."):
+                  print(fatal)
+                  sys.exit(1)
+              # A planner-only dependency gap is not the trap this guard exists
+              # for: the module is on disk and the task job installs the runtime.
+              print(f"::warning::{module} is on disk but not importable in the "
+                    f"planner environment: {type(exc).__name__}: {exc}")
+              sys.exit(0)
+          if not symbol or not hasattr(loaded, symbol):
+              print(f"::error::{module} defines no '{symbol}'; "
+                    f"--agent-import-path {target} would fail in every task job")
+              sys.exit(1)
+          print(f"resolved --agent-import-path {target} -> {loaded.__file__}")
+          EOF
+
       - name: Enforce active release authorization
         if: ${{ !inputs.diagnostic_only }}
         run: |
@@ -541,7 +619,10 @@ jobs:
   task_progress:
     name: Task progress
     needs: [plan]
-    if: always()
+    # Same zombie as TB2 runs 35256152140..35258327432: with `always()` this
+    # monitor polls for task jobs that a failed plan never dispatched, and the
+    # run sits in_progress holding a concurrency slot until someone cancels it.
+    if: needs.plan.result == 'success'
     uses: ./.github/workflows/task_progress.yml
     with:
       expected_tasks_json: ${{ needs.plan.outputs.tasks }}
@@ -819,7 +900,7 @@ jobs:
               )
             fi
             timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" pier run -p deepswe-bench/tasks --include-task-name "$TASK" \
-              --agent-import-path eval.pier_gt_adapter:PierMiniSweCentralAgent \
+              --agent-import-path "$AGENT_IMPORT_PATH" \
               -m "$MODEL" -o results/deepswe \
               --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
               --agent-timeout-multiplier 1.0 -n 1 -y \
@@ -940,6 +1021,8 @@ jobs:
     needs: [plan, run]
     if: ${{ always() && needs.plan.result == 'success' && needs.run.result != 'skipped' }}
     runs-on: ubuntu-latest
+    # Reporting-only aggregation over already-uploaded artifacts.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:

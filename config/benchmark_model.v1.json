@@ -1,0 +1,8 @@
+{
+  "schema": "gt.benchmark_model.v1",
+  "model": "deepseek/deepseek-v4-flash-0731",
+  "effective_model": "openai/deepseek/deepseek-v4-flash-0731",
+  "provider_only": ["deepinfra"],
+  "tb2_route_manifest": "config/provider_route_deepseek_v4_flash_0731_fp8.v1.json",
+  "swelive_route_manifest": "config/provider_route_deepseek_v4_flash_0731_fp8.v1.json"
+}

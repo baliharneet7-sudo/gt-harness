@@ -140,6 +140,23 @@ jobs:
 
       - name: Static checks
         run: |
+          set -euo pipefail
+          # eval/gt_central_agent.py is the inline-engine control plane.
+          # 97efb7f0 deleted it from the union branches, so it only exists on
+          # inline-engine. This workflow is reusable and every caller checks out
+          # its own `ref` (deepswe_miniswe_central's provider_free job passes the
+          # planned gt_sha), so at a ref without that module ruff aborted the whole
+          # job on a missing path before a single real check had run. Lint it where
+          # it exists, and say so out loud where it does not - a target that
+          # vanishes quietly is the failure this guard replaces. Every other target
+          # stays unconditional, and tests/test_gt_central_agent.py still runs above:
+          # that file is present here and imports gt_engine only.
+          central_agent=()
+          if [[ -f eval/gt_central_agent.py ]]; then
+            central_agent=(eval/gt_central_agent.py)
+          else
+            echo "::warning title=central_agent_module_absent::eval/gt_central_agent.py is absent at this ref; its ruff target is skipped. That module lives on the inline-engine branch (deleted from the union branches by 97efb7f0)."
+          fi
           python -m ruff check gt_engine/central_runtime.py \
             gt_engine/central_controls.py \
             gt_engine/preflight.py gt_engine/provider_view.py \
@@ -161,7 +178,7 @@ jobs:
             gt_engine/semantic_decisions.py gt_engine/deep_metrics.py \
             gt_engine/delivery_audit.py \
             gt_engine/uplift_policy.py \
-            gt_engine/experiment.py eval/gt_central_agent.py \
+            gt_engine/experiment.py "${central_agent[@]}" \
             scripts/central_readiness_audit.py \
             scripts/central_release_gate.py \
             scripts/central_bootstrap_canary.py \

@@ -191,6 +191,27 @@ def _swelive_fixture(root: Path, source_sha: str = "f" * 40) -> Path:
             "context_window_tokens": 131072,
             "reserved_output_tokens": route["requested_output_tokens"],
             "context_window_source": "openrouter:/models",
+            # The pre-spend half of the receipt. scripts/attest_deepswe.py now
+            # requires the producer's exact field set and binds the funds
+            # verdict, the priced cohort size and the served quantization, so
+            # this fixture carries them rather than exercising a subset the
+            # preflight never writes.
+            "funds_sufficient": True,
+            "funds_verdict": "sufficient",
+            "funds_reason": None,
+            "estimate_usd": 1.345125,
+            "funds_headroom_bucket": "ge_10x",
+            "expected_tasks": 1,
+            "pricing_source": "route_manifest:pricing",
+            "served_endpoint": {
+                "provider": "deepinfra",
+                "tag": "deepinfra/fp8",
+                "quantization": route["expected_quantization"],
+                "context_length": 1_048_576,
+                "prompt_price": 6e-8,
+                "completion_price": 1.8e-7,
+            },
+            "fingerprint_available": False,
         },
     )
     job = root / "tasks" / "job"

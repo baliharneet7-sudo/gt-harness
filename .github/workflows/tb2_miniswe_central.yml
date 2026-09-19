@@ -43,6 +43,10 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       tasks: ${{ steps.plan.outputs.tasks }}
       task_set_sha256: ${{ steps.plan.outputs.task_set_sha256 }}
+      excluded: ${{ steps.plan.outputs.excluded }}
+      # The funds preflight prices a run whose matrix it cannot see, so
+      # the runnable count is an output rather than an assumption.
+      task_count: ${{ steps.plan.outputs.task_count }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,7 +71,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$TREATMENT_SHA"
           harbor dataset download "$DATASET" -o "$RUNNER_TEMP/tb2-plan" --export
           python - <<'PY'
-          import hashlib, json, os
+          import hashlib, json, os, re
           from pathlib import Path
           from scripts.resolve_harbor_budget import SUPERVISOR_GRACE_SECONDS, resolve_budget
 
@@ -108,6 +112,409 @@ jobs:
           missing = sorted(set(tasks) - available)
           if missing:
               raise SystemExit(f"tasks absent from terminal-bench@2.0: {missing}")
+          # Alpine/musl exclusion.  In cohort 35298094010 qemu-alpine-ssh could
+          # not install groundtruth-mcp at all: the GT wheel depends on
+          # cryptography, which ships no musl wheel, so the task was counted as
+          # an infrastructure failure of the harness rather than a result.  A
+          # task the harness cannot even enter is neither graded nor
+          # infrastructure-failed; it is excluded from the cohort, and the
+          # summarize job reports it under `excluded`.
+          fallback = json.loads(
+              Path("config/tb2_unsupported_tasks.v1.json").read_text(encoding="utf-8")
+          )
+          static_unsupported = {row["task"]: row["reason"] for row in fallback["tasks"]}
+
+          def final_from_image(body):
+              """Image reference of the LAST build stage, or None.
+
+              Only the final stage decides the runtime libc.  A task whose
+              builder stage is `FROM alpine AS builder` and whose final stage
+              is `FROM ubuntu:24.04` is a glibc task, and the old substring
+              scan over every FROM line silently dropped it from the graded
+              denominator.
+
+              Two lines that merely look like a stage are not one:
+                * a FROM inside a heredoc body (`RUN cat <<EOF > Dockerfile`)
+                  is data this build writes, not a stage it builds, and taking
+                  it made a glibc task read as Alpine and vanish from the
+                  denominator with nothing in the summary to say why.  The
+                  body ends at the terminator ALONE on a line, indented by
+                  tabs only when the opener was `<<-`;
+                * a FROM joined into a backslash-continued instruction is
+                  that instruction's text, not a stage.  Docker drops COMMENT
+                  lines before it joins a continuation, and a comment ends no
+                  continuation.
+              Leading whitespace before an instruction is stripped, FROM
+              included: heredoc bodies are skipped and continuations joined, so
+              a line reaching the FROM test is a logical instruction line.
+
+              `ARG NAME=value` defaults declared above the FIRST FROM are
+              substituted into every FROM, because `ARG BASE=alpine:3.19` +
+              `FROM ${BASE}` is an Alpine task that was never classified at
+              all.  Docker scopes them exactly that way: an ARG declared
+              after a FROM belongs to that stage and can never name a base,
+              so collecting it repointed a later `FROM ${BASE}` at an image
+              this build never uses.  Only plain defaults resolve; anything
+              else is left as written, and the caller reports it rather than
+              guessing.
+              """
+              image = None
+              heredoc = None
+              build_args = {}
+              seen_from = False
+              # Docker reads the file with Go's bufio.ScanLines: a line ends at
+              # `\n` and nowhere else, while `str.splitlines` also ends one at
+              # \v \f \x1c \x1d \x1e \x85 \u2028 \u2029 - so a control character
+              # in a RUN string (`RUN echo 'a\fFROM alpine:3.19'`) invented a
+              # stage.  A CRLF file's `\r` is dropped per line as dropCR does, or
+              # the continuation pattern's end-of-line anchor never sees the
+              # escape character through it.  A leading UTF-8 BOM goes too:
+              # Docker strips it, and leaving it defeated the `^\s*#` of the
+              # directive regex, losing a declared `# escape=` token.
+              if body.startswith("\ufeff"):
+                  body = body[1:]
+              lines = [line[:-1] if line.endswith("\r") else line for line in body.split("\n")]
+              # `# escape=` replaces the continuation character for the whole
+              # file: reading a backtick-escaped Dockerfile with the default
+              # token joined the line below a `RUN` into it and lost the real
+              # final stage, and the wrong token does the reverse.
+              escape = parser_directives(lines)
+              # BuildKit's lineContinuationRegex: the character may be
+              # followed by blanks and still continue the line.
+              continuation = re.compile(re.escape(escape) + r"[ \t]*$")
+              cursor = 0
+              while cursor < len(lines):
+                  line = lines[cursor]
+                  cursor += 1
+                  if heredoc is not None:
+                      # The body ends at the terminator word ALONE on its own
+                      # line.  `<<` requires it exactly; only `<<-` strips
+                      # leading TABS (never spaces).  A lenient `.strip()`
+                      # closed a body that was still running, so the heredoc
+                      # DATA after it was parsed as Dockerfile instructions -
+                      # which is the same defect the heredoc detection exists
+                      # to prevent.
+                      terminator, dashed = heredoc
+                      if (line.lstrip("\t") if dashed else line) == terminator:
+                          heredoc = None
+                      continue
+                  # Docker supports no inline `#` comment on an instruction at
+                  # all, but it DOES accept leading whitespace before the `#`
+                  # of a comment LINE (the `# syntax=` directive included), and
+                  # a comment line builds nothing and opens no heredoc.
+                  # Requiring column 0 let an indented `# cat <<EOF` open a
+                  # heredoc that never closed, which swallowed the real final
+                  # stage.  Cutting the line at the first `#` BEFORE looking
+                  # for `<<` is the opposite defect: it truncated
+                  # `RUN echo "#x" && cat <<EOF > /f` ahead of the redirect,
+                  # the heredoc went undetected, its body was parsed as
+                  # Dockerfile, and a glibc task read as Alpine.
+                  if re.match(r"\s*#", line):
+                      continue
+                  # A `\`-continued instruction is ONE logical line: Docker
+                  # joins it before parsing.  Reading the physical lines made
+                  # `FROM \` resolve to the backslash itself (an ARG-free
+                  # Alpine base that was never classified at all), and made the
+                  # second line of `RUN echo \` + `FROM alpine:3.19` read as a
+                  # stage this build never builds.  A heredoc BODY is never
+                  # joined - a trailing `\` in it is data - which is why this
+                  # sits below the terminator check.
+                  while continuation.search(line) and cursor < len(lines):
+                      physical = lines[cursor]
+                      cursor += 1
+                      # Docker REMOVES comment lines before joining and a
+                      # comment ends no continuation (`RUN echo hello \` +
+                      # `# comment` + `world` runs "hello world"): joining the
+                      # comment opened a heredoc on a `<<` Docker never sees.
+                      # An EMPTY continuation line is skipped the same way and
+                      # the continuation stays live; ending the logical line
+                      # there made the `FROM` below a blank line read as a
+                      # stage this build never builds.
+                      if re.match(r"\s*#", physical) or not physical.strip():
+                          continue
+                      line = continuation.sub("", line) + physical
+                  # A file ending ON a continuation loses the character too.
+                  text = continuation.sub("", line)
+                  # Docker takes a heredoc redirection on RUN, COPY and ADD
+                  # only.  Scanning every instruction opened a phantom heredoc
+                  # on `ARG X=a<<b` - a left shift in a default value - which
+                  # swallowed the file and returned the FIRST stage, unsaid.
+                  keywords = re.match(
+                      r"\s*([A-Za-z][A-Za-z0-9_]*)(?:\s+([A-Za-z][A-Za-z0-9_]*))?", text
+                  )
+                  instruction = keywords.group(1).upper() if keywords else ""
+                  # BuildKit unwraps heredocCompoundDirectives (ONBUILD) BEFORE
+                  # asking canContainHeredoc, so `ONBUILD RUN <<EOF` DOES open
+                  # one; refusing it read the body's `FROM alpine:3.19` as a
+                  # stage and excluded a glibc task as musl.  `ONBUILD ARG
+                  # X=a<<b` is still a left shift: the gate does not widen.
+                  if instruction == "ONBUILD" and keywords.group(2):
+                      instruction = keywords.group(2).upper()
+                  opened = heredoc_word(text) if instruction in ("RUN", "COPY", "ADD") else None
+                  if opened:
+                      heredoc = opened
+                      continue
+                  # Docker strips leading whitespace from an instruction, so
+                  # an indented ARG still declares a default.
+                  declared = re.match(
+                      r"\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", text, re.IGNORECASE
+                  )
+                  if declared:
+                      # Stage-local once the first FROM has been seen: such an
+                      # ARG can never feed a FROM, so it must not be collected.
+                      if seen_from:
+                          continue
+                      value = declared.group(2).strip()
+                      if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+                          value = value[1:-1]
+                      # A default that is itself an expansion (`${X:-y}`, a
+                      # nested arg) is NOT resolved: guessing the base is how a
+                      # task gets dropped from the cohort for a wrong reason.
+                      if value and "$" not in value:
+                          build_args[declared.group(1)] = value
+                      continue
+                  # Any whitespace after FROM, tab included, and any before
+                  # it: Docker strips leading whitespace from an instruction.
+                  match = re.match(r"\s*FROM\s+(.+)", text, re.IGNORECASE)
+                  if not match:
+                      continue
+                  seen_from = True
+                  words = [w for w in match.group(1).split() if not w.startswith("--")]
+                  if words:
+                      # `FROM --platform=... <image> AS <stage>`: the reference
+                      # is the first non-flag word; `AS <stage>` is an alias.
+                      image = resolve_build_args(words[0], build_args)
+              return image
+
+          def parser_directives(lines):
+              """The escape token this Dockerfile declares, `\\` by default.
+
+              Docker reads `# key=value` parser directives at the TOP of the
+              file and stops at the first line that is not one - a blank line,
+              an instruction, a plain comment, OR a `# key=value` comment whose
+              key is not a directive.  `escape`, `syntax` and `check` are the
+              directive keys; `# foo=bar` is an ordinary comment and ENDS the
+              block, so an `# escape=` below it changes nothing - skipping it
+              in place kept the block open and applied a token Docker ignores.
+              `escape` takes `\\` or a backtick and nothing else, and declaring
+              a directive TWICE is a build error in Docker, not last-one-wins:
+              the file does not build either way, so the default token stands
+              and the task fails at its own build time, not off a guess.
+              """
+              directive = re.compile(r"^\s*#\s*([A-Za-z][A-Za-z0-9]*)\s*=\s*(.+?)\s*$")
+              known = ("escape", "syntax", "check")
+              escape = None
+              for line in lines:
+                  match = directive.match(line)
+                  if not match:
+                      break
+                  key = match.group(1).lower()
+                  if key not in known:
+                      break
+                  if key != "escape":
+                      continue
+                  if escape is not None:
+                      return "\\"
+                  escape = match.group(2) if match.group(2) in ("\\", "`") else "\\"
+              return escape or "\\"
+
+          def heredoc_word(text):
+              """`(terminator, tabs stripped?)` for a `<<` REDIRECTION, or None.
+
+              `<<` opens a heredoc only when it redirects.  A regex over the
+              raw line took a left shift inside a string
+              (`RUN echo "shift x<<y bits"` -> terminator "y") and a
+              here-string (`<<<'FROM alpine'` -> terminator "FROM") as
+              openers; the invented terminator never appeared on its own line,
+              so the rest of the Dockerfile was swallowed and the real final
+              stage was lost.  So: quoted spans are skipped, arithmetic
+              (`$(( ... ))`, where `<<` is the shift operator and can never
+              redirect) is skipped, `<<<` is a here-string and `<` a plain
+              redirection, and the word has to be an identifier delimited by
+              whitespace, a shell metacharacter, or the end of the line -
+              `cat <<EOF>/f` has no space before the redirect and is still a
+              heredoc, and taking it for none parsed the body as Dockerfile.
+
+              The second element says whether the opener was `<<-`, which is
+              the ONLY form whose terminator line may be indented, and then by
+              TABS only.  The caller needs it to close the body on the right
+              line; a lenient match closes one that is still running.
+              """
+              word = re.compile(
+                  r'(?P<dash>-?)\s*(?:"(?P<dq>[A-Za-z_][A-Za-z0-9_]*)"'
+                  r"|'(?P<sq>[A-Za-z_][A-Za-z0-9_]*)'"
+                  r'|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))(?=[\s;&|<>()]|$)'
+              )
+              index = 0
+              quote = None
+              while index < len(text):
+                  char = text[index]
+                  # A backslash escapes the next character, so `\"` and `\'`
+                  # open and close NO span.  Taking an escaped quote for a
+                  # real one left an unterminated span over the rest of the
+                  # line, and every `<<` after it went unseen: the heredoc
+                  # body was then parsed as Dockerfile and its `FROM` read as
+                  # a stage.  Inside SINGLE quotes a backslash is literal -
+                  # the one place this must not skip - and there the span ends
+                  # at the next `'` exactly as the shell ends it.
+                  if char == "\\" and quote != "'":
+                      index += 2
+                      continue
+                  if quote is not None:
+                      quote = None if char == quote else quote
+                      index += 1
+                      continue
+                  if char in "\"'":
+                      quote = char
+                      index += 1
+                      continue
+                  if text.startswith("$((", index):
+                      # Arithmetic expansion: `<<` inside it is a left shift,
+                      # and `)` now delimits a terminator word, so the span is
+                      # skipped whole rather than scanned.
+                      index += 1
+                      depth = 0
+                      while index < len(text):
+                          if text[index] == "(":
+                              depth += 1
+                          elif text[index] == ")":
+                              depth -= 1
+                              if depth == 0:
+                                  index += 1
+                                  break
+                          index += 1
+                      continue
+                  if char != "<":
+                      index += 1
+                      continue
+                  run = index
+                  while run < len(text) and text[run] == "<":
+                      run += 1
+                  if run - index == 2:
+                      match = word.match(text, run)
+                      if match:
+                          return (
+                              match.group("dq")
+                              or match.group("sq")
+                              or match.group("bare"),
+                              match.group("dash") == "-",
+                          )
+                  index = run
+              return None
+
+          def resolve_build_args(reference, build_args):
+              """Substitute `${NAME}` / `$NAME` from plain top-level defaults."""
+              return re.sub(
+                  r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+                  lambda m: build_args.get(m.group(1) or m.group(2), m.group(0)),
+                  reference,
+              )
+
+          def is_alpine_image(reference):
+              """True when an image reference names an Alpine/musl base.
+
+              Two deliberate rules:
+                * repository PATH TOKEN equal to "alpine" - `alpine`,
+                  `library/alpine`, `docker.io/library/alpine:3.19`.  A token
+                  match rather than a substring, so `ghcr.io/x/alpine-builder`
+                  (a name, not the distro) stays in the cohort.
+                * TAG token, splitting the tag on "-", equal to "alpine" or
+                  "alpine<version>" - `python:3.12-alpine`, `node:22-alpine3.20`.
+                  The official images carry the libc in the tag, so the tag has
+                  to be read even when the repository name is glibc-neutral.
+              """
+              ref = (reference or "").split("@", 1)[0]
+              segments = ref.split("/")
+              tag = ""
+              if ":" in segments[-1]:
+                  segments[-1], _, tag = segments[-1].partition(":")
+              if "alpine" in [s.lower() for s in segments if s]:
+                  return True
+              return any(
+                  re.fullmatch(r"alpine[0-9.]*", token)
+                  for token in tag.lower().split("-")
+              )
+
+          def dockerfile_bases(task_dir):
+              """The final-stage image of each Dockerfile this task ships."""
+              bases = []
+              for name in ("Dockerfile", "environment/Dockerfile"):
+                  dockerfile = task_dir / name
+                  if not dockerfile.is_file():
+                      continue
+                  body = dockerfile.read_text(encoding="utf-8", errors="replace")
+                  image = final_from_image(body)
+                  if image:
+                      bases.append(image)
+              return bases
+
+          def musl_reason(task_dir):
+              # Union the static fallback with live detection so a newly
+              # Alpine-based task is excluded without a config edit.
+              for image in dockerfile_bases(task_dir):
+                  if is_alpine_image(image):
+                      return "unsupported_platform:musl"
+              return None
+
+          def unresolved_base_reason(task_dir):
+              """A base this planner could not resolve - reported, not excluded.
+
+              `FROM ${BASE}` with no plain default left the libc unknown.  An
+              unknown base is not evidence of musl, so the task stays in the
+              cohort and the run says so out loud instead of dropping it.
+              """
+              for image in dockerfile_bases(task_dir):
+                  if "$" in image:
+                      return "unresolved_base_arg"
+              return None
+
+          def unparsed_dockerfile_reason(task_dir):
+              """A Dockerfile no FROM could be read out of - reported, kept.
+
+              None reached the caller as "not Alpine", indistinguishable from
+              a resolved glibc base.  An unparsed file is no evidence of musl,
+              so the task stays in the cohort and the gap is named.
+              """
+              for name in ("Dockerfile", "environment/Dockerfile"):
+                  path = task_dir / name
+                  if path.is_file() and not final_from_image(
+                      path.read_text(encoding="utf-8", errors="replace")
+                  ):
+                      return "no_from_found"
+              return None
+
+          WARNING_TITLES = {
+              "unresolved_base_arg": "Unresolved base image",
+              "no_from_found": "Dockerfile unparsed",
+          }
+
+          excluded = []
+          runnable = []
+          unresolved = []
+          for task in selected:
+              reason = static_unsupported.get(task) or musl_reason(dataset / task)
+              if reason:
+                  excluded.append({"task": task, "reason": reason})
+                  continue
+              # Kept in the cohort, and named: an unresolved base is a gap in
+              # this planner, not a property of the task.
+              warning = unresolved_base_reason(dataset / task) or (
+                  unparsed_dockerfile_reason(dataset / task)
+              )
+              if warning:
+                  unresolved.append({"task": task, "reason": warning})
+              runnable.append(task)
+          for row in unresolved:
+              # A bare subscript: a reason added to the helpers but not to
+              # this table killed the plan job before the receipt was written,
+              # so the whole cohort was lost over a missing dictionary entry.
+              title = WARNING_TITLES.get(row["reason"], "Planner gap")
+              print(f"::warning title={title}::{row['task']}: {row['reason']}")
+          if not runnable:
+              raise SystemExit(f"every selected task is unsupported: {excluded}")
+          for row in excluded:
+              print(f"::warning title=Task excluded::{row['task']}: {row['reason']}")
+          selected = runnable
           rows = []
           for ordinal, task in enumerate(selected, 1):
               budget = resolve_budget(dataset / task / "task.toml", multiplier=5.0)
@@ -141,6 +548,8 @@ jobs:
               "timeout_multiplier": 5.0,
               "step_limit": 100,
               "validation_run": True,
+              "excluded": excluded,
+              "unresolved": unresolved,
               "matrix": rows,
           }
           Path("tb2-gt-smoke20-plan.json").write_text(
@@ -152,6 +561,9 @@ jobs:
               out.write(f"matrix={matrix}\n")
               out.write(f"tasks={tasks_json}\n")
               out.write(f"task_set_sha256={digest}\n")
+              out.write(f"task_count={len(selected)}\n")
+              excluded_json = json.dumps(excluded, separators=(",", ":"))
+              out.write(f"excluded={excluded_json}\n")
           PY
 
       - uses: actions/upload-artifact@v4
@@ -296,12 +708,17 @@ jobs:
       - name: Prove the locked Union Alpha route with a live canary
         id: provider
         shell: bash
+        env:
+          PLANNED_TASK_COUNT: ${{ needs.plan.outputs.task_count }}
         run: |
           set -euo pipefail
+          # Without --expected-tasks the funds gate prices a single task
+          # and clears a key that cannot pay for the other nineteen.
           python -m scripts.provider_preflight \
             --manifest config/provider_route_deepseek_v4_flash_0731_fp8.v1.json \
             --output provider-preflight.json \
             --source-sha "$TREATMENT_SHA" \
+            --expected-tasks "${{ needs.plan.outputs.task_count }}" \
             --live
           python - <<'PY'
           import json, os
@@ -309,6 +726,35 @@ jobs:
 
           receipt = json.loads(Path("provider-preflight.json").read_text(encoding="utf-8"))
           assert receipt["status"] == "PASS"
+          # A key that declares no limit, or a model with no published
+          # price, skips the funds comparison entirely and still reports
+          # PASS.  Say so out loud: an unbounded key is the shape run
+          # 35383113823 died in, mid-run, on per-request credit errors.
+          # scripts/provider_preflight.py annotates this too; reading the
+          # receipt here puts the amounts in the log beside the assertions
+          # that gate on it, and keeps the annotation if the CLI drops its
+          # own.  The receipt reports a coarse headroom BUCKET, not a ratio.
+          verdict = receipt.get("funds_verdict", "absent")
+          if verdict != "sufficient":
+              print(
+                  f"::warning title=Provider funds::funds_verdict={verdict}; "
+                  f"reason={receipt.get('funds_reason') or 'none'}; "
+                  f"estimate={receipt.get('estimate_usd')}; "
+                  f"headroom={receipt.get('funds_headroom_bucket') or 'unmeasured'} for "
+                  f"{receipt.get('expected_tasks')} task(s)"
+              )
+          # The estimate is only as good as the cohort size it was priced for.
+          # --expected-tasks arrives from the planner through an expression; a
+          # stale or empty one prices a single task for the whole matrix and
+          # still reports "sufficient".  Bind the two before any task runs.
+          planned = int(os.environ["PLANNED_TASK_COUNT"])
+          if receipt.get("expected_tasks") != planned:
+              print(
+                  "::error title=Provider funds::the funds gate priced "
+                  f"{receipt.get('expected_tasks')} task(s) for a cohort of "
+                  f"{planned}"
+              )
+              raise SystemExit(1)
           assert receipt["provider_ready"] is True
           assert receipt["model"] == "deepseek/deepseek-v4-flash-0731"
           assert receipt["provider_routing"] == {
@@ -595,13 +1041,18 @@ jobs:
         run: |
           set +e
           mkdir -p results/terminal-bench
+          # Pier writes results/terminal-bench/<job-name>/<task>__<hash>/,
+          # so the cross-read step below has to be pointed at that job
+          # directory.  Publish the name rather than spelling it twice.
+          JOB_NAME="tb2-gt-smoke20-921bec20-${GITHUB_RUN_ID}-${TASK}"
+          echo "job_name=$JOB_NAME" >> "$GITHUB_OUTPUT"
           pier run \
             -p "$RUNNER_TEMP/tb2-task/terminal-bench" \
             --agent-import-path eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent \
             --environment-import-path eval.pier_filtered_docker:PierFilteredDockerEnvironment \
             -m "$MODEL" \
             -o results/terminal-bench \
-            --job-name "tb2-gt-smoke20-921bec20-${GITHUB_RUN_ID}-${TASK}" \
+            --job-name "$JOB_NAME" \
             --agent-timeout-multiplier "$TIMEOUT_MULTIPLIER" \
             -n 1 -l 1 --delete -y \
             --ak task_id="$TASK" \
@@ -638,6 +1089,69 @@ jobs:
           path: benchmark-progress.json
           if-no-files-found: error
 
+      - name: Read this task's receipts against each other
+        # Harbor exits 0 on an errored trial, so a green job is not
+        # evidence that anything was graded.  Runs 35280614124 and
+        # 35262214538 were both green while their own artifacts
+        # contradicted each other, because nothing ever read two receipts
+        # together.  This does, inside the task job, and fails the step on
+        # a contradiction so the receipt-based counts cannot absorb one in
+        # silence.  always(): a failed trial is precisely the case worth
+        # cross-reading, and a red job never changes those counts.
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Pier writes the receipts at
+          # results/terminal-bench/<job-name>/<task>__<hash>/agent/.  Pointed
+          # at the suite root, two levels above, five of the six checks read
+          # UNKNOWN, the task_id degraded to "terminal-bench", and no
+          # contradiction could ever redden the job.  An empty job name (the
+          # trial step never ran) leaves the suite root, which still resolves
+          # the trial when one exists.
+          JOB_NAME="${{ steps.harbor.outputs.job_name }}"
+          root="results/terminal-bench${JOB_NAME:+/$JOB_NAME}"
+          mkdir -p "$root"
+          # The verifier walks one tree; the progress receipt is emitted at
+          # the workspace root, so give it a copy inside that tree.
+          cp benchmark-progress.json "$root/" 2>/dev/null || true
+          # The script accepts success|failure only, and `job.status` can
+          # also be `cancelled`; anything that is not success did not.
+          conclusion=failure
+          if [ "${{ job.status }}" = "success" ]; then conclusion=success; fi
+          python -m scripts.verify_run_receipts "$root" \
+            --job-conclusion "$conclusion" \
+            --json results/terminal-bench/receipt-consistency.json
+          rc=$?
+          # The EXIT CODE names the verdict; an absent receipt is a suffix on it.
+          # Testing the file first reported "Receipt checker did not run" for an
+          # rc=1 that had run, found a contradiction, and only then failed to
+          # write its --json (an unwritable path exits 1 by design).
+          absent=
+          if [ ! -f results/terminal-bench/receipt-consistency.json ]; then
+            absent="; receipt-consistency.json was not written"
+          fi
+          # 1 is a contradiction between receipts that were read; 2 is a
+          # refusal to read them at all (two trials under one root, or no
+          # trial and no receipt, or a check that crashed instead of answering).
+          # A startup failure also exits 1 and a bad argument 2, both having
+          # written nothing - which is what the suffix says, and no more.
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Receipt contradiction::$TASK receipts contradict each other; see the failing checks (and checks_crashed, if nonzero) in receipt-consistency.json$absent"
+            exit 1
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error title=Receipts unresolved::$TASK receipts could not be resolved (exit 2); see resolution_error (unreadable tree) or checks_crashed and the crashed check entry in receipt-consistency.json$absent"
+            exit 1
+          elif [ "$rc" -ne 0 ]; then
+            # 0, 1 and 2 are the only verdicts the checker defines.
+            echo "::error title=Receipt checker did not run::$TASK verifier exited $rc, which is not a verdict the receipt checker defines$absent"
+            exit 1
+          elif [ -n "$absent" ]; then
+            # A run that reached a verdict always left the receipt behind.
+            echo "::error title=Receipt checker did not run::$TASK verifier exited 0 without writing receipt-consistency.json"
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -649,9 +1163,15 @@ jobs:
           if-no-files-found: warn
 
   summarize:
-    if: always()
+    # always() keeps the summary for a partially failed matrix, but a failed
+    # plan leaves nothing to download and nothing to aggregate.  The TB2 engine
+    # zombies (runs 35256152140, 35257234010, 35257606223, 35257941589,
+    # 35258327432) came from exactly this always()-on-a-failed-plan shape.
+    if: ${{ always() && needs.plan.result == 'success' }}
     needs: [plan, run]
     runs-on: ubuntu-latest
+    # Artifact download plus a JSON aggregation; nothing here is model work.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -667,6 +1187,7 @@ jobs:
       - name: Aggregate the 20 official-verifier receipts
         env:
           expected_tasks_json: ${{ needs.plan.outputs.tasks }}
+          excluded_tasks_json: ${{ needs.plan.outputs.excluded }}
         run: |
           python -m scripts.benchmark_progress aggregate \
             --root receipts \
@@ -678,11 +1199,24 @@ jobs:
           from pathlib import Path
           path = Path("tb2-gt-smoke20-summary.json")
           out = json.loads(path.read_text(encoding="utf-8"))
+          # officially_graded / infrastructure_failed are counted over the
+          # expected task list, which the planner already narrowed.  Carry the
+          # planner's exclusions into the same schema so a task dropped for an
+          # unsupported platform (cohort 35298094010: qemu-alpine-ssh, musl)
+          # reads as excluded rather than vanishing from the denominator with
+          # no explanation.  The schema name is unchanged.
+          excluded = json.loads(os.environ.get("excluded_tasks_json") or "[]")
+          reported = {row["task_id"] for row in out.get("tasks", [])}
+          leaked = sorted(row["task"] for row in excluded if row["task"] in reported)
+          if leaked:
+              raise SystemExit(f"excluded tasks produced verifier receipts: {leaked}")
           out.update({
               "model": "deepseek/deepseek-v4-flash-0731",
               "effective_model": "openai/deepseek/deepseek-v4-flash-0731",
               "treatment_sha": os.environ["TREATMENT_SHA"],
               "gt_source_sha": os.environ["GT_SOURCE_SHA"],
+              "excluded": excluded,
+              "excluded_count": len(excluded),
           })
           path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           print(json.dumps(out, sort_keys=True))

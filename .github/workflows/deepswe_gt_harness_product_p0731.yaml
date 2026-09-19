@@ -465,12 +465,16 @@ jobs:
         id: preflight
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          PLANNED_TASK_COUNT: ${{ needs.plan.outputs.task_count }}
         run: |
           set -euo pipefail
+          # --expected-tasks or the funds gate prices a single task and
+          # clears a key that cannot pay for the rest of the cohort.
           python -m scripts.provider_preflight \
             --manifest config/provider_route.v1.json \
             --source-sha "${{ needs.plan.outputs.source_sha }}" \
             --output provider-gate.json \
+            --expected-tasks "${{ needs.plan.outputs.task_count }}" \
             --live
           python - <<'PY'
           import json
@@ -478,6 +482,35 @@ jobs:
           from pathlib import Path
 
           receipt = json.loads(Path("provider-gate.json").read_text(encoding="utf-8"))
+          # An unbounded key, or a model with no published price, skips the
+          # funds comparison and still reports PASS.  Run 35383113823 died
+          # mid-run on per-request credit errors behind exactly that skip,
+          # so the verdict is surfaced instead of being inferred from PASS.
+          # scripts/provider_preflight.py annotates this too; reading the
+          # receipt here puts the amounts in the log beside the assertions
+          # that gate on it, and keeps the annotation if the CLI drops its
+          # own.
+          verdict = receipt.get("funds_verdict", "absent")
+          if verdict != "sufficient":
+              print(
+                  f"::warning title=Provider funds::funds_verdict={verdict}; "
+                  f"reason={receipt.get('funds_reason') or 'none'}; "
+                  f"estimate={receipt.get('estimate_usd')}; "
+                  f"headroom={receipt.get('funds_headroom_bucket') or 'unmeasured'} for "
+                  f"{receipt.get('expected_tasks')} task(s)"
+              )
+          # The estimate is only as good as the cohort size it was priced for.
+          # --expected-tasks arrives from the planner through an expression; a
+          # stale or empty one prices a single task for the whole matrix and
+          # still reports "sufficient".  Bind the two before any task runs.
+          planned = int(os.environ["PLANNED_TASK_COUNT"])
+          if receipt.get("expected_tasks") != planned:
+              print(
+                  "::error title=Provider funds::the funds gate priced "
+                  f"{receipt.get('expected_tasks')} task(s) for a cohort of "
+                  f"{planned}"
+              )
+              raise SystemExit(1)
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               output.write(f"context_window_tokens={receipt['context_window_tokens']}\n")
               output.write(f"reserved_output_tokens={receipt['reserved_output_tokens']}\n")

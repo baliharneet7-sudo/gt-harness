@@ -351,10 +351,15 @@ def test_git_failure_is_not_a_provider_failure():
     assert terminal == "internal_error"
     assert TERMINAL_EXIT_CODES[terminal] != 4
 
-    # Real provider classes must still classify as provider failures, both by
-    # exact name and by the provider-ish-name fallback.
-    class APIConnectionError(Exception):
-        pass
+    # Real provider classes must still classify as provider failures: a
+    # litellm/openai class by its module root (HIGH-1 made that root a
+    # precondition, so the stand-in carries it), and the harness-raised
+    # ProviderOverloadedError by name from wherever it is defined - it is the
+    # one name on the any-module allow list precisely because only this harness
+    # raises it.
+    APIConnectionError = type(
+        "APIConnectionError", (Exception,), {"__module__": "litellm.exceptions"}
+    )
 
     class ProviderOverloadedError(Exception):
         pass
@@ -474,7 +479,10 @@ def test_a_submission_is_not_invalidated_when_no_patch_could_exist(
         ],
     )
 
-    runner.main()
+    # Exit 0: `submitted` is a completed solver outcome like stuck,
+    # budget_exhausted and task_failed, so the process must not report a
+    # harness fault for it either.
+    assert runner.main() == 0
     report = json.loads(metrics.read_text(encoding="utf-8"))
     # The promotion is what this fix controls: the submission survives instead
     # of being rewritten as a harness fault.
@@ -482,14 +490,369 @@ def test_a_submission_is_not_invalidated_when_no_patch_could_exist(
     assert report["terminal"] != "internal_error"
     # The failure is still recorded, never silent.
     assert "patch_export_error" in report
-    # Note: TERMINAL_EXIT_CODES has no plain "submitted" key - only
-    # submitted_verified/submitted_unverified, which _submission_terminal
-    # produces and which only runs when GT is active. Under --gt-off the
-    # terminal therefore still maps to the internal_error code. That is a
-    # separate pre-existing gap in the gt-off path; the graded cohort runs
-    # GT-on, where the submission maps to an exit-0 terminal.
+    # `_submission_terminal` produces submitted_verified/submitted_unverified
+    # and only runs when GT is active, so under --gt-off the terminal stays
+    # the plain `submitted` produced above. TERMINAL_EXIT_CODES had no key for
+    # it, so `.get(terminal, internal_error)` mapped every GT-off submission
+    # to exit 5 - the same harbor trial error this test exists to prevent,
+    # arriving one step later.
     from scripts.miniswe_gt_run import TERMINAL_EXIT_CODES
 
-    assert "submitted" not in TERMINAL_EXIT_CODES
+    assert TERMINAL_EXIT_CODES["submitted"] == 0
+    assert report["exit_code"] == 0
     assert TERMINAL_EXIT_CODES["submitted_verified"] == 0
     assert TERMINAL_EXIT_CODES["submitted_unverified"] == 0
+
+
+def test_ordinary_english_words_are_not_provider_failures():
+    """The provider heuristic may not fire on a substring of a plain word.
+
+    After run 35262214538 the "status" token was removed, but the remaining
+    bare substrings were fragile the same way: lowercasing
+    f"{class name} {message}" and testing "api" matches "capital", "auth"
+    matches "author", and "provider" matches any message that merely mentions
+    one.  Every such hit exits 4, which makes harbor raise
+    NonZeroAgentExitCodeError and error a trial that the provider never
+    touched.
+
+    A provider failure is now named by the exception CLASS - either the exact
+    table, or a camel-case word of the class name - and by the message only
+    for the wrapped-provider shape that
+    test_provider_errors_map_to_provider_failed pins.
+    """
+    assert _classify_terminal(ValueError("capital allocation"), {}) == "internal_error"
+    assert _classify_terminal(RuntimeError("author missing"), {}) == "internal_error"
+    assert _classify_terminal(
+        RuntimeError("the provider was fine; the workspace was not"), {}
+    ) == "internal_error"
+    assert _classify_terminal(
+        RuntimeError("no such api documented"), {}
+    ) == "internal_error"
+
+
+def test_wrapped_provider_class_names_still_classify_from_the_message():
+    """litellm errors arrive wrapped, carrying the class name in the text.
+
+    This is the contract test_provider_errors_map_to_provider_failed pins, so
+    message matching stays - narrowed to whole-token hits on known provider
+    exception class names instead of bare substrings.
+    """
+    assert _classify_terminal(RuntimeError("APIConnectionError"), {}) == "provider_failed"
+    assert _classify_terminal(
+        RuntimeError("litellm.InternalServerError: upstream said no"), {}
+    ) == "provider_failed"
+    assert _classify_terminal(
+        RuntimeError("provider model mismatch"), {}
+    ) == "provider_failed"
+
+
+def test_provider_class_names_classify_without_help_from_the_message():
+    """A litellm class is recognised by its own type, with no message help.
+
+    HIGH-1 made the litellm/openai module root a precondition for the roster of
+    provider class names, so the stand-ins here carry the root the classes they
+    stand in for really have.  The message says nothing provider-ish in either
+    case, which is the property this test exists to pin.
+    """
+    RateLimitError = type(
+        "RateLimitError", (Exception,), {"__module__": "litellm.exceptions"}
+    )
+    ServiceUnavailableError = type(
+        "ServiceUnavailableError", (Exception,), {"__module__": "litellm.exceptions"}
+    )
+
+    assert _classify_terminal(RateLimitError("429"), {}) == "provider_failed"
+    assert _classify_terminal(ServiceUnavailableError("503"), {}) == "provider_failed"
+
+    # ...and the same names from somewhere else are not provider verdicts.
+    foreign = type("RateLimitError", (Exception,), {"__module__": "harbor.api"})
+    assert _classify_terminal(foreign("429"), {}) == "internal_error"
+
+
+def test_missing_git_binary_is_an_internal_error_not_a_provider_failure():
+    """Cohort 35298094010 lost four tasks to `FileNotFoundError: 'git'`.
+
+    A terminal-bench container ships no git binary, so patch export raises
+    FileNotFoundError.  Under the old heuristic nothing claimed it and it fell
+    through to internal_error by luck; naming it makes the classification a
+    decision instead of a default, and keeps a future token from capturing it.
+    """
+    assert _classify_terminal(FileNotFoundError("git"), {}) == "internal_error"
+    assert _classify_terminal(PermissionError("denied"), {}) == "internal_error"
+    assert _classify_terminal(OSError("disk"), {}) == "internal_error"
+    assert _classify_terminal(
+        subprocess.CalledProcessError(128, ["git", "read-tree", ""]), {}
+    ) == "internal_error"
+
+
+def test_a_gt_off_submission_exits_zero():
+    """`submitted` is a completed solver outcome, so it must map to exit 0.
+
+    `_submission_terminal` only runs when GT is active, so under `--gt-off`
+    the terminal stays the plain `submitted` produced by `_classify_terminal`.
+    With no key for it, `TERMINAL_EXIT_CODES.get(terminal, internal_error)`
+    turned every GT-off submission into exit 5 - the same harbor trial error
+    cohort 35298094010 hit from the other direction.
+    """
+    assert TERMINAL_EXIT_CODES["submitted"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# H3: classification is decided by TYPE, not by splitting a class name into
+# camel-case words.  The word heuristic matched {api, auth, authentication,
+# connection, provider, timeout, unavailable} against the words of ANY class
+# name, so every OSError subclass - ConnectionResetError, ConnectionRefusedError,
+# TimeoutError - and every local timeout was graded as the provider refusing the
+# model: exit 4, harbor raises NonZeroAgentExitCodeError, the trial is errored,
+# and gt-run.json shows zero provider failures.  That is the run-35262214538
+# chain this classifier exists to break, arriving through the class name instead
+# of the message.
+# --------------------------------------------------------------------------- #
+
+
+def test_stdlib_faults_are_internal_errors_whatever_their_name_spells():
+    """A stdlib/OS fault is a harness fault, decided by type before any text.
+
+    Every case here was classified provider_failed by the camel-case word
+    heuristic: `TimeoutExpired` and `TimeoutError` contain the word "timeout",
+    `ConnectionResetError` and `ConnectionRefusedError` contain "connection".
+    None of them involves a provider.  A local timeout is not a provider
+    verdict.
+    """
+    cases = (
+        subprocess.TimeoutExpired(["pytest"], 60),
+        TimeoutError("local op timed out"),
+        ConnectionResetError("reset by peer"),
+        ConnectionRefusedError("refused"),
+        BrokenPipeError("broken pipe"),
+    )
+    for exception in cases:
+        terminal = _classify_terminal(exception, {})
+        assert terminal == "internal_error", (type(exception).__name__, terminal)
+        assert TERMINAL_EXIT_CODES[terminal] != TERMINAL_EXIT_CODES["provider_failed"]
+
+
+def test_harness_messages_that_merely_name_a_provider_shape_are_internal():
+    """A generic wrapper is only a provider failure when it carries a provider name.
+
+    "Timeout while waiting for the docker daemon" is infrastructure, and
+    "BadRequestError from our own harness call" is our own call site quoting a
+    class it did not receive.  Message matching is kept only for the wrapped
+    shape `test_provider_errors_map_to_provider_failed` pins: the message IS the
+    provider class name, or the name arrives module-qualified
+    (`litellm.InternalServerError: ...`).  Prose that mentions one does not
+    qualify.
+    """
+    assert _classify_terminal(
+        RuntimeError("Timeout while waiting for the docker daemon"), {}
+    ) == "internal_error"
+    assert _classify_terminal(
+        RuntimeError("BadRequestError from our own harness call"), {}
+    ) == "internal_error"
+
+
+def test_litellm_exception_types_are_provider_failures_by_type():
+    """The provider family is recognised through the MRO, not the spelling."""
+
+    rate_limit = type("RateLimitError", (Exception,), {
+        "__module__": "litellm.exceptions",
+    })
+    assert _classify_terminal(rate_limit("429"), {}) == "provider_failed"
+
+    # A subclass of a litellm error is still a provider failure, even when its
+    # own name spells nothing provider-ish and it lives in our package.
+    class WrappedUpstream(rate_limit):
+        pass
+
+    assert _classify_terminal(WrappedUpstream("429"), {}) == "provider_failed"
+
+    # The module is an independent signal: an openai class whose name is not in
+    # the family roster still classifies by where it came from.
+    unknown_openai = type("SomethingNewError", (Exception,), {
+        "__module__": "openai._exceptions",
+    })
+    assert _classify_terminal(unknown_openai("boom"), {}) == "provider_failed"
+
+
+def test_provider_family_names_do_not_classify_from_a_foreign_module():
+    """HIGH-1 inverted this: the family NAME alone is NOT enough.
+
+    This test previously pinned the opposite - "the roster is authoritative on
+    its own and the module check is an additional signal, never a
+    precondition".  That rule graded `pier.errors.NotFoundError`,
+    `docker.errors.Timeout` and `harbor.api.APIError` as the provider refusing
+    the model, because half the roster is made of words that ordinary
+    infrastructure libraries also use.  The module root is now a precondition:
+    a roster name classifies provider_failed only when the litellm/openai root
+    is reached through the MRO, or when the name is one this harness raises
+    itself (`ProviderOverloadedError`).
+    """
+    local_rate_limit = type("RateLimitError", (Exception,), {
+        "__module__": "myharness",
+    })
+    assert _classify_terminal(local_rate_limit("429"), {}) == "internal_error"
+
+    # The one name that still classifies from anywhere is the harness's own.
+    local_overloaded = type("ProviderOverloadedError", (Exception,), {
+        "__module__": "myharness",
+    })
+    assert _classify_terminal(local_overloaded("busy"), {}) == "provider_failed"
+
+
+# --------------------------------------------------------------------------- #
+# HIGH-1 (round 3): the litellm/openai module root is a PRECONDITION for the
+# roster of provider class names, not an extra signal.  The roster holds
+# generic words - APIError, NotFoundError, Timeout, ConflictError - that
+# infrastructure libraries in this very environment also use, so matching the
+# NAME wherever it was defined hands run 35262214538's chain a second door:
+# exit 4, harbor raises NonZeroAgentExitCodeError and errors the trial, and
+# gt-run.json records zero provider failures for an infrastructure fault.
+# --------------------------------------------------------------------------- #
+
+
+def test_roster_names_from_foreign_modules_are_not_provider_failures():
+    """The three reproductions: our own stack spells these names too.
+
+    `pier.errors.NotFoundError` (the Datacurve runner), `docker.errors.Timeout`
+    and `harbor.api.APIError` are infrastructure faults.  `docker.errors.APIError`
+    and `requests.exceptions.Timeout` are importable in the installed
+    environment, so this is not hypothetical.
+    """
+    cases = (
+        type("NotFoundError", (Exception,), {"__module__": "pier.errors"}),
+        type("Timeout", (Exception,), {"__module__": "docker.errors"}),
+        type("APIError", (Exception,), {"__module__": "harbor.api"}),
+    )
+    for exc_type in cases:
+        terminal = _classify_terminal(exc_type("boom"), {})
+        assert terminal == "internal_error", (
+            exc_type.__module__,
+            exc_type.__name__,
+            terminal,
+        )
+        assert (
+            TERMINAL_EXIT_CODES[terminal]
+            != TERMINAL_EXIT_CODES["provider_failed"]
+        )
+
+
+def test_inheritance_carries_the_provider_root_into_a_harness_module():
+    """A subclass of a real litellm class is still a provider failure.
+
+    The precondition is on the MRO, not on the raised class alone: wrapping a
+    litellm error in a harness-defined subclass must not launder it into an
+    internal error.
+    """
+    litellm_rate_limit = type(
+        "RateLimitError", (Exception,), {"__module__": "litellm.exceptions"}
+    )
+
+    class HarnessWrappedRateLimit(litellm_rate_limit):
+        pass
+
+    assert HarnessWrappedRateLimit.__module__.split(".", 1)[0] not in (
+        "litellm",
+        "openai",
+    )
+    assert (
+        _classify_terminal(HarnessWrappedRateLimit("429"), {}) == "provider_failed"
+    )
+
+
+def test_exact_name_table_provider_entries_obey_the_module_precondition():
+    """The exact-name table is the first door, so it needs the same lock.
+
+    `APIError`, `APIConnectionError`, `AuthenticationError` and
+    `BadRequestError` all sit in `_EXCEPTION_TERMINAL` mapped to
+    provider_failed, and that lookup runs before any MRO walk.  Without the
+    precondition, `harbor.api.APIError` never reaches the roster check at all.
+    """
+    for name in (
+        "APIError",
+        "APIConnectionError",
+        "AuthenticationError",
+        "BadRequestError",
+    ):
+        foreign = type(name, (Exception,), {"__module__": "harbor.api"})
+        assert _classify_terminal(foreign("boom"), {}) == "internal_error", name
+        genuine = type(name, (Exception,), {"__module__": "litellm.exceptions"})
+        assert _classify_terminal(genuine("boom"), {}) == "provider_failed", name
+
+
+# --------------------------------------------------------------------------- #
+# MEDIUM-6: "submitted" is now an exit code 0 terminal, so the substring rule
+# on the exception MESSAGE reports a crash as a success.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_crash_that_merely_mentions_a_submission_is_not_a_submission():
+    """`RuntimeError("failed after the patch was submitted")` is a crash.
+
+    `TERMINAL_EXIT_CODES["submitted"]` is 0, so the old
+    `if "submitted" in lowered` rule turned any harness exception whose prose
+    contains the word into a clean GT-off pass.
+    """
+    crashes = (
+        RuntimeError("failed after the patch was submitted"),
+        ValueError("submitted patch could not be re-read"),
+        RuntimeError("SubmissionError: the submitted diff was empty"),
+    )
+    for exception in crashes:
+        terminal = _classify_terminal(exception, {})
+        assert terminal == "internal_error", (str(exception), terminal)
+        assert TERMINAL_EXIT_CODES[terminal] != 0
+
+    # mini-swe's own signal survives, by class name and by the bare exit
+    # message `test_submitted_exception_maps_to_submitted` pins. L-4: the
+    # class arm now also requires the minisweagent module root, so the stand-in
+    # has to declare it - a bare look-alike is `pier.errors.Submitted`, which
+    # `test_a_foreign_class_named_submitted_is_not_a_submission` pins as an
+    # internal_error.
+    submitted = type("Submitted", (Exception,), {"__module__": "minisweagent.exceptions"})
+    assert _classify_terminal(submitted("anything at all"), {}) == "submitted"
+    assert _classify_terminal(Exception("Submitted"), {}) == "submitted"
+
+
+# --------------------------------------------------------------------------- #
+# L-4: `Submitted` maps to exit 0, and the class-name path matched the bare
+# name from ANY module - so `pier.errors.Submitted` would have reported an
+# infrastructure fault as a clean pass. Every provider name already requires
+# the litellm/openai module precondition (HIGH-1); mini-swe's own success
+# signal now requires the minisweagent one.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_real_minisweagent_submitted_class_still_maps_to_submitted():
+    from minisweagent.exceptions import Submitted
+
+    assert Submitted.__module__.split(".", 1)[0] == "minisweagent"
+    assert _classify_terminal(Submitted("anything at all"), {}) == "submitted"
+    assert TERMINAL_EXIT_CODES["submitted"] == 0
+
+
+def test_a_foreign_class_named_submitted_is_not_a_submission():
+    """`pier.errors.Submitted` is infrastructure, and exit 0 would hide it."""
+    for module in ("pier.errors", "harbor.api", "docker.errors", "requests.exceptions"):
+        foreign = type("Submitted", (Exception,), {"__module__": module})
+        terminal = _classify_terminal(foreign("boom"), {})
+        assert terminal == "internal_error", module
+        assert TERMINAL_EXIT_CODES[terminal] != 0
+
+
+def test_a_minisweagent_subclass_of_submitted_is_still_a_submission():
+    """Inheritance carries the module root, exactly as the provider walk does."""
+    from minisweagent.exceptions import Submitted
+
+    derived = type("SubmittedWithPatch", (Submitted,), {"__module__": "gt_engine.x"})
+    assert _classify_terminal(derived("done"), {}) == "submitted"
+
+
+def test_the_bare_exit_message_survives_the_module_precondition():
+    """The asymmetry is deliberate and pinned by
+    test_submitted_exception_maps_to_submitted: mini-swe writes the exit
+    message `Submitted` through handle_uncaught_exception and it reaches us on
+    a plain Exception, which has no minisweagent module to check.
+    """
+    assert _classify_terminal(Exception("Submitted"), {}) == "submitted"
+    foreign = type("Submitted", (Exception,), {"__module__": "pier.errors"})
+    assert _classify_terminal(foreign("Submitted"), {}) == "submitted"

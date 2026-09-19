@@ -2118,3 +2118,343 @@ def test_designed_delivery_refusals_are_not_attribution_red():
     assert attribution_red_features(
         {"x": {"status": "TRIGGERED_DARK", "reasons": []}}
     ) == ["x"]
+
+
+# --------------------------------------------------------------------------- #
+# capability annotation + memory pressure (host artifacts, not the transcript)
+#
+# Two things a reader of this audit could not previously tell apart, or see at
+# all:
+#
+#   * lsp_promotion DEGRADED with evidence terminal_no_op:nothing_promotable
+#     reads identically for extract-elf (a C/ELF task with no LSP-serviceable
+#     language - the correct outcome, run 35293191813) and for a task whose
+#     serviceable language was never promoted (a real fault).
+#   * cohort 35298094010 lost write-compressor and sanitize-git-repo to the GT
+#     indexer being SIGKILLed during initial indexing (supervisor
+#     child_returncode -9, reason initial_index_failed:benchmark_graph_required),
+#     and other runs journaled GT_GRAPH_REFRESH_FAILED rows caused by
+#     GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT. None of it reached the report.
+#
+# gt_session/run_diagnostics own the capability STATE and are pinned; these
+# tests pin annotation only - no state and no verdict may move.
+# --------------------------------------------------------------------------- #
+def capability_row(name: str, state: str, evidence: str, *, required: bool = True) -> dict:
+    """One row in the shape DiagnosticJournal.capability() seals."""
+    return {
+        "capability": name, "state": state, "required": required,
+        "declared": True, "initialized": state != "FAILED",
+        "triggered": state != "UNEXERCISED",
+        "delivered": state == "WORKING", "refused": state == "FAILED",
+        "degraded": state == "DEGRADED", "verified": state == "WORKING",
+        "evidence": evidence,
+    }
+
+
+LSP_NO_OP_ROW = capability_row(
+    "lsp_promotion", "DEGRADED", "terminal_no_op:nothing_promotable"
+)
+
+
+def write_diagnostics_document(task: Path, *, capabilities=(), diagnostics=(),
+                               task_id: str = "native-task") -> Path:
+    """Seal a gt.diagnostics.v1 document where the artifact actually carries it.
+
+    miniswe_gt_run copies the in-container document to <task>/agent/ because
+    gt-state/<task_id>/ reached the artifact nearly empty in run 34062325608.
+    """
+    path = task / "agent" / "diagnostics.json"
+    path.write_text(json.dumps({
+        "schema": "gt.diagnostics.v1", "task_id": task_id,
+        "capabilities": list(capabilities), "diagnostics": list(diagnostics),
+    }, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def no_op_receipt(**overrides) -> dict:
+    """A gt.lsp_promotion_task.v1 terminal that promoted nothing."""
+    return {
+        "schema": "gt.lsp_promotion_task.v1", "status": "no_op",
+        "languages_promotable": [], "languages_attempted": [],
+        "languages_completed": [], "languages_unavailable": [],
+    } | overrides
+
+
+def write_lsp_receipts(task: Path, receipts, *, task_id: str = "native-task") -> Path:
+    """Content-addressed receipts, exactly as the blob store names them."""
+    target = task / "agent" / "gt-state" / task_id / "lsp_receipts"
+    target.mkdir(parents=True, exist_ok=True)
+    for receipt in receipts:
+        body = receipt if isinstance(receipt, str) else json.dumps(receipt, sort_keys=True)
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        (target / f"{digest}.json").write_text(body, encoding="utf-8")
+    return target
+
+
+def lsp_row(audit) -> dict:
+    return next(row for row in audit.capabilities
+                if row["capability"] == "lsp_promotion")
+
+
+def test_lsp_no_op_without_a_serviceable_language_reads_as_expected(tmp_path):
+    """extract-elf's shape: nothing an LSP could promote, so nothing promoted."""
+    task = make_native_miniswe_task(tmp_path)
+    write_diagnostics_document(task, capabilities=[LSP_NO_OP_ROW])
+    write_lsp_receipts(task, [no_op_receipt()])
+
+    audit = gt_audit.audit_task(task)
+
+    row = lsp_row(audit)
+    assert row["lsp_no_op_verdict"] == "EXPECTED"
+    assert "no LSP-serviceable language" in row["lsp_no_op_detail"]
+    # The pinned engine owns the state and the stored evidence bytes.
+    assert row["state"] == "DEGRADED"
+    assert row["evidence"] == "terminal_no_op:nothing_promotable"
+    rendered = gt_audit.render_report([audit], tmp_path)
+    assert "terminal_no_op:nothing_promotable [EXPECTED: " in rendered
+
+
+def test_lsp_no_op_with_a_promotable_language_reads_as_unexpected(tmp_path):
+    """A language that could have been promoted and was not is a real fault."""
+    task = make_native_miniswe_task(tmp_path)
+    write_diagnostics_document(task, capabilities=[LSP_NO_OP_ROW])
+    write_lsp_receipts(task, [no_op_receipt(languages_promotable=["python"])])
+
+    audit = gt_audit.audit_task(task)
+
+    row = lsp_row(audit)
+    assert row["lsp_no_op_verdict"] == "UNEXPECTED"
+    assert "python" in row["lsp_no_op_detail"]
+    assert "[UNEXPECTED: " in gt_audit.render_report([audit], tmp_path)
+
+
+def test_lsp_no_op_reports_the_worst_of_several_receipts(tmp_path):
+    """One clean receipt must not bury a faulted one: worst verdict wins."""
+    task = make_native_miniswe_task(tmp_path)
+    write_diagnostics_document(task, capabilities=[LSP_NO_OP_ROW])
+    write_lsp_receipts(task, [
+        no_op_receipt(),
+        no_op_receipt(languages_unavailable=["go"]),
+        {"schema": "gt.lsp_promotion_task.v1", "status": "succeeded"},
+    ])
+
+    row = lsp_row(gt_audit.audit_task(task))
+
+    assert row["lsp_no_op_verdict"] == "UNEXPECTED"
+    assert "go" in row["lsp_no_op_detail"]
+
+
+def test_lsp_no_op_without_a_receipt_is_unknown_never_expected(tmp_path):
+    """Absence of evidence is not evidence that promoting nothing was right."""
+    task = make_native_miniswe_task(tmp_path)
+    write_diagnostics_document(task, capabilities=[LSP_NO_OP_ROW])
+
+    row = lsp_row(gt_audit.audit_task(task))
+
+    assert row["lsp_no_op_verdict"] == "UNKNOWN"
+    assert row["lsp_no_op_detail"]
+
+
+def test_lsp_no_op_with_an_unreadable_receipt_is_unknown(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    write_diagnostics_document(task, capabilities=[LSP_NO_OP_ROW])
+    write_lsp_receipts(task, ["{not json"])
+
+    assert lsp_row(gt_audit.audit_task(task))["lsp_no_op_verdict"] == "UNKNOWN"
+
+
+def test_a_working_lsp_row_is_never_annotated(tmp_path):
+    """Only the no-op evidence string is ambiguous; nothing else is touched."""
+    task = make_native_miniswe_task(tmp_path)
+    write_diagnostics_document(task, capabilities=[capability_row(
+        "lsp_promotion", "WORKING", "terminal_succeeded_published_83_edges"
+    )])
+    write_lsp_receipts(task, [no_op_receipt(languages_promotable=["python"])])
+
+    row = lsp_row(gt_audit.audit_task(task))
+
+    assert "lsp_no_op_verdict" not in row
+    assert "lsp_no_op_detail" not in row
+
+
+def test_lsp_annotation_moves_neither_the_state_nor_the_verdict(tmp_path):
+    """gt_session is pinned and owns the state; this is reporting only."""
+    bare = make_native_miniswe_task(tmp_path / "bare")
+    annotated = make_native_miniswe_task(tmp_path / "annotated")
+    write_diagnostics_document(annotated, capabilities=[LSP_NO_OP_ROW])
+    write_lsp_receipts(annotated, [no_op_receipt(languages_promotable=["rust"])])
+
+    before = gt_audit.audit_task(bare)
+    after = gt_audit.audit_task(annotated)
+
+    assert after.verdict == before.verdict
+    assert after.verdict_reasons == before.verdict_reasons
+    assert lsp_row(after)["state"] == "DEGRADED"
+
+
+def test_oom_kill_during_initial_index_is_visible_without_digging(tmp_path):
+    """Cohort 35298094010 lost two tasks to this and the audit said nothing."""
+    task = make_native_miniswe_task(tmp_path)
+    (task / "agent" / "miniswe_report.json").write_text(json.dumps({
+        "supervisor": {
+            "schema": "gt.supervisor_result.v1",
+            "reason": "initial_index_failed:benchmark_graph_required",
+            "child_returncode": -9,
+        },
+    }), encoding="utf-8")
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.memory_pressure["oom_kill_during_index"] is True
+    rendered = gt_audit.render_report([audit], tmp_path)
+    assert "MEMORY PRESSURE" in rendered
+    assert "oom_kill_during_index=True" in rendered
+
+
+def test_a_supervisor_kill_outside_indexing_is_not_called_an_index_oom(tmp_path):
+    """A deadline SIGKILL is a supervisor timeout, not memory pressure."""
+    task = make_native_miniswe_task(tmp_path)
+    (task / "agent" / "miniswe_report.json").write_text(json.dumps({
+        "supervisor": {"reason": "deadline_exceeded", "child_returncode": -9},
+    }), encoding="utf-8")
+
+    assert gt_audit.audit_task(task).memory_pressure["oom_kill_during_index"] is False
+
+
+def test_graph_refresh_and_headroom_refusals_are_counted(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    write_diagnostics_document(task, diagnostics=[
+        {
+            "code": "GT_GRAPH_REFRESH_FAILED",
+            "cause": "amend_refused:GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT"
+                     ":batch_amend_floor:limit=0need=178257920",
+            "normalized_cause": "amend_refused_gt_index_memory_headroom_"
+                                "insufficient_batch_amend_floor_limit_0need_178257920",
+            "occurrence_count": 3,
+        },
+        {
+            "code": "GT_GRAPH_REFRESH_FAILED", "cause": "repo_root_unavailable",
+            "normalized_cause": "repo_root_unavailable", "occurrence_count": 1,
+        },
+    ])
+
+    pressure = gt_audit.audit_task(task).memory_pressure
+
+    # Occurrences, not fingerprints: run 35178222629 journaled 58 refusals
+    # that aggregate into a single row, and counting rows understates that.
+    assert pressure["graph_refresh_refusals"] == 4
+    assert pressure["headroom_refusals"] == 3
+    assert pressure["oom_kill_during_index"] is False
+
+
+def test_a_clean_task_reports_zero_memory_pressure_and_stays_quiet(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.memory_pressure == {
+        "oom_kill_during_index": False,
+        "graph_refresh_refusals": 0,
+        "headroom_refusals": 0,
+    }
+    rendered = gt_audit.render_report([audit], tmp_path)
+    assert f"{audit.task_name} [{audit.verdict}]" in rendered
+    assert "  - MEMORY PRESSURE" not in rendered
+    # The run-level line is stated even at zero: a reader must be able to see
+    # that the question was asked, not infer it from silence.
+    assert "MEMORY PRESSURE TOTALS: 0 task(s)" in rendered
+
+
+def test_run_level_memory_pressure_totals_sum_every_task(tmp_path):
+    first = make_native_miniswe_task(tmp_path / "one")
+    second = make_native_miniswe_task(tmp_path / "two")
+    for task in (first, second):
+        (task / "agent" / "miniswe_report.json").write_text(json.dumps({
+            "supervisor": {
+                "reason": "initial_index_failed:benchmark_graph_required",
+                "child_returncode": -9,
+            },
+        }), encoding="utf-8")
+    write_diagnostics_document(second, diagnostics=[{
+        "code": "GT_GRAPH_REFRESH_FAILED",
+        "cause": "amend_refused:GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT",
+        "occurrence_count": 2,
+    }])
+
+    rendered = gt_audit.render_report(gt_audit.audit_run(tmp_path), tmp_path)
+
+    assert ("MEMORY PRESSURE TOTALS: 2 task(s) OOM-killed during initial "
+            "index, 2 graph-refresh refusal(s), 2 headroom refusal(s)") in rendered
+
+
+def test_cli_json_audit_carries_the_annotation_and_the_pressure(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    write_diagnostics_document(task, capabilities=[LSP_NO_OP_ROW], diagnostics=[{
+        "code": "GT_GRAPH_REFRESH_FAILED",
+        "cause": "amend_refused:GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT",
+        "occurrence_count": 1,
+    }])
+    write_lsp_receipts(task, [no_op_receipt()])
+    out_json = tmp_path / "audit.json"
+
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(tmp_path), "--json", str(out_json)],
+        capture_output=True, text=True, encoding="utf-8")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    row = next(r for r in data["tasks"][0]["capabilities"]
+               if r["capability"] == "lsp_promotion")
+    assert row["lsp_no_op_verdict"] == "EXPECTED"
+    assert "no LSP-serviceable language" in row["lsp_no_op_detail"]
+    assert data["tasks"][0]["memory_pressure"]["headroom_refusals"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# the miniswe_report search is bounded to the harness's own subtrees
+# --------------------------------------------------------------------------- #
+# A TB2 task directory carries the task's whole repository checkout. Walking it
+# per task costs a full traversal, and a look-alike report inside it would be
+# read as this run's own - a vendored fixture deciding whether we report an OOM.
+
+
+def _oom_report() -> str:
+    return json.dumps({
+        "supervisor": {
+            "reason": "initial_index_failed:benchmark_graph_required",
+            "child_returncode": -9,
+        },
+    })
+
+
+def test_a_miniswe_report_inside_the_task_checkout_is_never_read(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    for decoy in (
+        task / ".venv" / "lib" / "site-packages" / "harness",
+        task / "repo" / "tests" / "fixtures",
+    ):
+        decoy.mkdir(parents=True)
+        (decoy / "miniswe_report.json").write_text(_oom_report(), encoding="utf-8")
+
+    pressure = gt_audit.audit_task(task).memory_pressure
+
+    assert pressure["oom_kill_during_index"] is False
+
+
+def test_a_miniswe_report_beside_the_trial_is_still_read(tmp_path):
+    """The bound must not cost us the layouts the collectors actually write."""
+    task = make_native_miniswe_task(tmp_path)
+    (task / "miniswe_report.json").write_text(_oom_report(), encoding="utf-8")
+
+    assert gt_audit.audit_task(task).memory_pressure["oom_kill_during_index"] is True
+
+
+def test_the_agent_copy_of_the_report_wins_over_every_other_location(tmp_path):
+    task = make_native_miniswe_task(tmp_path)
+    (task / "agent" / "miniswe_report.json").write_text(
+        json.dumps({"supervisor": {"reason": "exited", "child_returncode": 0}}),
+        encoding="utf-8",
+    )
+    (task / "miniswe_report.json").write_text(_oom_report(), encoding="utf-8")
+
+    assert gt_audit.audit_task(task).memory_pressure["oom_kill_during_index"] is False

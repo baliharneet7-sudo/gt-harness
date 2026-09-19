@@ -1085,6 +1085,7 @@ def build_agent(
 # harness crash must never masquerade as success (the old unconditional
 # `return 0` + `| tee ... || true` erased every failure).
 TERMINAL_EXIT_CODES = {
+    "submitted": 0,            # agent submitted; GT was off, so there is no verification axis
     "submitted_verified": 0,   # agent submitted AND every GT obligation has evidence
     "submitted_unverified": 0, # agent submitted but some obligations have NO evidence (UNKNOWN)
     "stuck": 0,               # completed solver outcome; workspace remains gradable
@@ -1104,6 +1105,22 @@ _NON_SUBMITTED_TERMINALS = {"stuck", "budget_exhausted", "timeout",
 
 # Exception class name -> terminal outcome (mini-swe raises these through
 # handle_uncaught_exception, which also writes an exit message).
+#
+# Two entries carry a module PRECONDITION on top of the name, because the name
+# alone decides an outcome our own infrastructure can spell:
+#
+#   * provider-valued entries need the litellm/openai root (HIGH-1), so
+#     `harbor.api.APIError` is not the provider refusing the model;
+#   * `Submitted` needs the minisweagent root (L-4), because it maps to exit 0
+#     and `pier.errors.Submitted` would otherwise report an infrastructure
+#     fault as a clean pass.
+#
+# The asymmetry worth knowing: the CLASS path is module-gated, the MESSAGE path
+# is not.  `Exception("Submitted")` is still a submission whatever raised it,
+# because that is the exit message mini-swe itself writes and it arrives on a
+# plain Exception with no module to check (pinned by
+# test_submitted_exception_maps_to_submitted).  The message must be that exact
+# token - prose mentioning a submission is a crash (MEDIUM-6).
 _EXCEPTION_TERMINAL = {
     "Submitted": "submitted",
     "LifecycleError": "internal_error",
@@ -1117,7 +1134,206 @@ _EXCEPTION_TERMINAL = {
     "ProviderModelMismatch": "provider_model_mismatch",
     "ResearchModelMismatch": "provider_model_mismatch",
     "RunnerTerminationRequested": "timeout",
+    # Harness/OS faults, named rather than left to the default. Cohort
+    # 35298094010 lost four SUBMITTED runs to `FileNotFoundError: 'git'` (a
+    # terminal-bench container ships no git binary) and run 35262214538 had a
+    # CalledProcessError whose stock message ends "returned non-zero exit
+    # status 128" classified as provider_failed. None of these is a provider
+    # event, and an exact-name hit here is decided before any heuristic runs.
+    "CalledProcessError": "internal_error",
+    "FileNotFoundError": "internal_error",
+    "PermissionError": "internal_error",
+    "OSError": "internal_error",
 }
+
+# Provider failures are named by the exception TYPE, never by splitting a class
+# name into words.  The word split (api/auth/connection/timeout/unavailable...)
+# graded every OSError subclass as the provider refusing the model:
+# ConnectionResetError, ConnectionRefusedError, TimeoutError and
+# subprocess.TimeoutExpired all spell a provider word and none of them involves
+# a provider.  Each such hit exits 4, harbor raises NonZeroAgentExitCodeError
+# and errors the trial, while gt-run.json records zero provider failures - the
+# run-35262214538 chain, arriving through the class name instead of the message.
+#
+# This is a CLOSED roster of real provider exception class names (litellm and
+# the openai SDK it wraps).  It is the vocabulary of the wrapped-provider
+# MESSAGE contract below - the shapes `litellm.InternalServerError: ...` and a
+# message that IS one of these names.  It is NOT, on its own, a type verdict:
+# `_is_provider_exception_type` requires the litellm/openai module root as a
+# precondition (HIGH-1), because half of these words - APIError, NotFoundError,
+# Timeout, ConflictError - are also spelled by pier, docker, harbor and
+# requests, all of which are importable here.
+_PROVIDER_EXCEPTION_NAMES = frozenset({
+    "APIConnectionError",
+    "APIError",
+    "APIResponseValidationError",
+    "APIStatusError",
+    "APITimeoutError",
+    "AuthenticationError",
+    "BadRequestError",
+    "BudgetExceededError",
+    "ConflictError",
+    "ContentPolicyViolationError",
+    "ContextWindowExceededError",
+    "InternalServerError",
+    "NotFoundError",
+    "OpenAIError",
+    "PermissionDeniedError",
+    "RateLimitError",
+    "ServiceUnavailableError",
+    "Timeout",
+    "UnprocessableEntityError",
+    # Harness-raised provider faults, pinned by
+    # test_git_failure_is_not_a_provider_failure.
+    "ProviderOverloadedError",
+})
+
+# HIGH-1: where a class came from is a PRECONDITION, not an extra signal.
+# Half the roster is made of generic words that our own infrastructure spells
+# too - NotFoundError, Timeout, APIError, ConflictError - and matching the NAME
+# wherever it was defined graded `pier.errors.NotFoundError`,
+# `docker.errors.Timeout` and `harbor.api.APIError` as the provider refusing
+# the model.  `docker.errors.APIError` and `requests.exceptions.Timeout` are
+# importable in the installed environment, so that is run 35262214538's chain
+# arriving through a third door: exit 4, harbor raises
+# NonZeroAgentExitCodeError and errors the trial, and gt-run.json records zero
+# provider failures for an infrastructure fault.
+_PROVIDER_MODULE_ROOTS = ("litellm", "openai")
+
+# The only roster names allowed to classify from ANY module: exceptions this
+# harness raises itself, so no third-party library can spell them by accident.
+# `ProviderOverloadedError` is pinned by
+# test_git_failure_is_not_a_provider_failure.  The second standing exception to
+# the module rule is the wrapped-provider MESSAGE contract below, pinned by
+# test_provider_errors_map_to_provider_failed.
+_PROVIDER_NAMES_ANY_MODULE = frozenset({"ProviderOverloadedError"})
+
+# Table entries that name a provider outcome are subject to the same
+# precondition as the roster: the exact-name lookup runs first, so without this
+# `harbor.api.APIError` would never reach the MRO walk at all.
+_PROVIDER_NAMED_TERMINALS = frozenset({"provider_failed"})
+
+# L-4: the same reasoning for the one table entry that means SUCCESS.
+# `submitted` maps to exit 0, and `Submitted` is an ordinary English word that
+# pier, harbor and our own code can all spell; matching the bare class name
+# wherever it was defined turned `pier.errors.Submitted` - an infrastructure
+# fault - into a clean GT-off pass, which is the same hole HIGH-1 closed on the
+# provider side.  mini-swe raises `minisweagent.exceptions.Submitted`.
+_MINISWE_MODULE_ROOT = "minisweagent"
+_SUBMITTED_CLASS_NAME = "Submitted"
+_MINISWE_NAMED_TERMINALS = frozenset({"submitted"})
+
+# Stdlib and OS faults are harness faults, decided by TYPE before any text can
+# speak for them.  subprocess.SubprocessError covers CalledProcessError and
+# TimeoutExpired; OSError covers FileNotFoundError, PermissionError,
+# ConnectionResetError, ConnectionRefusedError, BrokenPipeError and
+# TimeoutError.  A local timeout is not a provider verdict.
+_INTERNAL_FAULT_TYPES = (OSError, subprocess.SubprocessError)
+
+# litellm errors also arrive WRAPPED in a generic exception that carries the
+# provider class name in the message text - the contract
+# test_provider_errors_map_to_provider_failed pins, including
+# TimeoutError("APIConnectionError"), which is why this runs before the OSError
+# rule above.  It applies only to these wrapper types, by exact identity, so no
+# OSError subclass and no subprocess error can reach it.
+_WRAPPED_PROVIDER_TYPES = frozenset({Exception, RuntimeError, TimeoutError})
+# ...and only to two shapes: the message IS the provider class name, or the
+# name arrives module-qualified (litellm.InternalServerError: ...).  Prose that
+# merely mentions a class - "Timeout while waiting for the docker daemon",
+# "BadRequestError from our own harness call" - is our own text about our own
+# fault and says nothing about the provider.  Case-sensitive on purpose: these
+# are class names.
+_WRAPPED_PROVIDER_NAMES = re.compile(
+    r"^(?:%s)$" % "|".join(sorted(_PROVIDER_EXCEPTION_NAMES))
+)
+_WRAPPED_PROVIDER_QUALIFIED = re.compile(
+    r"\b(?:%s)[\w.]*\.(?:%s)\b"
+    % ("|".join(_PROVIDER_MODULE_ROOTS), "|".join(sorted(_PROVIDER_EXCEPTION_NAMES)))
+)
+_WRAPPED_PROVIDER_PHRASE = "provider model mismatch"
+
+
+def _module_root(klass: type) -> str:
+    """The first dotted segment of a class's defining module ('' when unknown)."""
+    return str(getattr(klass, "__module__", "") or "").split(".", 1)[0]
+
+
+def _is_provider_exception_type(exc_type: type) -> bool:
+    """True when any class in the MRO is a known provider exception type.
+
+    A class qualifies only when it was defined by the provider SDK - its
+    ``__module__`` root is litellm or openai - or when its name is one of the
+    handful this harness raises itself (``_PROVIDER_NAMES_ANY_MODULE``).  The
+    walk is over ``__mro__``, so inheritance carries the root: a harness-defined
+    subclass of a real litellm error is still a provider failure, while a
+    same-named class from pier/docker/harbor is not.
+
+    A roster name from a provider module is the intended hit; a provider-module
+    class whose name the roster does not list yet is also a provider failure,
+    which is what test_litellm_exception_types_are_provider_failures_by_type
+    pins for ``openai._exceptions.SomethingNewError``.
+    """
+    for klass in getattr(exc_type, "__mro__", (exc_type,)):
+        if klass in (BaseException, Exception, object):
+            continue
+        if klass.__name__ in _PROVIDER_NAMES_ANY_MODULE:
+            return True
+        if _module_root(klass) in _PROVIDER_MODULE_ROOTS:
+            return True
+    return False
+
+
+def _is_minisweagent_submitted_type(exc_type: type) -> bool:
+    """True when this class IS mini-swe's own ``Submitted``, or derives from it.
+
+    L-4: the walk is over ``__mro__`` and requires both the name and the
+    ``minisweagent`` module root, mirroring ``_is_provider_exception_type``.
+    Inheritance therefore carries the root - a harness subclass of the real
+    signal is still a submission - while ``pier.errors.Submitted``, which
+    merely spells the word, is not.  The name is required as well as the root
+    because every other mini-swe exception (``LimitsExceeded``,
+    ``LifecycleError``) shares that root and none of them means success.
+    """
+    for klass in getattr(exc_type, "__mro__", (exc_type,)):
+        if klass in (BaseException, Exception, object):
+            continue
+        if (
+            klass.__name__ == _SUBMITTED_CLASS_NAME
+            and _module_root(klass) == _MINISWE_MODULE_ROOT
+        ):
+            return True
+    return False
+
+
+def _is_submitted_signal(exc_type: type, message: str) -> bool:
+    """True only for mini-swe's own submission signal.
+
+    MEDIUM-6: ``submitted`` maps to exit 0, so the old
+    ``if "submitted" in lowered`` rule reported any crash whose prose contains
+    the word - ``RuntimeError("failed after the patch was submitted")`` - as a
+    clean GT-off pass.  The signal is the class mini-swe raises, or the bare
+    exit message that carries its name, never prose that mentions a submission.
+
+    L-4: the class arm additionally requires the ``minisweagent`` module root,
+    so a same-named class from another package is not a pass.  The message arm
+    deliberately keeps no module precondition - see the note on
+    ``_EXCEPTION_TERMINAL`` - but stays an exact-token match.
+    """
+    if _is_minisweagent_submitted_type(exc_type):
+        return True
+    return message.strip() == _SUBMITTED_CLASS_NAME
+
+
+def _is_wrapped_provider_message(exc_type: type, message: str) -> bool:
+    """True for the wrapped-provider shape the contract test pins."""
+    if exc_type not in _WRAPPED_PROVIDER_TYPES:
+        return False
+    stripped = message.strip()
+    return bool(
+        _WRAPPED_PROVIDER_NAMES.match(stripped)
+        or _WRAPPED_PROVIDER_QUALIFIED.search(message)
+        or _WRAPPED_PROVIDER_PHRASE in message.lower()
+    )
 
 
 class RunnerTerminationRequested(RuntimeError):
@@ -1146,35 +1362,66 @@ def _install_termination_guard():
 
 
 def _classify_terminal(exception: BaseException | None, result: dict) -> str:
-    """Map the run's ending into one typed terminal outcome."""
+    """Map the run's ending into one typed terminal outcome.
+
+    Decided by TYPE, in this order:
+      1. the exact class-name table (what mini-swe itself raises), whose
+         provider-valued entries need the litellm/openai module root and whose
+         one success-valued entry (`Submitted`) needs the minisweagent root;
+      2. the provider exception family, walked through __mro__ - a class
+         counts only when the litellm/openai module root is reached (directly
+         or through a base class), or when its name is one this harness raises
+         itself; the same precondition gates step 1's provider-valued entries;
+      3. the wrapped-provider MESSAGE contract, for generic wrapper types only
+         (Exception/RuntimeError/TimeoutError, by exact identity) and only when
+         the message IS a provider class name, carries a module-qualified one,
+         or says "provider model mismatch";
+      4. stdlib and OS faults - OSError and every subclass, every
+         subprocess error - which are harness faults, never provider verdicts;
+      5. the remaining mini-swe message contracts (STUCK/lifecycle, limits,
+         submitted);
+      6. internal_error.
+
+    Nothing splits a class name into words any more.  That heuristic read
+    "timeout" out of TimeoutError and TimeoutExpired and "connection" out of
+    ConnectionResetError, and graded a local fault as the provider refusing the
+    model: exit 4, harbor raises NonZeroAgentExitCodeError, the trial is
+    errored, and gt-run.json shows zero provider failures.
+    """
     if exception is not None:
-        name = type(exception).__name__
+        exc_type = type(exception)
+        name = exc_type.__name__
         if name in _EXCEPTION_TERMINAL:
-            return _EXCEPTION_TERMINAL[name]
-        # litellm connection errors surface with provider-ish names, and they
-        # also arrive wrapped in generic exceptions that carry the provider
-        # class name in the message, so the message is matched on purpose.
-        #
-        # "status" is deliberately NOT a token.  subprocess controls its own
-        # message text, and CalledProcessError's stock wording ends "returned
-        # non-zero exit status 128".  On run 35262214538 (TB2 extract-elf) the
-        # task workspace had no git baseline, `git read-tree ''` failed, and
-        # that lone substring classified a harness fault as the provider
-        # refusing the model: exit 4, harbor raised NonZeroAgentExitCodeError,
-        # and a step-limited run that belonged in front of the official
-        # verifier was recorded as an infrastructure failure instead.  No
-        # litellm class is named for a bare status, so nothing needs it.
-        lowered = f"{name} {str(exception)}".lower()
-        if any(t in lowered for t in (
-            "connection", "timeout", "api", "auth", "provider",
-            "rate limit", "ratelimit",
-        )):
+            table_terminal = _EXCEPTION_TERMINAL[name]
+            if table_terminal in _PROVIDER_NAMED_TERMINALS:
+                admitted = _is_provider_exception_type(exc_type)
+            elif table_terminal in _MINISWE_NAMED_TERMINALS:
+                admitted = _is_minisweagent_submitted_type(exc_type)
+            else:
+                admitted = True
+            if admitted:
+                return table_terminal
+            # A provider-named class from a foreign module (harbor.api.APIError)
+            # - or a foreign `Submitted` (pier.errors.Submitted) - falls
+            # through to the rest of the ladder and lands on internal_error,
+            # where an infrastructure fault belongs.
+        message = str(exception)
+        if _is_provider_exception_type(exc_type):
             return "provider_failed"
+        if _is_wrapped_provider_message(exc_type, message):
+            return "provider_failed"
+        # Harness/OS faults are decided here, before any message heuristic can
+        # speak for them.  The message of a subprocess or OS error is written
+        # by whatever we happened to run, and run 35262214538 proved that text
+        # cannot be allowed to name the outcome.
+        if isinstance(exception, _INTERNAL_FAULT_TYPES):
+            return "internal_error"
+        lowered = f"{name} {message}".lower()
         if "tool action after stuck" in lowered or "lifecycleerror" in lowered:
             return "internal_error"
         if "limitsexceeded" in lowered:
             return "budget_exhausted"
-        if "submitted" in lowered:
+        if _is_submitted_signal(exc_type, message):
             return "submitted"
         return "internal_error"
     exit_status = str((result or {}).get("exit_status") or "")

@@ -48,7 +48,7 @@ on:
         type: string
         default: "20251031"
       ref:
-        description: "Repository ref to check out (the ENGINE code lives on the inline-engine branch)"
+        description: "Repository ref to check out. The ENGINE code lives on inline-engine; codex/gt-921bec20-union-smokes does NOT carry the engine (eval/gt_central_agent.py was deleted by 97efb7f0), so dispatching this workflow on it kills every task job."
         type: string
         default: "inline-engine"
       arm:
@@ -65,6 +65,14 @@ on:
 permissions:
   contents: read
   actions: read
+
+env:
+  # Single literal for the guard in `plan` and the `harbor run` invocation in
+  # `run`.  Run 35259343723 dispatched 20 task jobs that every one of them died
+  # on "No module named 'eval.gt_central_agent'" because the dispatch ref did
+  # not carry the engine; the guard below resolves this exact string once, in
+  # the planner, before any matrix fan-out.
+  AGENT_IMPORT_PATH: "eval.gt_central_agent:MiniSweCentralAgent"
 
 jobs:
   plan:
@@ -111,6 +119,74 @@ jobs:
           chmod +x vendor/gt-index-linux-amd64
           pip install -e . "mini-swe-agent==2.2.8" "harbor==0.20.0" \
             "pytest==9.1.1" "pytest-asyncio==1.4.0" vendor/groundtruth_mcp-*.whl
+
+      - name: Resolve the exact agent import path before any matrix fan-out
+        env:
+          CHECKOUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          python - <<'EOF'
+          import importlib, importlib.util, os, sys
+
+          # Run 35259343723 fanned out 20 task jobs and every one of them died on
+          # "No module named 'eval.gt_central_agent'" - the module was deleted by
+          # 97efb7f0 and survives only on the inline-engine branch.  Resolve the
+          # exact string the run job passes to --agent-import-path here, in the
+          # planner, so a bad ref costs one job instead of the whole matrix.
+          target = os.environ["AGENT_IMPORT_PATH"]
+          module, _, symbol = target.partition(":")
+          ref = os.environ.get("CHECKOUT_REF") or "(default)"
+          fatal = (
+              f"::error::agent module '{module}' is not importable on ref '{ref}'. "
+              "The ENGINE code lives on ref inline-engine; every other branch "
+              "(including codex/gt-921bec20-union-smokes) lost eval/gt_central_agent.py "
+              "in commit 97efb7f0. Dispatch this workflow with ref=inline-engine."
+          )
+          try:
+              spec = importlib.util.find_spec(module)
+          except ModuleNotFoundError as exc:
+              # Mirrored, deliberately, from the identical guard in
+              # deepswe_miniswe_central.yml.  Workflows cannot import each
+              # other, so this block is duplicated rather than shared, and
+              # test_engine_import_guard_blames_the_right_module_too is what
+              # keeps the two copies from rotting apart.
+              #
+              # find_spec imports the PARENT package, so this exception is not
+              # necessarily about the target: eval/__init__.py reaching for an
+              # uninstalled third-party dependency raises here too.  Swallowing
+              # both as "spec = None" turned a planner-only dependency gap into
+              # a false "agent module missing on this ref" verdict, so blame the
+              # target only when the name that went missing IS the target or the
+              # package that contains it.
+              missing = getattr(exc, "name", "") or ""
+              if missing == module or module.startswith(f"{missing}."):
+                  print(fatal)
+                  sys.exit(1)
+              print(f"::warning::resolving {module} raised ModuleNotFoundError "
+                    f"for unrelated dependency '{missing}'; the task job "
+                    "installs the full runtime")
+              sys.exit(0)
+          if spec is None:
+              print(fatal)
+              sys.exit(1)
+          try:
+              loaded = importlib.import_module(module)
+          except ImportError as exc:
+              missing = getattr(exc, "name", "") or ""
+              if missing == module or module.startswith(f"{missing}."):
+                  print(fatal)
+                  sys.exit(1)
+              # A planner-only dependency gap is not the trap this guard exists
+              # for: the module is on disk and the task job installs the runtime.
+              print(f"::warning::{module} is on disk but not importable in the "
+                    f"planner environment: {type(exc).__name__}: {exc}")
+              sys.exit(0)
+          if not symbol or not hasattr(loaded, symbol):
+              print(f"::error::{module} defines no '{symbol}'; "
+                    f"--agent-import-path {target} would fail in every task job")
+              sys.exit(1)
+          print(f"resolved --agent-import-path {target} -> {loaded.__file__}")
+          EOF
 
       - name: Provider-free semantic readiness gate
         run: |
@@ -366,7 +442,7 @@ jobs:
           FEATURE: ${{ inputs.feature }}
         run: |
           set -uo pipefail
-          AGENT="eval.gt_central_agent:MiniSweCentralAgent"
+          AGENT="$AGENT_IMPORT_PATH"
           [ "$FEATURE" = "integrated" ] || { echo "::error::unknown feature: $FEATURE"; exit 2; }
           FEATURE_ARGS=()
           case "$ARM" in
@@ -520,16 +596,28 @@ jobs:
   task_progress:
     name: Task progress
     needs: [plan]
-    if: always()
+    # Runs 35256152140, 35257234010, 35257606223, 35257941589 and 35258327432
+    # all stayed in_progress for hours after `plan` failed: this monitor polled
+    # for task jobs that were never dispatched, and each zombie held a
+    # concurrency slot until it was force-cancelled.  `if: always()` was the
+    # bug; with no plan there is nothing to monitor.
+    if: needs.plan.result == 'success'
     uses: ./.github/workflows/task_progress.yml
     with:
       expected_tasks_json: ${{ needs.plan.outputs.tasks }}
       task_job_regex: '^run \(.+\)$'
+      # No monitor_timeout_minutes here on purpose: task_progress.yml
+      # already defaults it to 350, and restating the default read as a new
+      # bound that this workflow was imposing.  Change the bound in
+      # task_progress.yml, where the job timeout is actually applied.
     secrets: inherit
 
   merge:
     needs: [plan, run]
-    if: always()
+    # `always()` alone made this job run - and fail on absent artifacts - for
+    # every planner failure in runs 35256152140..35258327432.  Keep always() so
+    # a partially failed matrix still merges, but only once a plan exists.
+    if: ${{ always() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

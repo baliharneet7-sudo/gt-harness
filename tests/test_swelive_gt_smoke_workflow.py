@@ -4,11 +4,18 @@ import json
 import tomllib
 from pathlib import Path
 
+import yaml
+
 from scripts.build_swelive_smoke_tasks import DIGESTS, build
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/swelive_gt_harness_paid.yaml"
 DISPATCHER = ROOT / ".github/workflows/swebench_live_lite_full.yml"
+# One pin, read rather than copied: a partial repin must fail in
+# tests/test_benchmark_workflow_dependencies.py, not in a paid dispatch.
+MODEL_PIN = json.loads(
+    (ROOT / "config" / "benchmark_model.v1.json").read_text(encoding="utf-8")
+)
 
 
 def test_frozen_five_task_packages_rebuild_exactly(tmp_path: Path) -> None:
@@ -26,7 +33,7 @@ def test_paid_workflow_is_exact_miniswe_union_alpha_and_officially_graded() -> N
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent" in text
     assert "eval.pier_filtered_docker:PierFilteredDockerEnvironment" in text
-    assert "config/provider_route_deepseek_v4_flash_0731_fp8.v1.json" in text
+    assert MODEL_PIN["swelive_route_manifest"] in text
     assert "secrets.OPENROUTER_NEW" in text
     assert "max-parallel: 20" in text
     assert "multiplier=5.0" in text
@@ -46,6 +53,38 @@ def test_paid_workflow_is_exact_miniswe_union_alpha_and_officially_graded() -> N
 
 def test_registered_workflow_dispatches_the_certified_workflow() -> None:
     text = DISPATCHER.read_text(encoding="utf-8")
+    assert MODEL_PIN["model"] in text
     assert "uses: ./.github/workflows/swelive_gt_harness_paid.yaml" in text
     assert "secrets: inherit" in text
     assert "cohort_stage: ${{ inputs.cohort_stage }}" in text
+
+
+def test_provider_gate_prices_the_whole_cohort_it_is_about_to_dispatch() -> None:
+    # The funds estimate defaults to one task.  A five-task cohort cleared
+    # against the price of one task is not a funds gate, it is a spelling
+    # check on the key - and run 35383113823 died mid-run because of it.
+    text = WORKFLOW.read_text(encoding="utf-8")
+    call = text[
+        text.index("python -m scripts.provider_preflight") : text.index(
+            "--live", text.index("python -m scripts.provider_preflight")
+        )
+    ]
+    assert '--expected-tasks "${{ needs.plan.outputs.task_count }}"' in call
+
+    # The expression has to resolve: `plan` must publish task_count and the
+    # gate job must depend on `plan`, or the flag silently arrives empty.
+    workflow = yaml.safe_load(text)
+    plan = workflow["jobs"]["plan"]
+    gate = workflow["jobs"]["provider_gate"]
+    assert "task_count" in plan["outputs"]
+    assert "plan" in gate["needs"]
+
+
+def test_provider_gate_reports_a_funds_verdict_it_cannot_act_on() -> None:
+    # `sufficient` is tri-state: an unbounded key and an unpriced model both
+    # skip the comparison and still report PASS.  Skipping quietly is the
+    # failure mode; say which verdict was reached.
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert 'verdict = receipt.get("funds_verdict", "absent")' in text
+    assert 'if verdict != "sufficient":' in text
+    assert "::warning title=Provider funds::funds_verdict=" in text

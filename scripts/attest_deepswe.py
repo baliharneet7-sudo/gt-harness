@@ -35,6 +35,42 @@ ROOT = Path(__file__).resolve().parents[1]
 # so tests can narrow the cohort without rewriting the pinned manifest.
 CANONICAL_TASK_IDS = load_suite("deepswe").canonical_task_ids
 
+# The provider gate's field set, joined to its producer by
+# tests/test_attest_deepswe.py::test_preflight_receipt_satisfies_the_attested_gate_field_set.
+# The union is the whole receipt scripts/provider_preflight.py writes, and the
+# check below is set EQUALITY in both directions: an unknown key is the leak
+# path this check exists to close, and a missing key is a receipt that never
+# ran the part of the gate it is silent about. (Round 2 admitted the pre-spend
+# half as optional so older receipts and the swelive fixture could still
+# attest; both fixtures now carry the producer's exact field set, so that
+# subset window is closed.)
+#
+# The split records what each half means, not how strictly it is matched:
+#   - REQUIRED: the route, admission and inference-count evidence.
+#   - ADMITTED: the pre-spend diagnostics added later. Of these,
+#     `funds_verdict`, `expected_tasks` and `served_endpoint.quantization` are
+#     BOUND below - an insufficient verdict, a cohort size the gate did not
+#     price, and a served numeric format that contradicts the route manifest
+#     each fail the attestation. `funds_sufficient`, `funds_reason`,
+#     `estimate_usd`, `funds_headroom_bucket` and `pricing_source` are
+#     INFORMATIONAL: they explain the verdict and are copied into the witness
+#     verbatim. `fingerprint_available` is informational too, but its negative
+#     case is named in the witness (`served_build_unverified`) because it is
+#     OpenRouter's limitation - system_fingerprint: null - not a failure.
+PROVIDER_GATE_REQUIRED_FIELDS = frozenset({
+    "schema", "status", "error_code", "mode", "source_sha", "route_id",
+    "provider", "base_url", "model", "provider_routing", "route_sha256", "checks",
+    "provider_ready", "paid_run_approved", "account_amounts_recorded",
+    "provider_inference_attempts", "provider_inference_calls",
+    "context_window_tokens", "reserved_output_tokens", "context_window_source",
+})
+PROVIDER_GATE_ADMITTED_FIELDS = frozenset({
+    "funds_sufficient", "funds_verdict", "funds_reason", "estimate_usd",
+    "funds_headroom_bucket", "expected_tasks", "pricing_source",
+    "served_endpoint", "fingerprint_available",
+})
+PROVIDER_GATE_FIELDS = PROVIDER_GATE_REQUIRED_FIELDS | PROVIDER_GATE_ADMITTED_FIELDS
+
 
 def _default_suite() -> BenchmarkSuite:
     suite = load_suite("deepswe")
@@ -327,14 +363,7 @@ def attest_deepswe(
         errors.append(f"task_job_result_not_success:{normalized_job_result}")
     if provider_gate.get("schema") != "gt.provider_preflight.v1":
         errors.append("provider_gate_schema_mismatch")
-    provider_gate_fields = {
-        "schema", "status", "error_code", "mode", "source_sha", "route_id",
-        "provider", "base_url", "model", "provider_routing", "route_sha256", "checks",
-        "provider_ready", "paid_run_approved", "account_amounts_recorded",
-        "provider_inference_attempts", "provider_inference_calls",
-        "context_window_tokens", "reserved_output_tokens", "context_window_source",
-    }
-    if set(provider_gate) != provider_gate_fields:
+    if set(provider_gate) != PROVIDER_GATE_FIELDS:
         errors.append("provider_gate_fields_invalid")
     if provider_gate.get("status") != "PASS":
         errors.append("provider_gate_failed")
@@ -385,6 +414,45 @@ def attest_deepswe(
         or provider_gate.get("context_window_source") != "openrouter:/models"
     ):
         errors.append("provider_gate_admission_invalid")
+
+    # The pre-spend half, bound. Until round 3 every field below was written,
+    # uploaded and never read: a receipt with no funds block attested exactly
+    # like one that said "sufficient".
+    if provider_gate.get("funds_verdict") == "insufficient":
+        # The preflight already refuses this (status FAIL), so reaching here
+        # means the status and the verdict disagree.
+        errors.append("provider_gate_funds_insufficient")
+    if provider_gate.get("mode") == "live":
+        # Only the paid path spends; a provider_free receipt has nothing to
+        # price and leaves both fields null.
+        if provider_gate.get("funds_verdict") is None:
+            errors.append("provider_gate_funds_verdict_missing")
+        if type(provider_gate.get("expected_tasks")) is not int:
+            errors.append("provider_gate_expected_tasks_missing")
+        elif provider_gate.get("expected_tasks") != plan.get("task_count"):
+            # --expected-tasks is handed to the preflight by the workflow. A
+            # gate that priced one task for a 20-task cohort is a spelling
+            # check on the key, not a funds gate (run 35383113823).
+            errors.append("provider_gate_expected_tasks_mismatch")
+    served_endpoint = provider_gate.get("served_endpoint")
+    served_quantization = (
+        served_endpoint.get("quantization")
+        if isinstance(served_endpoint, dict) else None
+    )
+    expected_quantization = trusted_route.get("expected_quantization")
+    if (
+        expected_quantization is not None
+        # "unknown" is the preflight's sentinel for an endpoint tag it could
+        # not read, and an absent listing is not an observation either: both
+        # are witnessed as served_quantization_unverified rather than refused,
+        # so this fires on contrary evidence and never on missing evidence.
+        and served_quantization not in (None, "unknown")
+        and served_quantization != expected_quantization
+    ):
+        # The frozen GT-off baseline ran DeepSeek's own fp8 deployment; a GT-on
+        # run reached a relace/fp4 endpoint under the identical model name and
+        # scored 0/20 against 17/20.
+        errors.append("provider_gate_quantization_mismatch")
 
     result_rows: list[tuple[Path, dict[str, Any]]] = []
     trial_rows: list[tuple[Path, dict[str, Any]]] = []
@@ -795,14 +863,26 @@ def attest_deepswe(
         "agent_scaffold_version": plan["agent_scaffold_version"],
         "treatment": plan["treatment"],
         "provider_gate": {
-            key: (
-                {
-                    check: (provider_gate.get("checks") or {}).get(check) is True
-                    for check in sorted(required_provider_checks)
-                }
-                if key == "checks" else provider_gate.get(key)
-            )
-            for key in sorted(provider_gate_fields)
+            **{
+                key: (
+                    {
+                        check: (provider_gate.get("checks") or {}).get(check) is True
+                        for check in sorted(required_provider_checks)
+                    }
+                    if key == "checks" else provider_gate.get(key)
+                )
+                for key in sorted(PROVIDER_GATE_FIELDS)
+            },
+            # Named, non-error facts about how far the served-model identity
+            # could be verified. OpenRouter answers system_fingerprint: null
+            # and may omit the endpoint listing, so "we could not check" is
+            # recorded as itself instead of being lost in a null field.
+            "served_build_unverified": (
+                provider_gate.get("fingerprint_available") is not True
+            ),
+            "served_quantization_unverified": (
+                served_quantization in (None, "unknown")
+            ),
         },
         "canonical_evidence": {
             name: {

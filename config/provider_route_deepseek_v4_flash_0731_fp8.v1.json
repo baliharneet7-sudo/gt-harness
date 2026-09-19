@@ -25,5 +25,10 @@
     "retry_jitter_max_seconds": 45,
     "retry_after_cap_seconds": 120,
     "model_retry_attempts": 15
-  }
+  },
+  "pricing": {
+    "prompt_usd_per_token": 0.00000006,
+    "completion_usd_per_token": 0.00000018
+  },
+  "expected_quantization": "fp8"
 }
