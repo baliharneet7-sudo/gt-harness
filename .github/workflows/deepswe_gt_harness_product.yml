@@ -176,6 +176,16 @@ jobs:
           set -euo pipefail
           git fetch --force --no-tags origin \
             '+refs/heads/*:refs/remotes/origin/*'
+          # The two fixture commits live on a side lineage that no branch
+          # reaches, so a bare-SHA fetch depends on the server still holding
+          # them as reachable objects - it does not. They are carried by the
+          # fixtures/* tags on the campaign remotes; fetch those refs first,
+          # then the SHA fetch and the cat-file pins below are satisfied from
+          # objects already present. Found by the offline final check-up:
+          # a --no-local clone of the landed head did not carry them.
+          git fetch --force --no-tags origin \
+            '+refs/tags/fixtures/har41-e56c7ef1:refs/tags/fixtures/har41-e56c7ef1' \
+            '+refs/tags/fixtures/har64-7bbbc9d0:refs/tags/fixtures/har64-7bbbc9d0'
           git fetch --force --no-tags origin \
             e56c7ef17eaffee36c80ff4dde4f0cd3991c4dcd \
             7bbbc9d0b7f02f8cdaab79ad82ee86884b738eb5
