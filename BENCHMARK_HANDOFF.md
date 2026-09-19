@@ -7,7 +7,10 @@ free of API keys, account emails, project IDs, and other credentials.
 ## Fixed experiment contract
 
 - Model (current, 2026-09-19): `deepseek/deepseek-v4-flash-0731`, provider
-  `deepinfra` only, **fp8**, $0.06/M input and $0.18/M output. Single source
+  `streamlake` only, **fp8 enforced per request** (`a856fd12`), $0.044/M
+  input and $0.132/M output under a 90% promotional discount (undiscounted
+  10x; re-check before every dispatch). Its chat template adds 4 prompt
+  tokens vs the DeepSeek-native baseline - an accepted, recorded deviation. Single source
   of truth `config/benchmark_model.v1.json`; route manifest
   `config/provider_route_deepseek_v4_flash_0731_fp8.v1.json`. The `relace`
   route that preceded it served fp4 - a quantization confound against the
@@ -93,7 +96,7 @@ new series identifier.
 - The TB2 infrastructure count exceeded five in this first series, so that series is closed. The Snowflake hashes are now bound in both plan and task jobs. The next dispatch starts a fresh TB2 series with infrastructure count 0.
 - The planner list is now limited to source-compatible central-agent, progress, provider-preflight, budget, and outcome tests in `.github/workflows/tb2_miniswe_engine.yml`. Push this fix to both benchmark accounts before retrying TB2.
 - Retry (superseded 2026-09-19): the model is now `deepseek/deepseek-v4-flash-0731`
-  on `deepinfra` fp8, and the first paid dispatch is a 2-3 task `cohort_stage:
+  on `streamlake` fp8, and the first paid dispatch is a 2-3 task `cohort_stage:
   subset`, not p20 - see the dispatch runbook in
   `docs/benchmarks/gt_hardening_rsi_2026-09-18.md` section 8.
 
@@ -205,8 +208,8 @@ in Linear HAR-88. Read that before dispatching anything.
 
 Three things it changes for the next dispatch:
 
-1. The provider route is `deepseek/deepseek-v4-flash-0731` on `deepinfra`
-   only (fp8). The `relace` route was fp4 - a confound against the fp8
+1. The provider route is `deepseek/deepseek-v4-flash-0731` on `streamlake`
+   only (fp8 enforced per request). The `relace` route was fp4 - a confound against the fp8
    baseline. `config/benchmark_model.v1.json` is the model's single source
    of truth.
 2. Every TB2 task job now ends with `scripts.verify_run_receipts` over the

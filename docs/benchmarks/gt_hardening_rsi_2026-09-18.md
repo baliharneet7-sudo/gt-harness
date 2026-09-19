@@ -8,7 +8,7 @@ Nothing runs online until the user authorises spend.
 Ticket: **HAR-88** (`done_and_dusted`) mirrors this file; this file is the
 source of truth. Worktree `D:\w\t`, branch `codex/tb2-gt-union-921bec20`,
 pushed as `codex/gt-921bec20-union-smokes` on remotes `baliharneet7` and
-`fork`. Base commit `a03ad260`. Delta through `8272fce9`: 91 files,
+`fork` (head `a856fd12` plus the record commit after it). Base commit `a03ad260`. Delta through `8272fce9`: 91 files,
 +21,042 / −335.
 
 ---
@@ -59,6 +59,10 @@ losing graded work to its own infrastructure.
 | `07659df3` | Lint on the last three touched test files. |
 | `bb0736f6` | **Readiness fix found by the final check-up:** product workflow fetches the fixture commits through `fixtures/*` tags before pinning them by SHA. |
 | `15245280`, `8272fce9` | Record of the final check-up and the definitive result. |
+| `ab009cf8`, `66cfac47` | Record rewrite; §7a model identity and comparability. |
+| `fb1a87d6` | Model identity probe (`scripts/model_identity_probe.py`, `--compare`, refs extracted from the TB2 baseline). |
+| `17b31a7a` | §7b first provider decision (DeepInfra), superseded. |
+| `a856fd12` | **Paid route pinned to StreamLake, fp8 enforced on every request** (`provider.quantizations`), mirrored across manifests, preflight allowlist, run-layer routing and the TB2 receipt assert. |
 
 Tags on both campaign remotes, **never to be deleted**:
 `fixtures/har41-e56c7ef1` → `e56c7ef17eaffee36c80ff4dde4f0cd3991c4dcd`,
@@ -68,8 +72,9 @@ Tags on both campaign remotes, **never to be deleted**:
 
 ### 4.1 Model, provider route, spend gate
 - Model single source of truth `config/benchmark_model.v1.json`:
-  `deepseek/deepseek-v4-flash-0731`, provider `deepinfra` only, **fp8**,
-  $0.06/M in, $0.18/M out. The earlier `relace` route served **fp4** — a
+  `deepseek/deepseek-v4-flash-0731`, provider `streamlake` only, **fp8
+  enforced per request** (`provider.quantizations: ["fp8"]`, since
+  `a856fd12`), $0.044/M in, $0.132/M out (promotional, see §7b). The earlier `relace` route served **fp4** — a
   quantization confound against the fp8 baseline
   (`fp_a18b46594c_prod0820_fp8_kvcache_20260402`). All seven consumers of
   the model string are repinned and pinned by tests.
@@ -288,9 +293,9 @@ fails closed on each:
 
 ## 7a. Model identity and comparability (checked 2026-09-19, offline + public metadata)
 
-- **Served model.** The pin `deepseek/deepseek-v4-flash-0731` on DeepInfra is
-  **V4 Flash 0731** (284B/13B MoE, fp8, $0.06 in / $0.18 out / $0.015 cache
-  read per 1M, per OpenRouter's public endpoint listing). It is **not**
+- **Served model.** The pin `deepseek/deepseek-v4-flash-0731` (now on StreamLake, §7b) is
+  **V4 Flash 0731** (284B/13B MoE, fp8, per OpenRouter's public endpoint
+  listing). It is **not**
   V4.1 Flash, a different architecture listed 2026-09-10. DeepSeek's own
   API has **retired** V4 Flash: the name `deepseek-v4-flash` there now
   serves V4.1, so the first-party route is ruled out for any comparison.
@@ -312,47 +317,75 @@ fails closed on each:
   default to match its own baseline). Residual unknown: whether DeepSeek
   native and DeepInfra default thinking mode the same way; the first TB2
   subset run shows it.
-- **Cost correction.** On the leaderboard's workload (19.8M input, 99.4%
+- **Cost correction (superseded by §7b).** On the leaderboard's workload (19.8M input, 99.4%
   cache hits, 108K output per task) DeepInfra's cache price makes the pin
   about $0.32/task vs about $0.14 off-peak on DeepSeek's own API. That means
   roughly $36 per 113-task DeepSWE pass. The cheaper route serves the wrong
   model, so the premium buys model identity.
 
-## 7b. Provider decision (2026-09-19, user): DeepInfra, V4 Flash 0731, fp8
+## 7b. Provider decision (2026-09-19, user): StreamLake, V4 Flash 0731, fp8
 
 Live identity probe (commit `fb1a87d6`; receipts in
 `D:\gt_runs\identity_probe_20260919\`; spend well under one cent). Five
 recorded TB2-baseline first-call prompts were replayed exactly, with the
 mini-swe-agent 2.2.8 tool schema, at temperature 0, with fp8 enforced:
 
-| Host | Prompt tokens vs baseline | Thinking | Deterministic at temp 0 | Caching | Verdict |
+| Host | Prompt tokens vs baseline | Thinking | Deterministic at temp 0 | Caching | Probe verdict |
 |---|---|---|---|---|---|
-| **DeepInfra** | **exact 5/5** | on, every replay | no | weak | **CONFORMS** |
-| StreamLake | +4 on every task | on | yes | yes | NONCONFORMING |
+| DeepInfra | exact 5/5 | on, every replay | no | weak | CONFORMS |
+| **StreamLake** | +4 on every task | on, every replay | **yes** | **yes** | NONCONFORMING (template only) |
 | Baidu | +4 on every task | on | no | yes | NONCONFORMING |
 | DeepSeek V4.1 control | not run: DeepSeek account has no balance | | | | UNRESOLVED |
 
-**Decision: DeepInfra is the route** (already the pin in
-`config/benchmark_model.v1.json`). It is the only host that reproduces the
-baseline's tokenizer, chat template, tool schema and thinking mode exactly.
-StreamLake and Baidu add four tokens of chat template, so the model sees a
-different input; they are excluded despite being cheaper. The weights
-themselves cannot be proven: the baseline ran at temperature 1.0 and
-recorded no logprobs.
+**History.** DeepInfra was chosen first (`17b31a7a`) because it was the only
+exact tokenizer match. Its weak caching put TB2 near $15, not the ~$3 the
+user had been told; that earlier figure assumed DeepSeek-grade caching
+without checking it. The user then ruled that the requirement is **the same
+model at fp8**, not a byte-identical chat template.
+
+**Decision: StreamLake** (`a856fd12`). Same checkpoint (0731), same native
+precision (fp8, enforced by OpenRouter on every request so a non-fp8
+endpoint is refused rather than observed), thinking on every replay,
+deterministic, real prompt caching.
+
+**Accepted deviation.** StreamLake's chat-template wrapper adds exactly 4
+prompt tokens on every task (1111/1111/1134/1135/1142 vs
+1107/1107/1130/1131/1138). The model therefore sees a slightly different
+input than the DeepSeek-native baseline did. This is recorded, not hidden:
+any GT-on vs GT-off delta carries it.
+
+**Price (OpenRouter public endpoint listing, 2026-09-19).** StreamLake's
+listed prices carry `discount: 0.9`, a 90% promotion:
+
+| Per 1M tokens | Listed (discounted) | Undiscounted |
+|---|---|---|
+| Input | $0.044 | $0.44 |
+| Output | $0.132 | $1.32 |
+| Cache read | $0.0014 | $0.014 |
+
+Estimates on the baselines' own token mix:
+
+| Run | Discounted, caching like the baseline | Discounted, no caching | Undiscounted, caching |
+|---|---|---|---|
+| TB2, 89 tasks (238.5M in, 98% cached, 4.0M out) | about $1.10 | about $11 | about $11 |
+| DeepSWE, 113 tasks (19.8M in/task, 99.4% cached, 108K out/task) | about $5.30 | about $100 | about $53 |
+
+The preflight's funds gate prices all input at the prompt rate (the
+manifest schema has no cache-read field), so its estimate is the
+no-caching upper bound; that is deliberate and safe.
 
 Open items this decision carries:
-- **Reasoning depth.** On the five probe prompts DeepInfra reasoned for
-  10-24 tokens; the baseline reasoned for 18-63 on the same prompts (at
-  temperature 1.0, not 0). This may be a shallower thinking default (low to
-  moderate confidence). The first TB2 subset run must compare reasoning
-  tokens per call against the baseline's 4,120 calls before any
-  headline result is reported.
-- **Cost.** DeepInfra caches weakly, so budget near full input price:
-  about $15 for the 89-task TB2 set and about $137 per 113-task DeepSWE
-  pass.
+- **Promotion.** If the 90% discount ends, costs rise tenfold. Re-read the
+  endpoint listing immediately before every paid dispatch.
+- **Caching on real runs.** The probe saw 1,024 cached tokens on a repeat,
+  not a 98% hit rate over a long trajectory. The first TB2 subset must
+  report cache-hit rate and real per-task cost before scaling out.
+- **Reasoning depth.** Compare reasoning tokens per call on the first TB2
+  subset against the baseline's 4,120 calls before any headline result.
 - **Revision per benchmark.** TB2 and DeepSWE baselines are 0731 (this
   route). The SWE-bench-Live Lite baseline is 0423; it needs the 0423 slug
-  and its own identity check before a like-for-like comparison.
+  and its own check before a like-for-like comparison.
+- **DeepSWE reasoning effort `max`** (§7a) is still undecided.
 
 ## 8. Dispatch runbook (only after the user authorises spend)
 
