@@ -3285,6 +3285,7 @@ _GUARDED_MODULES = (
     ("scripts/provider_preflight.py", 0),
     ("scripts/gt_task_visibility.py", 0),
     ("scripts/tb2_report.py", 0),
+    ("scripts/model_identity_probe.py", 0),
 )
 
 # Where discovery looks. Tests are excluded on purpose: a test that pins an
@@ -3669,6 +3670,7 @@ _PATH_LAUNCHED_SCRIPTS = (
     "scripts/provider_preflight.py",
     "scripts/gt_task_visibility.py",
     "scripts/diagnose_benchmark_run.py",
+    "scripts/model_identity_probe.py",
 )
 
 
