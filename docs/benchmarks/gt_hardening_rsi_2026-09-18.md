@@ -193,14 +193,16 @@ warned (`Dockerfile unparsed`); an unresolved `$ARG` base is kept and warned.
 ## Campaign 2 (2026-09-19): decisions 1-3, offline
 
 Same method: TDD, disjoint-file Opus agents, adversarial review per round.
-Reviews 10, 11, 12. Landed as `89d5494d` (code) and `88fc821c` (manifest
-re-pin).
+Reviews 10-15. Landed as `89d5494d` (code), `88fc821c` (manifest re-pin)
+and `f28cdf99` (workflow-command escaping, round 4).
 
 | Round | Review verdict | Headline |
 |---|---|---|
 | 1 | 1 CRITICAL + 1 HIGH + 2 MEDIUM + 4 LOW | restored full-suite step could never pass (`.githooks/`, `docs/historical-workflows/` deleted by `c464bc57`); attribution fix laundered dark reasons across records |
 | 2 | 1 CRITICAL + 3 HIGH + 6 MEDIUM + 5 LOW | `test_swelive_corpus.py` aborted collection on a clean checkout (corpus never merged onto this lineage); `::warning` lines carried unescaped model-writable bytes into the Actions command parser; auto-push hook as tracked content; stale hook digest |
 | 3 | **APPROVE - 0 C / 0 H / 0 M / 3 LOW** (one MEDIUM outside the set, fixed in round 4) | merge criterion met |
+| 4 | reviews 13/14/15: 2 MEDIUM -> 1 HIGH (escape-expansion arithmetic) -> clean staged set; CRITICAL found upstream in `gt_audit.py` | one shared escaper (`scripts/gh_annotations.py`) for every workflow-command line, bounded per field, module set discovered by walk; landed `f28cdf99` |
+| 5 | in progress | `gt_audit.py::render_report` prints raw container-written fields to the runner's stdout in both paid workflows (the review-11 class, one module upstream, invisible to a `::`-literal guard); step-summary cell sanitiser; non-UTF-8 stderr echo |
 
 What changed:
 

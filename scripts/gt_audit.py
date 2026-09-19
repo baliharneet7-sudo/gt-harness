@@ -110,6 +110,7 @@ from gt_engine.event_journal import (  # noqa: E402
 )
 from gt_engine.replay import build_iteration_replay  # noqa: E402
 from gt_engine.request_history import load_provider_request  # noqa: E402
+from scripts.gh_annotations import gh_escape  # noqa: E402
 from scripts.lsp_no_op import (  # noqa: E402
     EXPECTED,
     UNEXPECTED,
@@ -3063,6 +3064,98 @@ def _pressure_total(audits: list[TaskAudit], key: str) -> int:
     return sum(int((a.memory_pressure or {}).get(key) or 0) for a in audits)
 
 
+# REVIEW-15: the human report is STDIO THE RUNNER PARSES ------------------- #
+#
+# Both paid workflows run ``python scripts/gt_audit.py attestation/tasks ...
+# --json ...`` with stdout going straight to the step log
+# (deepswe_gt_harness_product_p0731.yaml, swelive_gt_harness_paid.yaml);
+# ``--json`` writes a FILE and does not divert stdout. A line that BEGINS with
+# ``::`` off that stdout is a workflow command the Actions runner obeys, and
+# most of what this report interpolates is free text written INSIDE THE
+# CONTAINER the model controls: a capability row's ``state``/``evidence``
+# (annotated_capability_rows leaves those bytes exactly as gt_session wrote
+# them), a ledger row's ``status_reason`` and ``quote``, the ``agent_error``
+# carried in a verdict reason, an UNPARSED transcript sample, the task name.
+# REVIEW-11's payload - ``<LF>::stop-commands::hunter2<LF>::error
+# title=Grader::TASK PASSED`` - silences the step's own ``::error`` and then
+# forges a verdict nothing produced.
+#
+# The invariant: no physical line of render_report/render_paired output, for
+# ANY input, begins with ``::``.
+#
+# The minimum a ``_safe_block`` line is shifted by. Four columns is enough to
+# make ``::`` unreachable at column zero and small enough that a quoted
+# excerpt still lines up under its label.
+REPORT_INDENT = "    "
+# How many physical lines ONE quoted excerpt may spend. The quote exists to be
+# read, so it keeps its line breaks rather than being flattened - which makes
+# it the one field that can spend lines, and therefore the one field that
+# needs a line budget. The ledger row and the --json receipt still carry the
+# whole excerpt; only the console line is cut.
+REPORT_BLOCK_LINE_LIMIT = 20
+# Everything ``str.splitlines`` treats as a terminator that ``gh_escape`` does
+# not neutralise. GitHub's runner only splits on CR/LF, but this report is
+# also read back by Python (and by log viewers that honour U+2028), and a
+# field that survives gh_escape and still ends a line is the same hole one
+# layer up. They become spaces: this is a one-line-per-field medium.
+_REPORT_LINE_BREAKS = re.compile(r"[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+# The backstop, and the reason it splits on more than ``\n``: a bare carriage
+# return puts the cursor at column zero too.
+_REPORT_LINE_SPLIT = re.compile(
+    r"(\r\n|[\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029])"
+)
+
+
+def _safe(value: object) -> str:
+    """One artifact-derived field: single line, bounded, command-escaped.
+
+    ``gh_escape`` is the primitive because the destination is the same one -
+    stdio the runner parses - and it already owns the bound (512 raw
+    characters plus a truncation marker) and the escape order that keeps a
+    ``%`` from being double-written. A 5,000-character ``evidence`` would
+    otherwise bury every line around it in the step log; the ``--json``
+    receipt keeps the field whole, so nothing is lost, only the log line is
+    bounded.
+    """
+    return gh_escape(_REPORT_LINE_BREAKS.sub(" ", str(value)))
+
+
+def _safe_block(value: object, indent: str) -> list[str]:
+    """A multi-line excerpt kept READABLE: indented line by line, and bounded.
+
+    The counterpart to ``_safe`` for a field whose line breaks are the point -
+    today only a ledger row's ``quote``, which is the delivered bytes a human
+    reads to check the join. Flattening it into one percent-escaped blob would
+    make the evidence unreadable, so every PHYSICAL line is prefixed with the
+    report's indent instead: column zero is then unreachable without the field
+    losing its shape. Each line still goes through ``_safe``, so a line cannot
+    be unbounded either, and the number of lines is capped.
+    """
+    lines = str(value).splitlines() or [""]
+    rendered = [indent + _safe(line) for line in lines[:REPORT_BLOCK_LINE_LIMIT]]
+    dropped = len(lines) - REPORT_BLOCK_LINE_LIMIT
+    if dropped > 0:
+        rendered.append(f"{indent}...({dropped} more line(s), see the --json receipt)")
+    return rendered
+
+
+def _no_column_zero(text: str) -> str:
+    """The backstop: nothing this report emits may start a workflow command.
+
+    Every free-text field above is sanitised at its own call site, which is
+    the fix. This is the guard, and it is deliberately last: the defect class
+    is a NEW interpolation added later without the call-site treatment, and a
+    guard that only covers the fields that exist today covers the wrong thing.
+    Host-written report text never begins with ``::``, so a line this has to
+    touch is by construction a field that escaped sanitising.
+    """
+    parts = _REPORT_LINE_SPLIT.split(text)
+    return "".join(
+        " " + part if (index % 2 == 0 and part.startswith("::")) else part
+        for index, part in enumerate(parts)
+    )
+
+
 def _fmt(v: object, width: int) -> str:
     s = "-" if v is None else str(v)
     return s[:width].ljust(width)
@@ -3082,16 +3175,17 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
             tok = f"{a.in_tokens or 0}/{a.out_tokens or 0}"
         er = None if a.error_rate is None else f"{a.error_rate:.0%}"
         gt_col = f"{a.gt_deliveries}L" if a.ledger_present else str(a.gt_deliveries)
-        out.append(_fmt(a.task_name, 34) + _fmt(a.verdict, 16) + _fmt(a.stop_reason, 12)
+        out.append(_fmt(_safe(a.task_name), 34) + _fmt(a.verdict, 16)
+                   + _fmt(a.stop_reason and _safe(a.stop_reason), 12)
                    + _fmt(a.iterations, 6) + _fmt(tok, 16) + _fmt(a.reward, 8)
                    + _fmt(gt_col, 5) + _fmt(er, 6))
     out.append("-" * 104)
     out.append("gt column: deliveries ('NL' = N sealed rows from gt_ledger.jsonl = "
                "ledger truth; bare N = transcript heuristic, no ledger)")
     for a in audits:
-        out.append(f"\n{a.task_name} [{a.verdict}]")
+        out.append(f"\n{_safe(a.task_name)} [{a.verdict}]")
         for r in a.verdict_reasons:
-            out.append(f"  - {r}")
+            out.append(f"  - {_safe(r)}")
         if a.gt_delivery_kinds:
             out.append(f"  - GT delivery kinds: {a.gt_delivery_kinds}")
         if a.delivery_consumption_summary:
@@ -3111,20 +3205,24 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
                        f"{n_c} {CONFIRMED}, {n_m} {MODEL_ONLY}, {n_u} {UNRECONCILED}"
                        f" | heuristic blocks observed: {a.gt_blocks_observed}")
             for r in a.ledger_rows:
-                line = (f"      ev{_fmt(r.event_id, 5)} "
-                        f"{_fmt(r.evidence_type, 22)} {_fmt(r.tier, 11)} "
-                        f"{_fmt(str(r.len_shipped_chars) + 'c', 6)} {r.status}")
+                line = (f"      ev{_fmt(_safe(r.event_id), 5)} "
+                        f"{_fmt(_safe(r.evidence_type), 22)} "
+                        f"{_fmt(_safe(r.tier), 11)} "
+                        f"{_fmt(str(r.len_shipped_chars) + 'c', 6)} {_safe(r.status)}")
                 out.append(line)
                 if r.provider_confirmed:
                     out.append(
                         "            PROVIDER-CONFIRMED: "
-                        + r.provider_confirmation_reason
+                        + _safe(r.provider_confirmation_reason)
                     )
-                out.append(f"            {r.status_reason}")
+                out.append(f"            {_safe(r.status_reason)}")
                 if r.quote:
-                    out.append(f"            quote: {r.quote}")
+                    # The excerpt keeps its line breaks and pays for them with
+                    # an indent on EVERY physical line plus a line budget.
+                    out.append("            quote:")
+                    out.extend(_safe_block(r.quote, "            " + REPORT_INDENT))
             for s in a.ledger_issues:
-                out.append(f"  - LEDGER-ISSUE {s}")
+                out.append(f"  - LEDGER-ISSUE {_safe(s)}")
         if a.attribution_present:
             out.append(
                 f"  - ATTRIBUTION: {a.attribution_rows} hash-chained event(s), "
@@ -3132,14 +3230,14 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
             )
         if a.lifecycle_checkpoints:
             rendered_phases = ", ".join(
-                f"{phase}={item['count']}"
+                f"{_safe(phase)}={_safe(item['count'])}"
                 for phase, item in a.lifecycle_checkpoints.items()
             )
             out.append(f"  - SDLC checkpoints: {rendered_phases}")
         if a.graph_surface_receipt_present:
             out.append(
                 "  - Task contract: "
-                f"role={a.task_role or '-'}, "
+                f"role={_safe(a.task_role) or '-'}, "
                 f"obligations={a.shipped_obligation_count}/"
                 f"{a.obligation_count} shipped, "
                 f"verified={a.verify_obligation_met}/"
@@ -3175,27 +3273,29 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
         for row in a.capabilities:
             verdict = str(row.get("lsp_no_op_verdict") or "")
             annotation = (
-                f" [{verdict}: {row.get('lsp_no_op_detail')}]" if verdict else ""
+                f" [{_safe(verdict)}: {_safe(row.get('lsp_no_op_detail'))}]"
+                if verdict else ""
             )
             if row.get("state") == "WORKING" and not annotation:
                 continue
             out.append(
-                f"  - CAPABILITY {row.get('capability')} [{row.get('state')}]: "
-                f"{row.get('evidence')}{annotation}"
+                f"  - CAPABILITY {_safe(row.get('capability'))} "
+                f"[{_safe(row.get('state'))}]: "
+                f"{_safe(row.get('evidence'))}{annotation}"
             )
         pressure = a.memory_pressure or {}
         if any(pressure.get(key) for key in _MEMORY_PRESSURE_KEYS):
             out.append(
                 "  - MEMORY PRESSURE: "
-                + ", ".join(f"{key}={pressure.get(key)}"
+                + ", ".join(f"{key}={_safe(pressure.get(key))}"
                             for key in _MEMORY_PRESSURE_KEYS)
             )
         for n in a.notes:
-            out.append(f"  - note: {n}")
+            out.append(f"  - note: {_safe(n)}")
         for s in a.unparsed_samples:
-            out.append(f"  - UNPARSED {s}")
+            out.append(f"  - UNPARSED {_safe(s)}")
         for s in a.unparsed_structures:
-            out.append(f"  - UNPARSED-STRUCTURE {s}")
+            out.append(f"  - UNPARSED-STRUCTURE {_safe(s)}")
     counts: dict[str, int] = {}
     for a in audits:
         counts[a.verdict] = counts.get(a.verdict, 0) + 1
@@ -3228,8 +3328,8 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
                 )
             }
             out.append(
-                _fmt(feature_id, 25)
-                + _fmt(items[0]["kind"] if items else "-", 7)
+                _fmt(_safe(feature_id), 25)
+                + _fmt(_safe(items[0]["kind"]) if items else "-", 7)
                 + _fmt(status_counts["WITNESSED"], 5)
                 + _fmt(status_counts["EXPOSED"], 5)
                 + _fmt(status_counts["DELIVERED_UNEXPOSED"], 7)
@@ -3254,7 +3354,7 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
         f"{_pressure_total(audits, 'headroom_refusals')} headroom refusal(s)"
     )
     out.append("\nSUMMARY: " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
-    return "\n".join(out)
+    return _no_column_zero("\n".join(out))
 
 
 def render_paired(gt: list[TaskAudit], base: list[TaskAudit]) -> str:
@@ -3281,19 +3381,57 @@ def render_paired(gt: list[TaskAudit], base: list[TaskAudit]) -> str:
         tb = f"{b.in_tokens or 0}/{b.out_tokens or 0}" if b else None
         tg = f"{g.in_tokens or 0}/{g.out_tokens or 0}" if g else None
         it = f"{b.iterations if b else '-'}/{g.iterations if g else '-'}"
-        out.append(_fmt(name, 34) + _fmt(rb, 9) + _fmt(rg, 9) + _fmt(delta, 6)
+        out.append(_fmt(_safe(name), 34) + _fmt(rb, 9) + _fmt(rg, 9) + _fmt(delta, 6)
                    + _fmt(tb, 14) + _fmt(tg, 14) + _fmt(it, 9)
                    + _fmt(g.gt_deliveries if g else None, 9) + flag)
     out.append("-" * 110)
-    return "\n".join(out)
+    return _no_column_zero("\n".join(out))
+
+
+def _stream_safe(text: str, stream: object) -> str:
+    """``text``, downgraded to what THIS stream can actually encode.
+
+    ``main`` reconfigures stdout/stderr to UTF-8 where it can, but a stream
+    that has been wrapped or captured has no ``reconfigure`` and keeps the
+    console's codepage. The report quotes arbitrary container bytes, so on a
+    cp1252 console ``print`` raises UnicodeEncodeError, the traceback escapes
+    and the process exits 1 - and rc 1 is a real verdict here (a RED task), so
+    a crash must never be able to spell it. The text is downgraded BEFORE the
+    write rather than retried after one, because a partially written line
+    would be duplicated by the retry.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return text
+    errors = getattr(stream, "errors", None) or "strict"
+    try:
+        text.encode(encoding, errors)
+        return text
+    except (UnicodeEncodeError, LookupError, TypeError, ValueError):
+        pass
+    try:
+        return text.encode(encoding, "backslashreplace").decode(encoding, "replace")
+    except (LookupError, TypeError, ValueError):
+        return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def _emit(text: str, stream=None) -> None:
+    """The only place this tool writes a report to a console."""
+    stream = sys.stdout if stream is None else stream
+    print(_stream_safe(text, stream), file=stream)
 
 
 def main(argv: list[str] | None = None) -> int:
     # The report can quote arbitrary transcript bytes; never let a cp1252
     # console kill the auditor (the exact failure class it exists to catch).
+    # A stream without reconfigure - wrapped, captured, already detached -
+    # keeps its codepage, which is what _stream_safe is for.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
     ap = argparse.ArgumentParser(
         prog="gt_audit", description="Deterministic Tier-2 GT-conduct auditor "
         "for a Terminal-Bench harbor run artifact.")
@@ -3310,19 +3448,19 @@ def main(argv: list[str] | None = None) -> int:
 
     run_dir = Path(args.run_dir)
     if not run_dir.is_dir():
-        print(f"gt_audit: not a directory: {run_dir}", file=sys.stderr)
+        _emit(f"gt_audit: not a directory: {run_dir}", sys.stderr)
         return 2
     audits = audit_run(run_dir)
-    print(render_report(audits, run_dir))
+    _emit(render_report(audits, run_dir))
 
     base_audits: list[TaskAudit] | None = None
     if args.baseline:
         base_dir = Path(args.baseline)
         if not base_dir.is_dir():
-            print(f"gt_audit: not a directory: {base_dir}", file=sys.stderr)
+            _emit(f"gt_audit: not a directory: {base_dir}", sys.stderr)
             return 2
         base_audits = audit_run(base_dir)
-        print(render_paired(audits, base_audits))
+        _emit(render_paired(audits, base_audits))
 
     if args.json_out:
         payload: dict = {
