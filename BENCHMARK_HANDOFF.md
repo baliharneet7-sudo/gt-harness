@@ -208,8 +208,13 @@ Three things it changes for the next dispatch:
    `tb2-gt-smoke20-plan.json`; the funds preflight is sized by the
    post-exclusion `task_count`.
 
-Defects 3-7 in the list above are still open; the document says what each
-needs.
+Campaign 2 (commits `89d5494d` + `88fc821c`) closed defects 3 and 7 on the
+code side: a committed patch is no longer discarded on a missing containment
+receipt (terminal `containment_lost`, exit 0), and the index headroom guard
+reads the task's real cgroup. `gt_engine` is re-pinned to tree `9d987079`;
+`gt_source_commit` stays `921bec20`. Defects 4, 5 and 6 remain (not ours /
+workaround in place / model behaviour). Defect 7's residual is container
+memory, not code.
 
 ## How state carries between sessions
 

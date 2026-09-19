@@ -12,12 +12,15 @@ Worktree `D:\w\t`, branch `codex/tb2-gt-union-921bec20`, base commit
 
 ## Rules that governed the work
 
-1. **Pinned source objects were never edited**: `gt_engine/`, `gt_harness/`,
-   `eval/`, `vendor/`, `nano/`, `gt_finalstand/`, `pyproject.toml`,
-   `conftest.py`. `git diff --stat` over those paths was empty at every
-   review. `gt_engine` stays tree `22daf78b80d74a0524de36c96d2060d411bdf5a5`
-   (the 921bec20 pin in `config/tb2_gt_import_manifest.json`). Fixes live in
-   `scripts/`, `.github/`, `tests/`, `config/`.
+1. **Pinned source objects were never edited in campaign 1**: `gt_engine/`,
+   `gt_harness/`, `eval/`, `vendor/`, `nano/`, `gt_finalstand/`,
+   `pyproject.toml`, `conftest.py`; `gt_engine` stayed tree `22daf78b...`
+   through commit `07a16e58`. **Campaign 2 re-pinned `gt_engine`** by the
+   user's decision: commit `89d5494d` edits `gt_engine/indexer.py` and
+   `gt_engine/attribution.py` only; commit `88fc821c` sets the manifest's
+   `source_object_ids.gt_engine` to `9d987079019f523035d7e276a551952e2048566a`,
+   keeps `gt_source_commit` at `921bec20` (import provenance of the seven
+   unchanged objects) and records `gt_source_patch_commit = 89d5494d`.
 2. **No GT-off run, ever** (CLAUDE.md). Step limit stays 100, the frozen
    baseline's value.
 3. **Every fix is TDD**: failing test first, then the fix, both outputs shown
@@ -186,6 +189,60 @@ warned (`Dockerfile unparsed`); an unresolved `$ARG` base is kept and warned.
   `test_one_decidable_check_is_enough_to_resolve_a_run`.
 - AST guard reads `AnnAssign` (review-9 LOW-2):
   `test_the_refusal_guard_reads_an_annotated_constant_too`.
+
+## Campaign 2 (2026-09-19): decisions 1-3, offline
+
+Same method: TDD, disjoint-file Opus agents, adversarial review per round.
+Reviews 10, 11, 12. Landed as `89d5494d` (code) and `88fc821c` (manifest
+re-pin).
+
+| Round | Review verdict | Headline |
+|---|---|---|
+| 1 | 1 CRITICAL + 1 HIGH + 2 MEDIUM + 4 LOW | restored full-suite step could never pass (`.githooks/`, `docs/historical-workflows/` deleted by `c464bc57`); attribution fix laundered dark reasons across records |
+| 2 | 1 CRITICAL + 3 HIGH + 6 MEDIUM + 5 LOW | `test_swelive_corpus.py` aborted collection on a clean checkout (corpus never merged onto this lineage); `::warning` lines carried unescaped model-writable bytes into the Actions command parser; auto-push hook as tracked content; stale hook digest |
+| 3 | **APPROVE - 0 C / 0 H / 0 M / 3 LOW** (one MEDIUM outside the set, fixed in round 4) | merge criterion met |
+
+What changed:
+
+- `gt_engine/indexer.py`: own-cgroup resolution (v1+v2) with ordering
+  identical to `gt_harness.cgroup.memory_snapshot`, pinned by an agreement
+  test (double-`cgroup2`-mount and cgroup-namespace fixtures); a kernel
+  without `memory.peak` keeps its ceiling; unreadable `memory.current` is no
+  longer `limit=0`; `limit_state`/`cgroup_version`/`headroom_basis` on every
+  refusal and receipt; amend floor scales with parent size (11 nodes:
+  178,438,144 -> 67,289,088). Inside a cgroup namespace nothing changes -
+  HEAD already read the task cgroup there; a 256 MiB container with 144 MiB
+  resident still refuses under the 128 MiB reserve (handoff defect 7's true
+  shape; needs container memory, not code).
+- `gt_engine/attribution.py`: designed delivery-budget refusals are
+  `SUPPRESSED_WITH_REASON` unless any dark reason exists on the feature, in
+  any arrival order; every reason survives on the record. Status identical
+  to HEAD on every local artifact; reasons set-equal except refusals now
+  survive onto higher-status records (intended). Tracked fixture proves the
+  delta against HEAD's module in CI.
+- `scripts/miniswe_gt_run.py`: `command_descendant_receipt_missing` and
+  `command_descendants_not_reaped` are witnesses when the workspace holds
+  work, fatal only on a pristine tree, raised after publish; three
+  consecutive gaps -> terminal `containment_lost`, exit 0, workspace graded.
+  Verifier: seventh check `containment_gap_reported`; every `::` line
+  escaped (bound 512, then percent/CR/LF); gap names whitelisted;
+  `truncated` => WARNING.
+- `.github/workflows/deepswe_gt_harness_product.yml`: merged back from
+  `ba51aa97` with the 921bec20 pin step and the workflow lint kept;
+  `workflow_call`/`dispatch` only; shipped content restored (`.githooks/`
+  with opt-in auto-push and re-derived digests, `docs/historical-workflows/`
+  as the exact FS-023 blob LF-pinned, corpus task `cyclotruc__gitingest-94`);
+  `--collect-only` runs first. Supported set closed at 11 workflows; 21
+  lanes archived to `.github/workflows-archive/` as pure renames.
+- Full suite on the final tree: one failure,
+  `test_repository_snapshot_and_ci_are_wired`, red only in a dirty worktree
+  (validator scans untracked scratch), green on the staged tree.
+
+Residuals after campaign 2 (LOW, documented): `scripts/validate_failure_ids.py`
+scans untracked paths; `.githooks/pre-commit`'s failure gate self-disables
+off its recorded HEAD (inert by design - decide whether to keep it);
+`indexer.py` resolver docstring says "same parse" where it means "same parse
+on well-formed input".
 
 ## Landed
 
