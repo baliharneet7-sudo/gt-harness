@@ -466,13 +466,32 @@ def test_bounded_runner_kills_redirected_descendant_after_leader_exits(
 
 
 def test_index_memory_budget_accounts_for_current_cgroup_usage() -> None:
+    """Measured pressure bounds the budget; an unread usage file does not.
+
+    This test used to pin ``current is None -> 0``, and that assertion was
+    wrong. ``current`` is None when the usage file could not be READ, which is
+    a diagnostic gap, not a measurement of a full cgroup - and 0 sits below
+    the 64 MiB launch floor, so the gap was spent as a refusal. Run
+    35262214538 journaled nine ``GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT``
+    refusals at limit=0 against need=178438144: a graph refresh declined on a
+    missing file rather than on missing memory, leaving lsp_promotion
+    non-WORKING for the rest of the run.
+
+    With a readable ceiling the half-of-cgroup rule alone is still evidence,
+    so that is what is returned, tagged ``headroom_basis="max_only"`` so the
+    refusal text and the receipt say the headroom was ESTIMATED. Genuine
+    pressure - a readable current close to a readable max - still returns 0
+    and still refuses; see test_index_cgroup_headroom.py.
+    """
     mib = 1024 * 1024
     limit = indexer._effective_index_memory_limit(
         {"max": 1024 * mib, "current": 800 * mib}
     )
 
     assert 0 < limit <= 96 * mib
-    assert indexer._effective_index_memory_limit({"max": 1024 * mib, "current": None}) == 0
+    assert indexer._effective_index_memory_limit(
+        {"max": 1024 * mib, "current": None}
+    ) == 512 * mib
 
 
 def test_partial_benchmark_identity_refuses_before_process_launch(

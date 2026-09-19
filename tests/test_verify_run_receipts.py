@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 
 from scripts.verify_run_receipts import (
+    _CAPTURE_RECEIPT_GLOB,
+    _CAPTURE_RECEIPT_LIMIT,
     CHECK_IDS,
     CONTRADICTION,
     INFO,
@@ -21,6 +23,7 @@ from scripts.verify_run_receipts import (
     UNKNOWN,
     WARNING,
     AmbiguousTrialError,
+    _gh_escape,
     build_receipt,
     find_named,
     find_trials,
@@ -725,11 +728,11 @@ def test_json_flag_writes_the_receipt_to_a_file(tmp_path):
     assert exit_code == 0
     receipt = json.loads(out.read_text(encoding="utf-8"))
     assert receipt["schema"] == "gt.receipt_consistency.v1"
-    assert len(receipt["checks"]) == 6
+    assert len(receipt["checks"]) == len(CHECK_IDS)
 
 
 def test_every_named_check_is_always_reported(tmp_path):
-    """An empty directory still yields all six checks, all UNKNOWN."""
+    """An empty directory still yields all seven checks, all UNKNOWN."""
     checks = run_checks(load_inputs(tmp_path))
     assert [check["check_id"] for check in checks] == [
         "child_exit_vs_terminal",
@@ -738,6 +741,7 @@ def test_every_named_check_is_always_reported(tmp_path):
         "provider_failed_without_provider_failures",
         "green_job_zero_graded",
         "oom_signature",
+        "containment_gap_reported",
     ]
     assert {check["severity"] for check in checks} == {UNKNOWN}
 
@@ -1257,7 +1261,7 @@ def test_two_real_trials_are_still_refused_when_one_holds_a_checkout(tmp_path):
 # L-1/L-2: main returned 2 before writing --json, while the workflow's ::error
 # told the reader to see receipt-consistency.json - a file that was never
 # written. And a root with no trial and no receipt at all emitted a receipt of
-# six UNKNOWNs labelled with the artifact root's name ("terminal-bench"),
+# seven UNKNOWNs labelled with the artifact root's name ("terminal-bench"),
 # which reads as a task that was checked.
 
 
@@ -1279,7 +1283,7 @@ def test_an_ambiguous_root_still_writes_the_json_receipt(tmp_path, capsys):
     assert receipt["resolution_error"] == "ambiguous_trial"
     assert receipt["task_id"] is None
     assert receipt["contradictions"] == 0
-    assert len(receipt["checks"]) == 6
+    assert len(receipt["checks"]) == len(CHECK_IDS)
     assert {check["severity"] for check in receipt["checks"]} == {UNKNOWN}
     assert "extract-elf__9f3c1a2b" in receipt["resolution_detail"]
 
@@ -1317,6 +1321,7 @@ def test_no_trial_and_no_receipts_exits_two_instead_of_naming_the_root(tmp_path,
         "provider_failed_without_provider_failures",
         "green_job_zero_graded",
         "oom_signature",
+        "containment_gap_reported",
     ]
     assert {check["severity"] for check in receipt["checks"]} == {UNKNOWN}
 
@@ -1423,6 +1428,7 @@ def test_an_undecodable_read_below_main_writes_a_read_error_receipt(
         "provider_failed_without_provider_failures",
         "green_job_zero_graded",
         "oom_signature",
+        "containment_gap_reported",
     ]
     assert {check["severity"] for check in receipt["checks"]} == {UNKNOWN}
     assert "::error title=Unresolved receipts::" in capsys.readouterr().err
@@ -1434,7 +1440,7 @@ def test_a_failure_inside_one_check_does_not_erase_the_others(tmp_path, monkeypa
     ``_int`` is reached only by a check that found a value to read, so this
     plants a failure that fires on real receipts and on nothing else. Before
     the per-check guard the whole run collapsed into the refusal receipt -
-    six UNKNOWNs, exit 2 - and the contradiction the remaining checks had
+    seven UNKNOWNs, exit 2 - and the contradiction the remaining checks had
     already found was erased. valid_run_vs_infra_state reads no number, so it
     is the check that survives and it must still redden the job.
     """
@@ -2167,7 +2173,7 @@ def test_the_task_id_comes_off_the_receipt_not_off_a_hashless_directory(tmp_path
 # `agent/` holds only diagnostics.json, incident-replay.json and
 # official-verifier-result.json. Pointed at the job directory exactly as the
 # workflow points it, the checker exited 0 with task_id aiogram__aiogram-1594,
-# resolution_error null and all six checks UNKNOWN - the false-pass shape
+# resolution_error null and all seven checks UNKNOWN - the false-pass shape
 # round 6 declared unacceptable, now reached through the trial branch instead
 # of through the copied progress receipt.
 
@@ -2612,7 +2618,7 @@ def test_the_refusal_guard_fails_on_a_code_it_cannot_read():
 # door and round 7 the bare-trial-directory door; a gt-run.json that parses as
 # an object but carries no key any check reads walked through a third one:
 # it resolved the task, every check said UNKNOWN, and main exited 0. Six of
-# six UNKNOWN with no check crashed means nothing about the run was decided,
+# seven UNKNOWN with no check crashed means nothing about the run was decided,
 # which is what "unresolved" means, so it is refused by name. A healthy run
 # never trips it: a real gt-run.json decides at least one check.
 
@@ -2645,7 +2651,7 @@ def test_a_run_receipt_that_decides_nothing_is_not_a_resolved_run(tmp_path, caps
 
 
 def test_one_decidable_check_is_enough_to_resolve_a_run(tmp_path, capsys):
-    """The rule is all-six-UNKNOWN, not any-UNKNOWN: a partial receipt resolves."""
+    """The rule is all-UNKNOWN, not any-UNKNOWN: a partial receipt resolves."""
     trial = _pier_tree(tmp_path)
     _write(trial / "agent" / "gt-run.json", {"task_id": "extract-elf"})
     (tmp_path / trial.parent.name / "benchmark-progress.json").unlink()
@@ -2676,3 +2682,698 @@ def test_the_refusal_guard_reads_an_annotated_constant_too():
     )
 
     assert bare == annotated == {"read_error"}
+
+
+# --- check 7: the containment boundary the harness could not witness --------
+# Run 35256147148 (amoffat__sh-744) raised command_descendant_receipt_missing
+# over 4,660 committed bytes. The runner no longer throws that work away, so
+# the gap now leaves a trace instead of an errored trial - and a trace nobody
+# reads is the defect this module exists for. It is a WARNING, not a
+# contradiction: the run is gradable, the containment guarantee is not.
+
+AIOGRAM_TRIAL = (
+    ROOT
+    / ".tmp-swelive-35238155998"
+    / "swelive-gt-harness-35238155998-aiogram__aiogram-1594"
+)
+
+
+def test_containment_gap_is_reported_when_the_terminal_says_so(tmp_path, capsys):
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    _write(
+        task_dir / "agent" / "miniswe_report.json",
+        _report(
+            terminal="containment_lost",
+            exit_code=0,
+            terminal_reason="command_descendant_receipt_missing:containment_unwitnessed",
+            containment_gap_streak=3,
+            containment_gap_commands=3,
+            containment_gaps=["containment_unwitnessed"],
+        ),
+    )
+
+    exit_code = main([str(tmp_path), "--job-conclusion", "success"])
+    receipt = json.loads(capsys.readouterr().out)
+    check = _by_id(receipt["checks"])["containment_gap_reported"]
+
+    assert check["severity"] == WARNING
+    assert "containment_lost" in check["message"]
+    assert "3" in check["message"]
+    # A WARNING is not a contradiction: the workspace is gradable and the run
+    # must not be refused for reporting its own gap honestly.
+    assert receipt["contradictions"] == 0
+    assert exit_code == 0
+
+
+def test_containment_gap_is_reported_without_the_terminal(tmp_path, capsys):
+    """Two unwitnessed commands that never reached the limit still count."""
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    _write(
+        task_dir / "agent" / "miniswe_report.json",
+        _report(containment_gap_commands=2,
+                containment_gaps=["worker_start_failed"]),
+    )
+
+    checks = run_checks(load_inputs(tmp_path), job_conclusion="success")
+    check = _by_id(checks)["containment_gap_reported"]
+
+    assert check["severity"] == WARNING
+    assert "2" in check["message"]
+    assert "worker_start_failed" in check["message"]
+
+
+def test_a_capture_receipt_alone_reports_the_containment_gap(tmp_path):
+    """The command receipt is written before the run report exists.
+
+    A run that died before writing its report still leaves the per-command
+    capture receipts behind, and they carry the same fact.
+    """
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    _write(
+        task_dir / "agent" / "gt-state" / "extract-elf" / "output_evidence"
+        / "pending-abc.receipt.json",
+        {
+            "schema": "gt.command_capture.v1",
+            "status": "finished",
+            "capture_complete": False,
+            "containment_receipt_missing": True,
+            "containment_gap": "worker_start_failed",
+        },
+    )
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == WARNING
+    assert "capture receipt" in check["message"]
+
+
+
+def test_the_containment_check_counts_unreaped_descendants_too(tmp_path):
+    """A receipt that exists and says the boundary failed is the same gap."""
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    _write(
+        task_dir / "agent" / "miniswe_report.json",
+        _report(containment_gap_commands=1,
+                containment_gaps=["descendants_not_reaped"]),
+    )
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == WARNING
+    assert "descendants_not_reaped" in check["message"]
+
+
+def test_a_capture_receipt_naming_only_the_gap_is_still_read(tmp_path):
+    """The unreaped-descendant receipt carries no containment_receipt_missing.
+
+    It exists - that is the whole difference - so the capture receipt records
+    `containment_gap` and nothing else. A scan keyed on the missing-receipt
+    flag would read this run as clean.
+    """
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    _write(
+        task_dir / "agent" / "gt-state" / "extract-elf" / "output_evidence"
+        / "pending-xyz.receipt.json",
+        {
+            "schema": "gt.command_capture.v1",
+            "status": "finished",
+            "capture_complete": False,
+            "containment_gap": "descendants_not_reaped",
+            "surviving_descendants": [4242],
+        },
+    )
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == WARNING
+    assert "capture receipt" in check["message"]
+
+
+def test_a_healthy_run_reports_no_containment_gap(tmp_path):
+    _collected_patch(_healthy_tree(tmp_path))
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == OK
+
+
+def test_the_containment_check_is_unknown_when_nothing_can_be_read(tmp_path):
+    """Absence of evidence is never a pass - the module's own first rule."""
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == UNKNOWN
+
+
+def test_the_registry_names_seven_checks(tmp_path):
+    checks = run_checks(load_inputs(tmp_path))
+
+    assert [check["check_id"] for check in checks] == list(CHECK_IDS)
+    assert CHECK_IDS[-1] == "containment_gap_reported"
+    assert len(CHECK_IDS) == 7
+
+
+@pytest.mark.skipif(
+    not AIOGRAM_TRIAL.is_dir(), reason="local errored-trial artifact not present"
+)
+def test_the_real_errored_aiogram_trial_still_resolves(tmp_path, capsys):
+    """Regression: run 35238155998 aiogram__aiogram-1594, exit 6, no model.patch.
+
+    The trial died in `initial_index_failed:benchmark_graph_required` with
+    child_returncode -9 and no containment gap at all. Adding a seventh check
+    must not change what this artifact resolves to.
+    """
+    copy = tmp_path / AIOGRAM_TRIAL.name
+    shutil.copytree(AIOGRAM_TRIAL, copy)
+
+    exit_code = main([str(copy)])
+    receipt = json.loads(capsys.readouterr().out)
+    by_id = _by_id(receipt["checks"])
+
+    assert exit_code == 0
+    assert receipt["resolution_error"] is None
+    assert receipt["task_id"] == "aiogram__aiogram-1594"
+    assert receipt["contradictions"] == 0
+    assert receipt["checks_crashed"] == 0
+    assert by_id["oom_signature"]["severity"] == INFO
+    assert by_id["child_exit_vs_terminal"]["severity"] == OK
+    # The trial carries a terminal and no containment field: decided, not
+    # UNKNOWN, and certainly not a warning it never earned.
+    assert by_id["containment_gap_reported"]["severity"] == OK
+
+
+# --- REVIEW-10 LOW-3: a WARNING nobody reads -------------------------------
+#
+# The severity existed only inside the JSON receipt. The process printed
+# ``::error`` and nothing else, and exited 0 for a WARNING, so both
+# warning-producing checks - containment_gap_reported and
+# green_job_zero_graded - were invisible in the job log and in the
+# annotations. The receipt is an artifact somebody has to download; the
+# annotation is the only thing a reader sees without asking.
+
+
+def _warning_lines(err: str) -> list[str]:
+    return [line for line in err.splitlines() if line.startswith("::warning")]
+
+
+def test_a_containment_warning_is_annotated_in_the_job_log(tmp_path, capsys):
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    _write(
+        task_dir / "agent" / "miniswe_report.json",
+        _report(
+            terminal="containment_lost",
+            exit_code=0,
+            containment_gap_streak=3,
+            containment_gap_commands=3,
+            containment_gaps=["containment_unwitnessed"],
+        ),
+    )
+    out = tmp_path / "receipt-consistency.json"
+
+    exit_code = main([str(tmp_path), "--json", str(out)])
+    lines = _warning_lines(capsys.readouterr().err)
+
+    # rc is unchanged: a WARNING is not a contradiction and never reddens.
+    assert exit_code == 0
+    assert len(lines) == 1, lines
+    assert lines[0].startswith("::warning title=Receipt warning::")
+    assert "extract-elf: containment_gap_reported: " in lines[0]
+    assert "containment_lost" in lines[0]
+    # The annotation says what the receipt says - one message, not two texts.
+    receipt = json.loads(out.read_text(encoding="utf-8"))
+    message = _by_id(receipt["checks"])["containment_gap_reported"]["message"]
+    assert lines[0].endswith(message)
+
+
+def test_a_green_job_over_nothing_graded_is_annotated_too(tmp_path, capsys):
+    """The other WARNING the checker can reach, from a different input."""
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    _write(
+        task_dir / "progress" / "benchmark-progress.json",
+        _progress("extract-elf", official_verifier=False),
+    )
+    out = tmp_path / "receipt-consistency.json"
+
+    exit_code = main([str(tmp_path), "--job-conclusion", "success", "--json", str(out)])
+    lines = _warning_lines(capsys.readouterr().err)
+
+    assert exit_code == 0
+    assert len(lines) == 1, lines
+    assert "extract-elf: green_job_zero_graded: " in lines[0]
+    assert "officially_graded=0" in lines[0]
+
+
+def test_ok_info_and_unknown_are_never_annotated(tmp_path, capsys):
+    """INFO stays silent: an oom signature is a fact, not a warning.
+
+    The tree carries an INFO (oom_signature), OKs, and the UNKNOWN
+    green_job_zero_graded reaches with no --job-conclusion. None of the three
+    is a WARNING and none of them may print one.
+    """
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    report = _report()
+    report["supervisor"]["child_returncode"] = -9
+    _write(task_dir / "agent" / "miniswe_report.json", report)
+    out = tmp_path / "receipt-consistency.json"
+
+    exit_code = main([str(tmp_path), "--json", str(out)])
+    severities = {
+        check["check_id"]: check["severity"]
+        for check in json.loads(out.read_text(encoding="utf-8"))["checks"]
+    }
+
+    assert exit_code == 0
+    assert severities["oom_signature"] == INFO
+    assert severities["green_job_zero_graded"] == UNKNOWN
+    assert WARNING not in severities.values()
+    assert _warning_lines(capsys.readouterr().err) == []
+
+
+def test_a_refusal_annotates_no_warning(tmp_path, capsys):
+    """Every check is UNKNOWN in the refusal receipt; none of them warns."""
+    exit_code = main([str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "::error title=Unresolved receipts::" in captured.err
+    assert _warning_lines(captured.err) == []
+
+
+# --- REVIEW-10 LOW-4: the capture-receipt walk -----------------------------
+#
+# ``sorted(root.rglob("*.receipt.json"))`` materialised the whole tree before
+# the limit could bite - the trial holds the task's own checkout - and then
+# broke at 500, which drops the alphabetically LAST receipts: exactly the ones
+# a run that died late wrote. The walk is bounded now, what it could not read
+# is said out loud, and it is confined to where capture receipts are actually
+# written.
+
+
+# A Pier-shaped trial name. `_is_trial` requires the `__` Pier writes, and
+# only a resolved trial has an `agent/` to confine the capture-receipt walk
+# to, so a bare `extract-elf/` fixture exercises the flat-layout fallback
+# instead of the subtree these tests are about.
+_TRIAL_NAME = "extract-elf__9f3c1a2b"
+
+
+def _trial_tree(root: Path) -> Path:
+    """`_healthy_tree`, laid out the way Pier lays a trial out."""
+    task_dir = _healthy_tree(root, _TRIAL_NAME)
+    _collected_patch(task_dir)
+    assert find_trials(root) == [task_dir]
+    return task_dir
+
+
+def _capture_receipt(task_dir: Path, name: str, gap: str = "worker_start_failed") -> Path:
+    """One per-command capture receipt, where miniswe_gt_run.py writes them.
+
+    ``RuntimeLayout.resolve`` puts the evidence store at
+    ``<state-dir>/<task_id>/output_evidence`` and the runner spools each
+    command's receipt beside it (scripts/miniswe_gt_run.py), so in a collected
+    trial they land under ``agent/gt-state/<task>/output_evidence/``. Verified
+    against the real trial copies under .tmp-swelive-*, which hold 23 of them
+    and none anywhere else.
+    """
+    return _write(
+        task_dir / "agent" / "gt-state" / _TRIAL_NAME / "output_evidence" / name,
+        {
+            "schema": "gt.command_capture.v1",
+            "status": "finished",
+            "capture_complete": False,
+            "containment_gap": gap,
+        },
+    )
+
+
+def test_more_capture_receipts_than_the_limit_are_reported_not_dropped(tmp_path):
+    """501 receipts: 500 read, and the reader is told the scan was cut short."""
+    task_dir = _trial_tree(tmp_path)
+    for index in range(_CAPTURE_RECEIPT_LIMIT + 1):
+        _capture_receipt(task_dir, f"pending-{index:04d}.receipt.json")
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == WARNING
+    assert check["detail"]["truncated"] is True
+    assert f"{_CAPTURE_RECEIPT_LIMIT} capture receipt(s)" in check["message"]
+    assert "truncated" in check["message"]
+
+
+def test_a_walk_inside_the_limit_is_not_marked_truncated(tmp_path):
+    task_dir = _trial_tree(tmp_path)
+    for index in range(3):
+        _capture_receipt(task_dir, f"pending-{index:04d}.receipt.json")
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == WARNING
+    assert "3 capture receipt(s)" in check["message"]
+    assert "truncated" not in check["message"]
+    assert check.get("detail", {}).get("truncated") is not True
+
+
+def test_a_receipt_in_the_task_checkout_is_never_read(tmp_path):
+    """The trial holds the task's own repository; its files are not evidence.
+
+    A checkout that happens to carry a ``*.receipt.json`` - a fixture, a
+    vendored package - said this run lost containment.
+    """
+    task_dir = _trial_tree(tmp_path)
+    _write(
+        task_dir / "checkout" / "x.receipt.json",
+        {"schema": "gt.command_capture.v1", "containment_gap": "worker_start_failed"},
+    )
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == OK, check["message"]
+
+
+def test_the_capture_walk_is_bounded_before_it_is_sorted(tmp_path, monkeypatch):
+    """The bound is on the WALK, not on a list that was already materialised.
+
+    Sorting first reads every path in the tree - the checkout included - and
+    only then stops at 500, which is the cost this limit exists to avoid.
+    """
+    task_dir = _trial_tree(tmp_path)
+    for index in range(_CAPTURE_RECEIPT_LIMIT + 50):
+        _capture_receipt(task_dir, f"pending-{index:04d}.receipt.json")
+    # Resolved before the counters go on, so only the capture walk is counted.
+    inputs = load_inputs(tmp_path)
+    yielded = 0
+    real_glob, real_rglob = Path.glob, Path.rglob
+
+    def counting_glob(self, pattern, *args, **kwargs):
+        nonlocal yielded
+        for path in real_glob(self, pattern, *args, **kwargs):
+            if pattern == _CAPTURE_RECEIPT_GLOB:
+                yielded += 1
+            yield path
+
+    def counting_rglob(self, pattern, *args, **kwargs):
+        nonlocal yielded
+        for path in real_rglob(self, pattern, *args, **kwargs):
+            yielded += 1
+            yield path
+
+    monkeypatch.setattr(Path, "glob", counting_glob)
+    monkeypatch.setattr(Path, "rglob", counting_rglob)
+
+    _by_id(run_checks(inputs))["containment_gap_reported"]
+
+    assert yielded <= _CAPTURE_RECEIPT_LIMIT + 1, yielded
+
+
+@pytest.mark.skipif(
+    not AIOGRAM_TRIAL.is_dir(), reason="local errored-trial artifact not present"
+)
+def test_the_real_trials_capture_receipts_are_inside_the_confined_subtree(tmp_path):
+    """The confinement is checked against a real collected trial, not a guess."""
+    copy = tmp_path / AIOGRAM_TRIAL.name
+    shutil.copytree(AIOGRAM_TRIAL, copy)
+    trial = find_trials(copy)[0]
+
+    everywhere = {path.resolve() for path in trial.rglob("*.receipt.json")}
+    confined = {path.resolve() for path in trial.glob(_CAPTURE_RECEIPT_GLOB)}
+
+    assert everywhere
+    assert confined == everywhere
+
+
+# --- REVIEW-11 H-1: a receipt is not a workflow command --------------------
+#
+# Reproduced end to end on a real trial copy. Every ``::`` line this module
+# prints interpolates a field read off disk, and the capture receipts under
+# ``agent/gt-state/**/output_evidence/`` are written INSIDE the task
+# container, where the model runs arbitrary shell. ``task_id`` comes off a
+# receipt from the same tree. A planted value carrying a newline ends the
+# annotation and begins a NEW workflow command, which the Actions runner
+# obeys: ``::stop-commands::`` silences this step's own ``::error`` on rc=1,
+# ``::add-mask::`` rewrites the log, and ``::error title=Grader::TASK PASSED``
+# forges a verdict nobody produced.
+#
+# https://docs.github.com/actions/reference/workflow-commands-for-github-actions
+
+# The reviewer's payload, verbatim.
+_INJECTION = "x\n::stop-commands::hunter2\n::error title=Grader::TASK PASSED"
+
+_MODULE = ROOT / "scripts" / "verify_run_receipts.py"
+
+
+def _command_lines(err: str) -> list[str]:
+    """The lines a runner would parse as commands: ``::`` at column zero."""
+    return [line for line in err.splitlines() if line.startswith("::")]
+
+
+def test_the_reviewers_payload_cannot_open_a_second_workflow_command(tmp_path, capsys):
+    """The gap name is model-written text; it may not become a command."""
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    _write(
+        task_dir / "agent" / "miniswe_report.json",
+        _report(containment_gap_commands=1, containment_gaps=[_INJECTION]),
+    )
+
+    exit_code = main([str(tmp_path)])
+    err = capsys.readouterr().err
+
+    assert exit_code == 0
+    lines = err.splitlines()
+    assert len(lines) == 1, lines
+    assert lines[0].startswith("::warning title=Receipt warning::")
+    # The newline is data now, not a line break.
+    assert "%0A" in lines[0]
+    # The payload's own ``::`` fragments survive as text and no longer sit at
+    # the start of a line, so the only command here is the one this module
+    # meant to print.
+    assert _command_lines(err) == lines
+    assert "\n::stop-commands" not in err
+    assert "\n::error" not in err
+
+
+def test_a_task_id_that_is_a_workflow_command_is_escaped(tmp_path, capsys):
+    """``label`` is read off gt-run.json, which the task tree also wrote."""
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    planted = "extract-elf:x\n::add-mask::hunter2"
+    _write(task_dir / "agent" / "gt-run.json", _gt_run(planted))
+    _write(task_dir / "progress" / "benchmark-progress.json", _progress(planted))
+    _write(
+        task_dir / "agent" / "miniswe_report.json",
+        _report(containment_gap_commands=1, containment_gaps=["worker_start_failed"]),
+    )
+
+    main([str(tmp_path)])
+    err = capsys.readouterr().err
+
+    lines = err.splitlines()
+    assert len(lines) == 1, lines
+    assert lines[0].startswith(
+        "::warning title=Receipt warning::extract-elf:x%0A::add-mask::hunter2: "
+    )
+    assert _command_lines(err) == lines
+
+
+def test_a_flooding_message_cannot_fill_the_job_log(tmp_path, capsys):
+    """10 KB of model-written gap name, bounded to one readable line."""
+    task_dir = _healthy_tree(tmp_path)
+    _collected_patch(task_dir)
+    flood = "A" * 10_240
+    _write(
+        task_dir / "agent" / "miniswe_report.json",
+        _report(containment_gap_commands=1, containment_gaps=[flood]),
+    )
+    out = tmp_path / "receipt-consistency.json"
+
+    main([str(tmp_path), "--json", str(out)])
+    lines = capsys.readouterr().err.splitlines()
+
+    assert len(lines) == 1, len(lines)
+    assert len(lines[0]) < 2_000, len(lines[0])
+    assert "(truncated)" in lines[0]
+    # The receipt is a file, not a log line: it still carries the whole
+    # message. Only the annotation is bounded.
+    message = _by_id(json.loads(out.read_text(encoding="utf-8"))["checks"])[
+        "containment_gap_reported"
+    ]["message"]
+    assert flood in message
+
+
+def test_gh_escape_is_the_command_syntax_and_nothing_else():
+    assert _gh_escape("100% a\r\nb") == "100%25 a%0D%0Ab"
+    # A ``title=`` value ends at a colon or a comma as well.
+    assert _gh_escape("a:b,c", is_property=True) == "a%3Ab%2Cc"
+    # A message does not, and over-escaping it would make every check message
+    # unreadable.
+    assert _gh_escape("a:b,c") == "a:b,c"
+
+
+def _workflow_command_fstrings(tree: ast.Module) -> list[ast.JoinedStr]:
+    """Every f-string this module prints as a ``::`` workflow command."""
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.JoinedStr) or not node.values:
+            continue
+        head = node.values[0]
+        if (
+            isinstance(head, ast.Constant)
+            and isinstance(head.value, str)
+            and head.value.startswith("::")
+        ):
+            found.append(node)
+    return found
+
+
+def test_every_workflow_command_field_goes_through_gh_escape():
+    """The rule is the module's, not one call site's.
+
+    An annotation added later that interpolates a receipt field directly is
+    the same defect again, so this is checked over the source rather than
+    over the lines that happen to exist today.
+    """
+    tree = ast.parse(_MODULE.read_text(encoding="utf-8"))
+    commands = _workflow_command_fstrings(tree)
+
+    # The guard must not pass because it found nothing.
+    assert len(commands) >= 6, len(commands)
+    for command in commands:
+        for part in command.values:
+            if not isinstance(part, ast.FormattedValue):
+                continue
+            call = part.value
+            assert isinstance(call, ast.Call), ast.unparse(command)
+            assert isinstance(call.func, ast.Name), ast.unparse(command)
+            assert call.func.id == "_gh_escape", ast.unparse(command)
+    # And no ``::`` literal reaches a print any other way: every one in the
+    # module is the head of an f-string checked above.
+    heads = {id(command.values[0]) for command in commands}
+    stray = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.startswith("::")
+        and id(node) not in heads
+    ]
+    assert stray == [], stray
+
+
+def test_an_unrecognised_gap_name_is_counted_never_carried(tmp_path, capsys):
+    """``containment_gap`` is written inside the container; it is not a name.
+
+    The runner writes one of three gap names. Anything else is still a gap -
+    the receipt says the boundary went unwitnessed - but the string itself is
+    model-written, so it is counted and dropped rather than copied into
+    receipt-consistency.json and from there into a CI annotation.
+    """
+    task_dir = _trial_tree(tmp_path)
+    _capture_receipt(task_dir, "pending-0000.receipt.json", _INJECTION)
+    out = tmp_path / "receipt-consistency.json"
+
+    exit_code = main([str(tmp_path), "--json", str(out)])
+    captured = capsys.readouterr()
+    check = _by_id(json.loads(out.read_text(encoding="utf-8"))["checks"])[
+        "containment_gap_reported"
+    ]
+
+    assert exit_code == 0
+    assert check["severity"] == WARNING
+    assert "unrecognised_gap" in check["message"]
+    assert check["detail"]["unrecognised_gaps"] == 1
+    assert "hunter2" not in json.dumps(check)
+    assert "hunter2" not in captured.out
+    assert "hunter2" not in captured.err
+
+
+def test_a_known_gap_name_is_still_named_in_full(tmp_path):
+    """The whitelist must not blind the check to what it exists to report."""
+    task_dir = _trial_tree(tmp_path)
+    _capture_receipt(task_dir, "pending-0000.receipt.json", "descendants_not_reaped")
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == WARNING
+    assert "descendants_not_reaped" in check["message"]
+    assert "unrecognised_gap" not in check["message"]
+
+
+# --- REVIEW-11 M-2: a truncated scan did not decide ------------------------
+#
+# The bound stops the walk, and the bound is reachable from inside the task
+# container: 501 inert ``*.receipt.json`` names push a genuine gap receipt out
+# of it. ``truncated: true`` went into the detail and the severity stayed OK,
+# so nothing was annotated and the run read as clean over a scan that had
+# never looked. A flood is itself the signal - a run makes one capture receipt
+# per command, and a step limit allows a few hundred.
+
+
+def _inert_receipt(task_dir: Path, name: str) -> Path:
+    """A capture receipt that reports no gap: the flood's filler."""
+    return _write(
+        task_dir / "agent" / "gt-state" / _TRIAL_NAME / "output_evidence" / name,
+        {
+            "schema": "gt.command_capture.v1",
+            "status": "finished",
+            "capture_complete": True,
+        },
+    )
+
+
+def test_a_truncated_scan_that_found_nothing_is_a_warning_not_a_pass(tmp_path, capsys):
+    task_dir = _trial_tree(tmp_path)
+    for index in range(_CAPTURE_RECEIPT_LIMIT + 1):
+        _inert_receipt(task_dir, f"pending-{index:04d}.receipt.json")
+    out = tmp_path / "receipt-consistency.json"
+
+    exit_code = main([str(tmp_path), "--json", str(out)])
+    check = _by_id(json.loads(out.read_text(encoding="utf-8"))["checks"])[
+        "containment_gap_reported"
+    ]
+
+    assert exit_code == 0
+    assert check["severity"] == WARNING
+    assert check["detail"]["truncated"] is True
+    assert "truncated" in check["message"]
+    assert "did not decide" in check["message"]
+    # And it reaches a reader, which is the whole of M-2: the old OK was
+    # annotated by nothing.
+    assert len(_warning_lines(capsys.readouterr().err)) == 1
+
+
+def test_a_flood_that_hides_a_genuine_gap_still_warns(tmp_path):
+    """600 inert names against one real gap receipt.
+
+    Whether the genuine receipt falls inside the bounded walk is filesystem
+    order, and that is exactly the point: the verdict must be WARNING either
+    way, because a scan that stopped at the bound did not decide.
+    """
+    task_dir = _trial_tree(tmp_path)
+    for index in range(600):
+        _inert_receipt(task_dir, f"pending-{index:04d}.receipt.json")
+    _capture_receipt(task_dir, "zz-genuine.receipt.json", "descendants_not_reaped")
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == WARNING
+    assert check["detail"]["truncated"] is True
+    assert "truncated" in check["message"]
+
+
+def test_a_scan_inside_the_bound_that_finds_nothing_is_still_ok(tmp_path):
+    """Three receipts, no gap: unchanged. The flood is the signal, not a walk."""
+    task_dir = _trial_tree(tmp_path)
+    for index in range(3):
+        _inert_receipt(task_dir, f"pending-{index:04d}.receipt.json")
+
+    check = _by_id(run_checks(load_inputs(tmp_path)))["containment_gap_reported"]
+
+    assert check["severity"] == OK
+    assert "truncated" not in check["message"]
+    assert check.get("detail") is None

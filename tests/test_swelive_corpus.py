@@ -60,6 +60,15 @@ def _load_grader():
     return module
 
 
+if not _GRADE_PY.is_file():
+    # A checkout that does not carry the SWE-bench-Live task corpus must SKIP,
+    # never abort collection: an ImportError at module scope makes pytest exit
+    # 2 with zero tests run, which takes the whole suite down with it.
+    pytest.skip(
+        f"SWE-bench-Live corpus grader absent: {_GRADE_PY}",
+        allow_module_level=True,
+    )
+
 GRADER = _load_grader()
 
 # The `--cov*` family: pytest-cov options whose value is a report spec, a

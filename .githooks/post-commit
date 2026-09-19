@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+# Auto-push is OPT-IN. Installing the common hooks (`.githooks/install` sets
+# core.hooksPath for the whole repository, main worktree and linked worktrees
+# alike) must not turn every `git commit` anywhere in the repo into a publish.
+# Git ignores this hook's exit status, so an unwanted push cannot be undone by
+# failing here - the only safe default is not to push at all.
+if [ "${GNX_AUTOPUSH:-}" != "1" ]; then
+  exit 0
+fi
+
+branch=$(git symbolic-ref --quiet --short HEAD || true)
+if [ -z "$branch" ]; then
+  printf '%s\n' 'gnx auto-push: detached HEAD; refusing to guess a destination branch.' >&2
+  exit 1
+fi
+
+case "$branch" in
+  main|master|release/*)
+    printf 'gnx auto-push: refusing to push protected branch %s.\n' "$branch" >&2
+    exit 0
+    ;;
+esac
+
+remote=${GNX_PUSH_REMOTE:-origin}
+common=$(git rev-parse --git-common-dir)
+log="$common/gnx-autopush.failures.log"
+sha=$(git rev-parse HEAD)
+stderr_log="$common/gnx-autopush.$$.stderr"
+
+if git push --porcelain -u "$remote" "HEAD:refs/heads/$branch" 2>"$stderr_log"; then
+  rm -f "$stderr_log"
+  printf 'gnx auto-push: %s %s -> %s/%s\n' "$sha" "$branch" "$remote" "$branch"
+else
+  code=$?
+  {
+    printf 'timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'repo=%s\n' "$(git rev-parse --show-toplevel)"
+    printf 'branch=%s\n' "$branch"
+    printf 'sha=%s\n' "$sha"
+    printf 'remote=%s\n' "$remote"
+    printf 'command=git push --porcelain -u %s HEAD:refs/heads/%s\n' "$remote" "$branch"
+    printf 'exit=%s\n\n' "$code"
+    printf 'stderr<<EOF\n'
+    cat "$stderr_log"
+    printf 'EOF\n\n'
+  } >> "$log"
+  rm -f "$stderr_log"
+  printf 'gnx auto-push FAILED; blocker appended to %s\n' "$log" >&2
+  exit "$code"
+fi

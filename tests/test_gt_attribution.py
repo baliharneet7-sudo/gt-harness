@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import functools
 import json
+import pathlib
+import subprocess
+import types
 
 import pytest
 
@@ -816,3 +820,820 @@ def test_transcript_parser_consumes_gt_index_diagnostics_as_structured_noise():
     parsed = parse_transcript(transcript)
     assert parsed.unparsed == []
     assert parsed.stop is not None
+
+
+def test_delivery_budget_refusal_is_named_suppression_not_triggered_dark():
+    """A refusal by a designed ceiling is suppression, not a dark fire.
+
+    Real record, SWE-Live run 35252797829, task aiogram__aiogram-1594,
+    ``agent/events.jsonl`` sequence 83 (verbatim keys, trimmed hashes)::
+
+        {"action_index": 1, "admitted_bytes": 3324, "admitted_count": 4,
+         "boundary_claim_limit": 4, "candidate_ordinal": 5,
+         "delivery_identity": "19b053b8...", "event": "delivery_refused",
+         "iteration": 3, "kind": "cochange_partner", "lane": "sealed",
+         "per_delivery_limit": 1400, "reason": "boundary_claim_ceiling",
+         "rendered_bytes": 735, "request_byte_limit": 9600,
+         "schema": "gt.event.v1", "sequence": 83,
+         "target": "/testbed/aiogram/fsm/context.py"}
+
+    ``scripts.gt_audit._native_feature_projection`` maps that row to a
+    ``feature.evaluated`` row with ``eligible`` true (the reason is not one of
+    the three it excludes) and ``outcome`` set to the refusal reason, which
+    lands in the TRIGGERED_DARK branch of this function.
+
+    Scope, honestly: in THAT run the same feature is also delivered and
+    witnessed, so the projection reached WITNESSED anyway and the refusal
+    changed no verdict (see
+    ``test_full_real_row_set_projection_is_unchanged_by_the_budget_route``).
+    The row shape is real; the RED it can cause is the case where a designed
+    refusal is a feature's only evidence, which no local artifact exhibits.
+    """
+    rows = [{
+        "event_type": "feature.evaluated",
+        "payload": {
+            "feature_id": "cochange_prior",
+            "eligible": True,
+            "outcome": "boundary_claim_ceiling",
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["cochange_prior"]["status"] == "SUPPRESSED_WITH_REASON"
+    assert summary["cochange_prior"]["reasons"] == ["boundary_claim_ceiling"]
+
+
+def test_every_delivery_budget_reason_is_named_suppression():
+    """The whole closed vocabulary routes, not only the reason seen in run
+    35252797829."""
+    from gt_engine.delivery_budget import DELIVERY_REFUSAL_REASONS
+
+    for reason in sorted(DELIVERY_REFUSAL_REASONS):
+        rows = [{
+            "event_type": "feature.evaluated",
+            "payload": {
+                "feature_id": "newfile_precedent",
+                "eligible": True,
+                "outcome": reason,
+            },
+        }]
+
+        summary = summarize_features(rows)
+
+        assert summary["newfile_precedent"]["status"] == (
+            "SUPPRESSED_WITH_REASON"
+        ), reason
+        assert summary["newfile_precedent"]["reasons"] == [reason]
+
+
+def test_real_native_projection_of_a_budget_refusal_is_not_red():
+    """End-to-end on the verbatim artifact row, through the audit projection."""
+    from scripts.gt_audit import (
+        _ATTRIBUTION_RED_STATUSES,
+        _native_feature_projection,
+    )
+
+    refusal = {
+        "action_index": 1,
+        "admitted_bytes": 3324,
+        "admitted_count": 4,
+        "boundary_claim_limit": 4,
+        "candidate_ordinal": 5,
+        "dedup_key": "cochange-/testbed/aiogram/fsm/context.py-026f86de",
+        "delivery_identity": "19b053b8dc39bdb8fcab05a89b7f464a3ca7215ac",
+        "event": "delivery_refused",
+        "iteration": 3,
+        "kind": "cochange_partner",
+        "lane": "sealed",
+        "payload_sha256": "19b053b8dc39bdb8fcab05a89b7f464a3ca7215ac",
+        "per_delivery_limit": 1400,
+        "reason": "boundary_claim_ceiling",
+        "rendered_bytes": 735,
+        "request_byte_limit": 9600,
+        "schema": "gt.event.v1",
+        "sequence": 83,
+        "target": "/testbed/aiogram/fsm/context.py",
+    }
+
+    projection = _native_feature_projection([refusal])
+
+    assert projection["cochange_prior"]["status"] == "SUPPRESSED_WITH_REASON"
+    assert (
+        projection["cochange_prior"]["status"] not in _ATTRIBUTION_RED_STATUSES
+    )
+
+
+def test_non_budget_eligible_outcome_stays_triggered_dark():
+    """The excuse must not widen: an outcome outside the vocabulary is dark."""
+    rows = [{
+        "event_type": "feature.evaluated",
+        "payload": {
+            "feature_id": "cochange_prior",
+            "eligible": True,
+            "outcome": "candidate_returned",
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert summary["cochange_prior"]["reasons"] == ["candidate_returned"]
+
+
+def test_eligible_outcome_absent_stays_triggered_dark():
+    """An eligible trigger with no outcome at all is still dark."""
+    rows = [{
+        "event_type": "feature.evaluated",
+        "payload": {"feature_id": "cochange_prior", "eligible": True},
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert summary["cochange_prior"]["reasons"] == ["producer_abstained"]
+
+
+def test_producer_abstention_on_budget_reason_is_named_suppression():
+    """The producer seam routes the same closed vocabulary, category or not.
+
+    No producer.invocation row in the recorded gt_attribution.jsonl traces
+    carries a delivery-budget reason - the runtime writes those to
+    ``delivery_refused`` instead - so this route is defence in depth against a
+    future producer that abstains on a budget it already knows it will hit.
+    """
+    rows = [{
+        "event_type": "producer.invocation",
+        "payload": {
+            "outcome": "returned_nothing",
+            "evidence_types": ["cochange_partner"],
+            "abstention_reasons": [{
+                "category": "",
+                "detail": {},
+                "reason": "boundary_claim_ceiling",
+            }],
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["cochange_prior"]["status"] == "SUPPRESSED_WITH_REASON"
+    assert summary["cochange_prior"]["reasons"] == ["boundary_claim_ceiling"]
+
+
+def test_producer_abstention_outside_budget_vocabulary_stays_dark():
+    rows = [{
+        "event_type": "producer.invocation",
+        "payload": {
+            "outcome": "returned_nothing",
+            "evidence_types": ["cochange_partner"],
+            "abstention_reasons": [{
+                "category": "",
+                "detail": {},
+                "reason": "ranker_returned_empty",
+            }],
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert summary["cochange_prior"]["reasons"] == ["ranker_returned_empty"]
+
+
+def test_producer_abstention_mixing_budget_and_stray_reasons_stays_dark():
+    """One unexplained reason in the record keeps the whole record dark.
+
+    The receipt orders the dark reason first: the finalisation folds the
+    designed refusals in after every row, so the reason list reads
+    "what went unexplained, then what was refused on purpose" in every
+    record order (REVIEW-10 HIGH-1).
+    """
+    rows = [{
+        "event_type": "producer.invocation",
+        "payload": {
+            "outcome": "returned_nothing",
+            "evidence_types": ["cochange_partner"],
+            "abstention_reasons": [
+                {
+                    "category": "",
+                    "detail": {},
+                    "reason": "boundary_claim_ceiling",
+                },
+                {
+                    "category": "",
+                    "detail": {},
+                    "reason": "ranker_returned_empty",
+                },
+            ],
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert summary["cochange_prior"]["reasons"] == [
+        "ranker_returned_empty", "boundary_claim_ceiling"
+    ]
+
+
+def test_producer_abstention_with_no_reasons_is_unchanged():
+    rows = [{
+        "event_type": "producer.invocation",
+        "payload": {
+            "outcome": "returned_nothing",
+            "evidence_types": ["cochange_partner"],
+            "abstention_reasons": [],
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert summary["cochange_prior"]["reasons"] == ["producer_abstained"]
+
+
+def test_categorised_abstentions_keep_their_existing_routes():
+    """The new route sits below the category ladder, not in front of it."""
+    cases = [
+        ("authority", "viewed_file_leaky", "SUPPRESSED_WITH_REASON"),
+        ("dependency_failure", "graph_unavailable", "INELIGIBLE"),
+        ("correct_quiet", "no_signature_change", "INELIGIBLE"),
+        ("instrumentation_gap", "receipt_missing", "TELEMETRY_FAULT"),
+    ]
+    for category, reason, expected in cases:
+        rows = [{
+            "event_type": "producer.invocation",
+            "payload": {
+                "outcome": "returned_nothing",
+                "evidence_types": ["cochange_partner"],
+                "abstention_reasons": [
+                    {"category": category, "detail": {}, "reason": reason},
+                ],
+            },
+        }]
+
+        summary = summarize_features(rows)
+
+        assert summary["cochange_prior"]["status"] == expected, category
+
+
+# --------------------------------------------------------------------------- #
+# REVIEW-10 HIGH-1: the delivery-budget excuse must be a CONJUNCTION across
+# every record for a feature, not a per-record verdict. ``summarize_features``
+# takes the MAX over the priority ladder and CLEARS the reason list on a
+# priority increase, so a per-record "budget reason -> SUPPRESSED_WITH_REASON"
+# lets a designed refusal outrank, and therefore erase, a genuine dark fire
+# recorded in another row. The tests below pin the invariant in every record
+# order: a feature with ANY unexplained dark evidence stays TRIGGERED_DARK and
+# keeps EVERY reason; only a feature whose sole dark-side evidence is designed
+# refusals is named suppression.
+# --------------------------------------------------------------------------- #
+
+_DARK_EVALUATED = {
+    "event_type": "feature.evaluated",
+    "payload": {
+        "feature_id": "cochange_prior",
+        "eligible": True,
+        "outcome": "ranker_returned_empty",
+    },
+}
+_BUDGET_EVALUATED = {
+    "event_type": "feature.evaluated",
+    "payload": {
+        "feature_id": "cochange_prior",
+        "eligible": True,
+        "outcome": "boundary_claim_ceiling",
+    },
+}
+
+
+def test_dark_evaluation_alone_is_triggered_dark():
+    """Control for the two orderings below: no budget row, nothing changes."""
+    summary = summarize_features([_DARK_EVALUATED])
+
+    assert summary["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert summary["cochange_prior"]["reasons"] == ["ranker_returned_empty"]
+
+
+def test_dark_then_budget_keeps_the_dark_status_and_every_reason():
+    """Dark first, then a designed refusal.
+
+    The refusal must not promote the feature past the dark fire recorded a
+    row earlier: at priority 2 it outranked TRIGGERED_DARK and ``update``
+    cleared the reason list on the way up.
+    """
+    summary = summarize_features([_DARK_EVALUATED, _BUDGET_EVALUATED])
+
+    assert summary["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert summary["cochange_prior"]["reasons"] == [
+        "ranker_returned_empty", "boundary_claim_ceiling",
+    ]
+
+
+def test_budget_then_dark_keeps_the_dark_status_and_every_reason():
+    """The reversed order must land on the identical receipt.
+
+    This is the ordering that erased the dark reason outright: the budget row
+    set SUPPRESSED_WITH_REASON (priority 2), then the dark row at priority 1
+    could not raise the status, so ``update`` kept SUPPRESSED and the receipt
+    reported a designed refusal for a feature that had also fired into the
+    dark.
+    """
+    summary = summarize_features([_BUDGET_EVALUATED, _DARK_EVALUATED])
+
+    assert summary["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert summary["cochange_prior"]["reasons"] == [
+        "ranker_returned_empty", "boundary_claim_ceiling",
+    ]
+
+
+def test_budget_refusals_alone_are_named_suppression_sorted():
+    """The isolation case still holds, and several refusals sort."""
+    rows = [
+        _BUDGET_EVALUATED,
+        {
+            "event_type": "feature.evaluated",
+            "payload": {
+                "feature_id": "cochange_prior",
+                "eligible": True,
+                "outcome": "delivery_byte_ceiling",
+            },
+        },
+    ]
+
+    summary = summarize_features(rows)
+
+    assert summary["cochange_prior"]["status"] == "SUPPRESSED_WITH_REASON"
+    assert summary["cochange_prior"]["reasons"] == [
+        "boundary_claim_ceiling", "delivery_byte_ceiling",
+    ]
+
+
+def test_audit_conjunction_still_calls_a_mixed_feature_red():
+    """The audit-side guard only inspects RED statuses.
+
+    ``scripts.gt_audit.attribution_red_features`` excuses a feature only when
+    EVERY reason is in the closed vocabulary, and it only looks at features in
+    ``_ATTRIBUTION_RED_STATUSES``. Promoting a mixed feature to
+    SUPPRESSED_WITH_REASON therefore bypassed that conjunction entirely
+    instead of satisfying it.
+    """
+    from scripts.gt_audit import attribution_red_features
+
+    for rows in (
+        [_DARK_EVALUATED, _BUDGET_EVALUATED],
+        [_BUDGET_EVALUATED, _DARK_EVALUATED],
+    ):
+        summary = summarize_features(rows)
+
+        assert attribution_red_features(summary) == ["cochange_prior"]
+
+    assert attribution_red_features(
+        summarize_features([_BUDGET_EVALUATED])
+    ) == []
+
+
+def test_a_budget_refusal_never_demotes_a_delivered_feature():
+    """The real-data shape: refused once, delivered elsewhere in the run.
+
+    DELIVERED_UNEXPOSED (priority 3) must win in both record orders, and the
+    refusal reason must still be on the receipt.
+    """
+    delivery = {
+        "event_type": "decision.committed",
+        "payload": {
+            "decision": "delivered",
+            "feature_id": "cochange_prior",
+            "evidence_type": "cochange_partner",
+            "delivery_id": "d-1",
+            "reason": "native_seal_without_provider_identity_join",
+        },
+    }
+
+    for rows in ([delivery, _BUDGET_EVALUATED], [_BUDGET_EVALUATED, delivery]):
+        summary = summarize_features(rows)
+
+        assert summary["cochange_prior"]["status"] == "DELIVERED_UNEXPOSED"
+        assert "native_seal_without_provider_identity_join" in (
+            summary["cochange_prior"]["reasons"]
+        )
+        assert "boundary_claim_ceiling" in summary["cochange_prior"]["reasons"]
+
+
+def test_producer_budget_record_plus_a_dark_record_keeps_both():
+    """The producer seam obeys the same finalisation across records."""
+    producer_budget = {
+        "event_type": "producer.invocation",
+        "payload": {
+            "outcome": "returned_nothing",
+            "evidence_types": ["cochange_partner"],
+            "abstention_reasons": [{
+                "category": "",
+                "detail": {},
+                "reason": "boundary_claim_ceiling",
+            }],
+        },
+    }
+
+    for rows in (
+        [producer_budget, _DARK_EVALUATED],
+        [_DARK_EVALUATED, producer_budget],
+    ):
+        summary = summarize_features(rows)
+
+        assert summary["cochange_prior"]["status"] == "TRIGGERED_DARK"
+        assert summary["cochange_prior"]["reasons"] == [
+            "ranker_returned_empty", "boundary_claim_ceiling",
+        ]
+
+
+def test_full_real_row_set_projection_keeps_heads_status_on_every_feature():
+    """Replay one whole recorded trial, not the refusal rows in isolation.
+
+    The round-1 verification fed only ``delivery_refused`` rows and concluded
+    "43 rows, all SUPPRESSED". On the FULL row set of a trial the
+    ``evidence_delivery`` rows carry the same features to DELIVERED_UNEXPOSED
+    (priority 3) and beyond, so on this artifact the budget route moves no
+    status: the map below is HEAD's, verbatim, and zero features differ.
+
+    Precisely what is claimed, and no more (REVIEW-11 M-3): the STATUS is
+    identical to HEAD's on every local artifact, and the reason lists are
+    equal AS SETS - except that a designed refusal now survives onto a
+    higher-status record in every arrival order, where HEAD kept it only when
+    the refusal row happened to arrive last. The two divergent shapes are
+    named and pinned in
+    ``test_budget_route_is_order_independent_in_both_divergent_shapes``. This
+    is not a no-op, and the value of the change is the invariant, not a delta
+    on this artifact - the delta lives in
+    ``tests/fixtures/attribution/refused_never_witnessed.events.jsonl``.
+
+    Provenance: SWE-Live attestation run 35252797829, task
+    aiogram__aiogram-1594, 682 native rows, 16 ``delivery_refused`` rows
+    (9 localization_task_ceiling, 5 boundary_claim_ceiling,
+    2 localization_fire_once). On that run the refused features
+    (``localization``, ``cochange_prior``) are also delivered and witnessed,
+    so they are WITNESSED with empty reasons under HEAD and here alike.
+
+    This test is a LOCAL-ONLY EXTRA LAYER: the artifact is an untracked
+    working-tree download, so it cannot run in CI and skips when absent. The
+    CI coverage of the invariant is the tracked fixture tests below, which
+    never skip.
+    """
+    from scripts.gt_audit import _native_feature_projection
+
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    candidates = sorted(
+        repo_root.glob(
+            ".tmp-swelive-attestation-35252797829/**/agent/events.jsonl"
+        )
+    )
+    if not candidates:
+        pytest.skip(
+            "run 35252797829 artifact absent: it is an untracked local "
+            "download, so this extra layer is local-only and never runs "
+            "in CI. The invariant itself is covered by the tracked "
+            "fixture tests below, which do not skip."
+        )
+
+    rows = [
+        json.loads(line)
+        for line in candidates[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    projection = _native_feature_projection(rows)
+
+    head_status_map = {
+        "GT_CERT_DELIVERY": "INELIGIBLE",
+        "GT_CHANGE_SURFACE": "INELIGIBLE",
+        "GT_EDIT_CHECK": "INELIGIBLE",
+        "GT_HYPOTHESIS": "INELIGIBLE",
+        "GT_LOC_RESLOT": "INELIGIBLE",
+        "GT_PATCH_DELTA": "INELIGIBLE",
+        "GT_SS_SUBMIT_RED": "INELIGIBLE",
+        "caller_contract": "WITNESSED",
+        "cochange_prior": "WITNESSED",
+        "covering_red": "INELIGIBLE",
+        "def_partition": "INELIGIBLE",
+        "localization": "WITNESSED",
+        "newfile_precedent": "WITNESSED",
+        "obligations": "WITNESSED",
+        "persistent_plan": "INELIGIBLE",
+        "plan_gate": "INELIGIBLE",
+        "recovery": "INELIGIBLE",
+        "select_catalog": "WITNESSED",
+        "signature_delta": "INELIGIBLE",
+        "submit_refusal": "INELIGIBLE",
+        "syntax_result": "INELIGIBLE",
+    }
+    observed = {
+        feature_id: item["status"] for feature_id, item in projection.items()
+    }
+    differing = {
+        feature_id
+        for feature_id, status in observed.items()
+        if head_status_map.get(feature_id) != status
+    }
+
+    assert differing == set()
+    assert observed == head_status_map
+
+
+# --------------------------------------------------------------------------- #
+# REVIEW-11 M-3 / M-4: what this change actually does to the projection, and a
+# fixture that exhibits the defect no local artifact exhibits.
+# --------------------------------------------------------------------------- #
+
+_ATTRIBUTION_FIXTURES = (
+    pathlib.Path(__file__).resolve().parent / "fixtures" / "attribution"
+)
+_REFUSED_NEVER_WITNESSED = (
+    _ATTRIBUTION_FIXTURES / "refused_never_witnessed.events.jsonl"
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _head_attribution_module():
+    """HEAD's ``gt_engine/attribution.py``, executed as a standalone module.
+
+    Returns ``None`` - never raises, never skips the caller's real work - when
+    it cannot be had: no git binary, a shallow CI checkout with no blob, or a
+    HEAD that already carries this change (once it lands, HEAD IS this code
+    and comparing against it proves nothing). No assertion may therefore
+    DEPEND on it; it strengthens a test, it never gates one, and every test
+    below that uses it carries an equivalent assertion that always runs.
+
+    HEAD's module has no relative imports, so exec-ing its source in a bare
+    namespace is faithful.
+    """
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    try:
+        source = subprocess.run(
+            ["git", "show", "HEAD:gt_engine/attribution.py"],
+            cwd=repo_root, capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    if "DELIVERY_REFUSAL_REASONS" in source:
+        return None
+    module = types.ModuleType("head_gt_engine_attribution")
+    module.__file__ = "HEAD:gt_engine/attribution.py"
+    exec(
+        compile(source, "HEAD:gt_engine/attribution.py", "exec"),
+        module.__dict__,
+    )
+    return module
+
+
+_RESURRECTION_DARK = {
+    "event_type": "feature.evaluated",
+    "payload": {
+        "feature_id": "localization",
+        "eligible": True,
+        "outcome": "unexplained_miss",
+    },
+}
+_RESURRECTION_BUDGET = {
+    "event_type": "feature.evaluated",
+    "payload": {
+        "feature_id": "localization",
+        "eligible": True,
+        "outcome": "localization_fire_once",
+    },
+}
+_RESURRECTION_DELIVERY = {
+    "event_type": "decision.committed",
+    "payload": {
+        "decision": "delivered",
+        "feature_id": "localization",
+        "evidence_type": "localization",
+        "delivery_id": "d-1",
+        "reason": "sealed_and_delivered",
+    },
+}
+
+
+def test_budget_route_is_order_independent_in_both_divergent_shapes():
+    """The exact claim, replacing the round-2 "zero diff vs HEAD" wording.
+
+    What is true: the STATUS is identical to HEAD's on every local artifact,
+    and the reason lists are equal AS SETS - except that designed refusals now
+    survive onto higher-status records in every arrival order. Two shapes
+    diverge, both of them HEAD being order-dependent and this code not:
+
+    1. reason ORDER, ``budget -> dark``: HEAD gave
+       ``['localization_fire_once', 'unexplained_miss']`` while ``dark ->
+       budget`` gave the reverse; here both orders give
+       ``['unexplained_miss', 'localization_fire_once']`` - dark reasons
+       first, in arrival order, then the refusals, sorted.
+    2. reason RESURRECTION, ``budget -> delivered``: HEAD's ``update`` cleared
+       the reason list on the priority increase, so a refusal that arrived
+       before the delivery was erased (``['sealed_and_delivered']``) while
+       ``delivered -> budget`` kept it. Here it survives in both orders, and
+       that is the intended answer: a designed refusal that actually happened
+       is evidence and belongs on the record whatever order the rows arrived
+       in. The STATUS does not move - the higher priority still wins.
+
+    Consumers read ``reasons`` as a set (``scripts/gt_live_gate.py:401``) and
+    nothing hashes this projection, so neither divergence breaks a consumer.
+    """
+    dark_orders = [
+        summarize_features([_RESURRECTION_BUDGET, _RESURRECTION_DARK]),
+        summarize_features([_RESURRECTION_DARK, _RESURRECTION_BUDGET]),
+    ]
+    for summary in dark_orders:
+        assert summary["localization"]["status"] == "TRIGGERED_DARK"
+        assert set(summary["localization"]["reasons"]) == {
+            "unexplained_miss", "localization_fire_once",
+        }
+    assert (
+        dark_orders[0]["localization"]["reasons"]
+        == dark_orders[1]["localization"]["reasons"]
+        == ["unexplained_miss", "localization_fire_once"]
+    )
+
+    delivered_orders = [
+        summarize_features([_RESURRECTION_BUDGET, _RESURRECTION_DELIVERY]),
+        summarize_features([_RESURRECTION_DELIVERY, _RESURRECTION_BUDGET]),
+    ]
+    for summary in delivered_orders:
+        assert summary["localization"]["status"] == "DELIVERED_UNEXPOSED"
+        assert set(summary["localization"]["reasons"]) == {
+            "sealed_and_delivered", "localization_fire_once",
+        }
+    assert (
+        delivered_orders[0]["localization"]["reasons"]
+        == delivered_orders[1]["localization"]["reasons"]
+    )
+
+
+def test_head_diverges_only_by_reason_order_and_the_erased_refusal():
+    """Pin the two divergences against HEAD's real module, when loadable.
+
+    Strengthening only: ``_head_attribution_module`` returns None on a shallow
+    checkout or once this change has landed, and the order-independence this
+    checks is already asserted unconditionally above.
+    """
+    head = _head_attribution_module()
+    if head is None:
+        pytest.skip(
+            "HEAD blob unavailable (shallow checkout) or HEAD already carries "
+            "this change; the invariant is asserted unconditionally by "
+            "test_budget_route_is_order_independent_in_both_divergent_shapes"
+        )
+
+    shapes = {
+        "budget->dark": [_RESURRECTION_BUDGET, _RESURRECTION_DARK],
+        "dark->budget": [_RESURRECTION_DARK, _RESURRECTION_BUDGET],
+        "budget->delivered": [_RESURRECTION_BUDGET, _RESURRECTION_DELIVERY],
+        "delivered->budget": [_RESURRECTION_DELIVERY, _RESURRECTION_BUDGET],
+    }
+    head_result = {
+        name: head.summarize_features(rows)["localization"]
+        for name, rows in shapes.items()
+    }
+    ours = {
+        name: summarize_features(rows)["localization"]
+        for name, rows in shapes.items()
+    }
+
+    # Status: identical in every shape.
+    for name in shapes:
+        assert head_result[name]["status"] == ours[name]["status"], name
+
+    # Divergence 1 - order only, set-equal.
+    assert head_result["budget->dark"]["reasons"] == [
+        "localization_fire_once", "unexplained_miss",
+    ]
+    assert ours["budget->dark"]["reasons"] == [
+        "unexplained_miss", "localization_fire_once",
+    ]
+    assert set(head_result["budget->dark"]["reasons"]) == set(
+        ours["budget->dark"]["reasons"]
+    )
+    assert (
+        head_result["dark->budget"]["reasons"]
+        == ours["dark->budget"]["reasons"]
+    )
+
+    # Divergence 2 - HEAD erased the refusal that arrived before the delivery.
+    assert head_result["budget->delivered"]["reasons"] == [
+        "sealed_and_delivered",
+    ]
+    assert ours["budget->delivered"]["reasons"] == [
+        "sealed_and_delivered", "localization_fire_once",
+    ]
+    assert (
+        head_result["delivered->budget"]["reasons"]
+        == ours["delivered->budget"]["reasons"]
+    )
+
+
+def _refused_never_witnessed_rows() -> list[dict]:
+    return [
+        json.loads(line)
+        for line in _REFUSED_NEVER_WITNESSED.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+
+
+def test_refused_never_witnessed_fixture_has_the_shape_it_claims():
+    """The fixture is hand-built and minimal: two rows, one of each seam.
+
+    Hand-built on purpose - nothing is copied from a real run, there is no
+    task text, and the only path is a placeholder - so the file identifies no
+    task and no repository while still being a real ``gt.event.v1`` log.
+    """
+    from gt_engine.delivery_budget import DELIVERY_REFUSAL_REASONS
+
+    rows = _refused_never_witnessed_rows()
+
+    assert [row["event"] for row in rows] == [
+        "evidence_delivery", "delivery_refused",
+    ]
+    assert all(row["schema"] == "gt.event.v1" for row in rows)
+    refused = rows[1]
+    assert refused["kind"] == "cochange_partner"
+    assert feature_for_evidence(refused["kind"]) == "cochange_prior"
+    assert refused["reason"] in DELIVERY_REFUSAL_REASONS
+    # The whole point: the refused feature has no delivery and no witness
+    # anywhere in the log.
+    assert not [
+        row for row in rows
+        if row.get("event") == "evidence_delivery"
+        and feature_for_evidence(row.get("kind")) == "cochange_prior"
+    ]
+
+
+def test_refusal_that_is_a_features_only_evidence_is_suppression_not_dark(
+    monkeypatch,
+):
+    """The defect, on a fixture built because no local artifact exhibits it.
+
+    Run 35252797829 shows the refusal SHAPE (16 ``delivery_refused`` rows,
+    9 localization_task_ceiling / 5 boundary_claim_ceiling /
+    2 localization_fire_once) but NOT the defect: there the refused features
+    are also delivered and witnessed, so they reach WITNESSED with empty
+    reasons under HEAD and here alike and the refusal decided no status. The
+    invariant under test is synthetic by necessity - a feature whose ONLY
+    dark-side evidence is a designed refusal must not be reported
+    TRIGGERED_DARK.
+
+    RED half, and it runs in CI with no git and no artifact: with the closed
+    vocabulary emptied, ``summarize_features`` takes exactly the branch HEAD
+    takes - ``mark_dark(feature_id, outcome or "producer_abstained")``, which
+    is HEAD's ``update(feature_id, "TRIGGERED_DARK", outcome or
+    "producer_abstained")`` verbatim, and the finalisation has nothing to fold
+    in - so the refused-only feature comes back TRIGGERED_DARK.
+    ``test_refused_never_witnessed_fixture_is_dark_under_heads_module``
+    repeats it against HEAD's real module when the blob is available.
+    """
+    import gt_engine.attribution as attribution_module
+    from scripts.gt_audit import _native_feature_projection
+
+    rows = _refused_never_witnessed_rows()
+
+    green = _native_feature_projection(rows)
+    assert green["cochange_prior"]["status"] == "SUPPRESSED_WITH_REASON"
+    assert green["cochange_prior"]["reasons"] == ["boundary_claim_ceiling"]
+    assert green["caller_contract"]["status"] == "DELIVERED_UNEXPOSED"
+
+    monkeypatch.setattr(
+        attribution_module, "DELIVERY_REFUSAL_REASONS", frozenset()
+    )
+    red = _native_feature_projection(rows)
+    assert red["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert red["cochange_prior"]["reasons"] == ["boundary_claim_ceiling"]
+    assert red["caller_contract"]["status"] == "DELIVERED_UNEXPOSED"
+
+
+def test_refused_never_witnessed_fixture_is_dark_under_heads_module(
+    monkeypatch,
+):
+    """The same fixture through HEAD's real module, when the blob can be had.
+
+    Strengthening only - the RED half is asserted unconditionally above by
+    emptying the vocabulary, which drives the identical code path.
+    """
+    head = _head_attribution_module()
+    if head is None:
+        pytest.skip(
+            "HEAD blob unavailable (shallow checkout) or HEAD already carries "
+            "this change; the RED half runs unconditionally in "
+            "test_refusal_that_is_a_features_only_evidence_is_suppression"
+            "_not_dark"
+        )
+
+    import scripts.gt_audit as gt_audit
+
+    rows = _refused_never_witnessed_rows()
+    monkeypatch.setattr(
+        gt_audit, "summarize_features", head.summarize_features
+    )
+    projection = gt_audit._native_feature_projection(rows)
+
+    assert projection["cochange_prior"]["status"] == "TRIGGERED_DARK"
+    assert projection["caller_contract"]["status"] == "DELIVERED_UNEXPOSED"

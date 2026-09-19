@@ -23,6 +23,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -473,6 +474,168 @@ def test_batch_headroom_refusal_names_an_uncoverable_fallback_set(tmp_path, monk
     assert reason.startswith("GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT:batch_amend_floor:")
     assert "incremental_amend_uncoverable:no_amendable_paths" in reason
     assert rows == ()
+
+
+@pytest.mark.parametrize("per_file_lane", [False, True])
+def test_batch_headroom_refusal_records_the_cgroup_it_read(
+    tmp_path, monkeypatch, per_file_lane
+):
+    """``limit=`` alone cannot tell a full cgroup from a misread one.
+
+    Run 35262214538 journaled nine GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT
+    refusals whose cause carried limit=0, 2326528, 7020544 and 12804096
+    against need=178438144. More runner memory, a smaller batch and a
+    deferred amend are all consistent with that, so no operator could pick
+    the remedy. The max/current the limit was derived from decide it in one
+    run, on both refusal branches - the bare one and the one that also
+    reports an uncoverable per-file fallback.
+    """
+    adapter = _adapter(tmp_path)
+    root = Path(adapter.repo_root)
+    (root / "app.py").write_text("def one(): pass\n", encoding="utf-8")
+    layout = adapter.engine_state.layout
+    parent = _publish_parent(root, layout, monkeypatch)
+    (root / "app.py").write_text(
+        "def one(): pass\ndef two(): pass\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        indexer, "_producer_supports_incremental_amend", lambda: per_file_lane)
+    monkeypatch.setattr(
+        indexer, "_producer_supports_amend_capability",
+        lambda capability: capability == indexer.BATCH_AMEND_CAPABILITY)
+    monkeypatch.setattr(indexer, "_batch_amend_memory_floor", lambda *a: 10**12)
+    monkeypatch.setattr(
+        indexer, "_cgroup_snapshot",
+        lambda **_kwargs: {
+            "current": 900_000_000, "max": 1_000_000_000,
+            "peak": None, "oom": None, "oom_kill": None,
+            "cgroup_version": 2, "limit_state": "limited",
+            "headroom_basis": "max_and_current", "source": "proc_self_cgroup",
+        },
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("a refused amend spawned a producer")
+    monkeypatch.setattr(indexer, "_index_command", forbidden)
+    monkeypatch.setattr(indexer, "_incremental_index_command", forbidden)
+
+    # A path the per-file lane cannot parse, so the ``per_file_lane=True``
+    # branch reaches the second refusal instead of falling back to it.
+    changed = ("logo.png",) if per_file_lane else ("app.py",)
+    result, reason, rows = indexer._ensure_index_incremental_unlocked(
+        str(root), layout=layout, parent_graph=parent, changed_paths=changed)
+
+    assert result is None and rows == ()
+    assert reason.startswith(
+        "GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT:batch_amend_floor:")
+    assert "cgroup_max=1000000000current=900000000" in reason
+    assert "basis=max_and_current" in reason
+    assert ("incremental_amend_uncoverable" in reason) is per_file_lane
+
+
+def test_batch_headroom_refusal_says_when_the_headroom_was_estimated(
+    tmp_path, monkeypatch
+):
+    """An estimated ceiling must not read like a measured one.
+
+    With the usage file unreadable the budget is derived from ``max`` alone.
+    That is still evidence, but it is not a measurement, and an operator
+    sizing a runner off ``limit=`` needs to know which one they are holding.
+    """
+    adapter = _adapter(tmp_path)
+    root = Path(adapter.repo_root)
+    (root / "app.py").write_text("def one(): pass\n", encoding="utf-8")
+    layout = adapter.engine_state.layout
+    parent = _publish_parent(root, layout, monkeypatch)
+    (root / "app.py").write_text(
+        "def one(): pass\ndef two(): pass\n", encoding="utf-8")
+
+    monkeypatch.setattr(indexer, "_producer_supports_incremental_amend", lambda: False)
+    monkeypatch.setattr(
+        indexer, "_producer_supports_amend_capability",
+        lambda capability: capability == indexer.BATCH_AMEND_CAPABILITY)
+    monkeypatch.setattr(indexer, "_batch_amend_memory_floor", lambda *a: 10**12)
+    monkeypatch.setattr(
+        indexer, "_cgroup_snapshot",
+        lambda **_kwargs: {
+            "current": None, "max": 1_000_000_000,
+            "peak": None, "oom": None, "oom_kill": None,
+            "cgroup_version": 2, "limit_state": "limited",
+            "headroom_basis": "max_only", "source": "proc_self_cgroup",
+        },
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("a refused amend spawned a producer")
+    monkeypatch.setattr(indexer, "_index_command", forbidden)
+    monkeypatch.setattr(indexer, "_incremental_index_command", forbidden)
+
+    _result, reason, _rows = indexer._ensure_index_incremental_unlocked(
+        str(root), layout=layout, parent_graph=parent, changed_paths=("app.py",))
+
+    assert "cgroup_max=1000000000current=None" in reason
+    assert "basis=max_only" in reason
+    # The estimate is half the cgroup, not zero: the refusal is the floor's,
+    # not a phantom "no memory at all".
+    assert "limit=500000000" in reason
+
+
+@pytest.mark.parametrize(
+    ("limit_state", "basis"),
+    [("unlimited", "uncapped"), ("unreadable", "no_ceiling_evidence")],
+)
+def test_batch_headroom_refusal_separates_no_ceiling_from_no_evidence(
+    tmp_path, monkeypatch, limit_state, basis
+):
+    """Same budget, opposite facts - and the refusal is the only place it shows.
+
+    Both states deliberately spend the flat 4 GiB cap: a Windows box and a
+    host with no cgroup read as ``unreadable``, and lowering their budget
+    would refuse legitimate local amends over a fact about the HOST rather
+    than about memory. But an operator holding ``limit=4294967296`` needs to
+    know whether the guard SAW an uncapped controller or saw nothing at all -
+    one remedy is a cgroup that needs a limit, the other is a reader that
+    needs a host it can read. ``uncapped`` used to name both.
+    """
+    adapter = _adapter(tmp_path)
+    root = Path(adapter.repo_root)
+    (root / "app.py").write_text("def one(): pass\n", encoding="utf-8")
+    layout = adapter.engine_state.layout
+    parent = _publish_parent(root, layout, monkeypatch)
+    (root / "app.py").write_text(
+        "def one(): pass\ndef two(): pass\n", encoding="utf-8")
+
+    monkeypatch.setattr(indexer, "_producer_supports_incremental_amend", lambda: False)
+    monkeypatch.setattr(
+        indexer, "_producer_supports_amend_capability",
+        lambda capability: capability == indexer.BATCH_AMEND_CAPABILITY)
+    # A floor above the flat cap: the only lane left is the refusal, which is
+    # what carries the basis.
+    monkeypatch.setattr(indexer, "_batch_amend_memory_floor", lambda *a: 10**12)
+    monkeypatch.setattr(
+        indexer, "_cgroup_snapshot",
+        lambda **_kwargs: {
+            "current": None, "max": None, "peak": None, "oom": None,
+            "oom_kill": None, "cgroup_version": None,
+            "limit_state": limit_state,
+            # Derived, not hand-written: the point of the test is that the
+            # producer of this string tells the two states apart.
+            "headroom_basis": indexer._headroom_basis(limit_state, None),
+            "source": "proc_self_cgroup",
+        },
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("a refused amend spawned a producer")
+    monkeypatch.setattr(indexer, "_index_command", forbidden)
+    monkeypatch.setattr(indexer, "_incremental_index_command", forbidden)
+
+    _result, reason, _rows = indexer._ensure_index_incremental_unlocked(
+        str(root), layout=layout, parent_graph=parent, changed_paths=("app.py",))
+
+    assert f"basis={basis}" in reason
+    assert "cgroup_max=Nonecurrent=None" in reason
+    assert f"limit={indexer._INDEX_RSS_LIMIT_BYTES}" in reason
 
 
 def test_parser_cache_location_survives_graph_revision_changes(tmp_path):
@@ -1011,7 +1174,6 @@ def test_real_producer_amend_reminds_the_edited_files_symbols(tmp_path):
 # ---------------------------------------------------------------- write path
 
 
-from types import SimpleNamespace
 
 
 def _txn(post: str, paths: tuple[str, ...], complete: bool = True):
@@ -1405,30 +1567,104 @@ def _batch_parent_manifest(parent: Path, nodes: int) -> None:
     manifest.write_text(json.dumps(doc), encoding="utf-8")
 
 
-def test_batch_amend_floor_scales_with_the_parent_graph(tmp_path, monkeypatch):
-    """The floor is the measured pipeline envelope: base + per-node slope."""
-    graph = tmp_path / "graph.db"
-    with sqlite3.connect(graph) as con:
-        con.execute("create table nodes (id integer)")
-        con.executemany("insert into nodes values (?)", [(i,) for i in range(50)])
-    manifest = tmp_path / "graph.manifest.json"
-    manifest.write_text(json.dumps({"indexed_node_count": 93_600}), encoding="utf-8")
+def _floor_for(tmp_path: Path, nodes: int, *, graph_nodes: int = 0) -> int:
+    # A fresh pair per call: sqlite keeps the file open on Windows long enough
+    # that reusing one name across a parametrised table fails on unlink.
+    stem = f"parent-{nodes}-{graph_nodes}"
+    graph = tmp_path / f"{stem}.db"
+    con = sqlite3.connect(graph)
+    try:
+        con.execute("create table if not exists nodes (id integer)")
+        con.execute("delete from nodes")
+        con.executemany(
+            "insert into nodes values (?)", [(i,) for i in range(graph_nodes)])
+        con.commit()
+    finally:
+        con.close()
+    manifest = tmp_path / f"{stem}.manifest.json"
+    manifest.write_text(
+        json.dumps({"indexed_node_count": nodes} if nodes else {}), encoding="utf-8")
+    return indexer._batch_amend_memory_floor(graph, manifest)
 
-    floor = indexer._batch_amend_memory_floor(graph, manifest)
-    expected = (
+
+def test_batch_amend_floor_scales_with_the_parent_graph(tmp_path, monkeypatch):
+    """The floor is the measured pipeline envelope: base + per-node slope.
+
+    The base is no longer flat. It was calibrated on a 15,600-node parent and
+    charged in full to every parent, so an 11-node one was priced at 170 MiB -
+    run 35262214538 refused nine amends at need=178438144 against a cgroup
+    whose whole remaining headroom was smaller than that base alone. Below the
+    calibration parent the base is prorated, with a floor that stops the
+    prediction collapsing to nothing.
+    """
+    assert _floor_for(tmp_path, 93_600) == (
         indexer._AMEND_MEMORY_FLOOR_BASE_BYTES
         + 93_600 * indexer._AMEND_MEMORY_FLOOR_PER_NODE_BYTES
     )
-    assert floor == expected
-    assert floor > 1024 * 1024 * 1024  # a ~95k-node parent needs >1 GiB
+    assert _floor_for(tmp_path, 93_600) > 1024 * 1024 * 1024  # >1 GiB, unchanged
 
-    # Manifest without the field falls back to counting the graph itself.
-    manifest.write_text(json.dumps({}), encoding="utf-8")
-    floor = indexer._batch_amend_memory_floor(graph, manifest)
-    assert floor == (
-        indexer._AMEND_MEMORY_FLOOR_BASE_BYTES
+    # Manifest without the field falls back to counting the graph itself. The
+    # base is prorated there too: 50 nodes is far below the calibration
+    # parent, so the minimum carries it.
+    assert _floor_for(tmp_path, 0, graph_nodes=50) == (
+        indexer._AMEND_MEMORY_FLOOR_MIN_BYTES
         + 50 * indexer._AMEND_MEMORY_FLOOR_PER_NODE_BYTES
     )
+
+
+@pytest.mark.parametrize(
+    ("nodes", "expected_base"),
+    [
+        (0, "min"),        # unreadable parent scale
+        (11, "min"),       # the parent run 35262214538 priced at 170 MiB
+        (1_000, "min"),
+        (15_600, "full"),  # the calibration parent itself
+        (40_000, "full"),  # above calibration the base stops growing
+    ],
+)
+def test_batch_amend_floor_prorates_the_base_below_the_calibration_parent(
+    tmp_path, nodes, expected_base
+):
+    """Five points on the curve, including the one the live run refused.
+
+    ``nodes=0`` is an unreadable parent, ``11`` is the parent whose 170 MiB
+    price produced need=178438144 in run 35262214538, ``15600`` is the
+    measured calibration parent and ``40000`` proves the base is capped there
+    rather than extrapolated past the measurement.
+    """
+    base = (
+        indexer._AMEND_MEMORY_FLOOR_MIN_BYTES if expected_base == "min"
+        else indexer._AMEND_MEMORY_FLOOR_BASE_BYTES
+    )
+    expected = base + nodes * indexer._AMEND_MEMORY_FLOOR_PER_NODE_BYTES
+    assert _floor_for(tmp_path, nodes) == expected
+    # Monotonic, and never below the launch floor a refused build already uses.
+    assert expected >= indexer._AMEND_MEMORY_FLOOR_MIN_BYTES
+
+
+def test_batch_amend_floor_is_monotonic_and_continuous_at_the_calibration_knee(
+    tmp_path,
+):
+    """A prorated base must not make a bigger parent cheaper than a smaller one.
+
+    The knee is where the prorated base reaches the minimum: at 16 KiB/node
+    the per-node term alone would otherwise let the curve step backwards.
+    """
+    floors = [_floor_for(tmp_path, nodes)
+              for nodes in (0, 11, 1_000, 5_800, 5_900, 15_599, 15_600, 40_000)]
+    assert floors == sorted(floors)
+    assert len(set(floors)) == len(floors), "the curve must be strictly rising"
+
+
+def test_batch_amend_floor_min_is_not_below_the_launch_floor(tmp_path):
+    """The smallest predicted amend must still clear the launch floor.
+
+    ``_run_index_bounded`` refuses any build under 64 MiB. A floor beneath
+    that would predict a producer can run in memory the guard would not even
+    launch it with, so the two constants are pinned equal here on purpose.
+    """
+    assert indexer._AMEND_MEMORY_FLOOR_MIN_BYTES == 64 * 1024 * 1024
+    assert _floor_for(tmp_path, 0) >= indexer._AMEND_MEMORY_FLOOR_MIN_BYTES
 
 
 def test_batch_amend_refuses_before_spawn_below_the_floor(tmp_path, monkeypatch):

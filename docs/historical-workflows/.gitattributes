@@ -1,0 +1,6 @@
+# gt_finalstand_provider_free.yml is hashed as the FS-023 workflow identity.
+# scripts/validate_gt_finalstand.py normalises CRLF before hashing, but
+# scripts/finalstand_offline.py hashes args.workflow.read_bytes() RAW, so an
+# autocrlf=true checkout would produce a workflow_definition_sha256 that does
+# not match the pinned f82ab72c70f797a5006bc9b9fee79b37cef6f7ded0053a31d8f613b2df1c3e92.
+* text eol=lf

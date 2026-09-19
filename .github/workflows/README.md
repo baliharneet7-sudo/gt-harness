@@ -1,3 +1,10 @@
+> **Archive notice (2026-09-19).** `tb2_baseline.yml`, `tb2_gt.yml` and `swe_gt.yml`
+> described below, together with every other lane outside the supported set
+> pinned by `tests/test_product_workflow.py`, were moved to
+> `.github/workflows-archive/` and can no longer be dispatched. The text is kept
+> as history of how those lanes worked; see `.github/workflows-archive/README.md`.
+> The GT-off baseline is frozen (see `docs/benchmarks/`) and is never re-run.
+
 # CI workflows
 
 ## `tb2_baseline.yml` — Terminal-Bench 2.0 baseline (stock nano, no GT)

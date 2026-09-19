@@ -156,6 +156,13 @@ class IndexProcessResult:
     cgroup_memory_peak_after: int | None = None
     cgroup_oom_delta: int = 0
     cgroup_oom_kill_delta: int = 0
+    # Which controller answered and how the budget was derived from it. A 0
+    # from a full cgroup and a 0 from an unreadable one are the same integer
+    # and call for opposite remedies, so the two numbers above are not
+    # interpretable without these three.
+    cgroup_version: int | None = None
+    cgroup_limit_state: str = ""
+    cgroup_headroom_basis: str = ""
 
     @property
     def memory_evidence(self) -> bool:
@@ -484,29 +491,329 @@ def _execution_identity() -> dict[str, str]:
     }
 
 
-def _read_integer(path: Path) -> int | None:
+# cgroup v1 has no literal "max": an unlimited memory controller reports
+# PAGE_COUNTER_MAX pages scaled to bytes, 0x7FFFFFFFFFFFF000 on a 64-bit
+# kernel. Read as a ceiling that is an ~8 EiB budget, so it is recognised as
+# "no limit" rather than handed to the headroom arithmetic.
+_CGROUP_V1_UNLIMITED_BYTES = 0x7FFFFFFFFFFFF000
+
+# The three facts a memory ceiling can carry. They are kept apart because
+# they call for three different answers upstream, and collapsing them into a
+# single None is what let a MISSING FILE be priced as ZERO AVAILABLE MEMORY
+# (run 35262214538, nine refusals at limit=0).
+_LIMIT_LIMITED = "limited"
+_LIMIT_UNLIMITED = "unlimited"
+_LIMIT_UNREADABLE = "unreadable"
+
+
+def _read_memory_scalar(path: Path) -> tuple[str, int | None]:
+    """Return ``(limit_state, value)`` for one memory controller file.
+
+    ``("limited", n)`` is a real ceiling, ``("unlimited", None)`` is an
+    uncapped controller and ``("unreadable", None)`` is an absent or
+    unparseable file - a diagnostic gap, NOT a measurement of zero.
+    """
     try:
-        value = path.read_text(encoding="ascii").strip()
-        return None if value == "max" else int(value)
-    except (OSError, ValueError):
-        return None
+        text = path.read_text(encoding="ascii").strip()
+    except OSError:
+        return _LIMIT_UNREADABLE, None
+    if text == "max":
+        return _LIMIT_UNLIMITED, None
+    try:
+        value = int(text)
+    except ValueError:
+        return _LIMIT_UNREADABLE, None
+    if value >= _CGROUP_V1_UNLIMITED_BYTES:
+        return _LIMIT_UNLIMITED, None
+    return _LIMIT_LIMITED, value
 
 
-def _cgroup_snapshot() -> dict[str, int | None]:
-    root = Path("/sys/fs/cgroup")
+def _headroom_basis(limit_state: str, current: int | None) -> str:
+    """Which readings the headroom was computed from, for the refusal text.
+
+    ``uncapped`` and ``no_ceiling_evidence`` both spend the flat cap (see
+    ``_effective_index_memory_limit``), and they are still not the same fact:
+    the first is a controller that WAS read and carries no ceiling, the second
+    is a ceiling nobody could read - no cgroup on the host, no membership
+    file, a file that would not parse. They call for opposite remedies, so
+    naming both ``uncapped`` made the receipt claim evidence it did not have.
+    """
+    if limit_state == _LIMIT_UNLIMITED:
+        return "uncapped"
+    if limit_state != _LIMIT_LIMITED:
+        return "no_ceiling_evidence"
+    return "max_and_current" if current is not None else "max_only"
+
+
+def _cgroup_memory_events(path: Path) -> dict[str, int]:
     events: dict[str, int] = {}
     try:
-        for line in (root / "memory.events").read_text(encoding="ascii").splitlines():
+        for line in path.read_text(encoding="ascii").splitlines():
             name, value = line.split(maxsplit=1)
             events[name] = int(value)
     except (OSError, ValueError):
         pass
+    return events
+
+
+def _unreadable_cgroup_snapshot(source: str) -> dict[str, object]:
+    """No usable reading at all - a gap, never a measurement."""
     return {
-        "current": _read_integer(root / "memory.current"),
-        "max": _read_integer(root / "memory.max"),
-        "peak": _read_integer(root / "memory.peak"),
+        "current": None,
+        "max": None,
+        "peak": None,
+        "oom": None,
+        "oom_kill": None,
+        "cgroup_version": None,
+        "limit_state": _LIMIT_UNREADABLE,
+        "headroom_basis": _headroom_basis(_LIMIT_UNREADABLE, None),
+        "source": source,
+    }
+
+
+def _unified_root_snapshot(sys_root: Path) -> dict[str, object]:
+    """Best-effort read of the unified hierarchy root at ``sys_root``.
+
+    Kept as a fallback rather than deleted with the defect: inside a cgroup
+    namespace the container's own ceiling IS visible at /sys/fs/cgroup, and
+    when /proc cannot be walked that read is the only evidence there is.
+    """
+    limit_state, maximum = _read_memory_scalar(sys_root / "memory.max")
+    current_state, current = _read_memory_scalar(sys_root / "memory.current")
+    peak_state, peak = _read_memory_scalar(sys_root / "memory.peak")
+    events = _cgroup_memory_events(sys_root / "memory.events")
+    readable = {limit_state, current_state, peak_state} != {_LIMIT_UNREADABLE}
+    return {
+        "current": current,
+        "max": maximum,
+        "peak": peak,
         "oom": events.get("oom"),
         "oom_kill": events.get("oom_kill"),
+        "cgroup_version": 2 if readable else None,
+        "limit_state": limit_state,
+        "headroom_basis": _headroom_basis(limit_state, current),
+        "source": "unified_root" if readable else "unavailable",
+    }
+
+
+def _cgroup_memberships(proc_root: Path, pid: int) -> dict[str, str]:
+    """``/proc/<pid>/cgroup`` as ``{controllers: path}``.
+
+    A v1 hybrid host writes one line per hierarchy - a unified ``0::`` line
+    plus one per v1 controller group - and they do NOT agree on the path, so
+    the controller column is the key and the memory line is picked by name.
+    Malformed lines are skipped rather than raised on: one unparseable line
+    must not cost the ceiling that the next line points at.
+    """
+    memberships: dict[str, str] = {}
+    for line in (proc_root / str(pid) / "cgroup").read_text(encoding="ascii").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 3:
+            memberships[parts[1]] = parts[2]
+    return memberships
+
+
+def _resolve_memory_controller(
+    pid: int, *, proc_root: Path = Path("/proc")
+) -> tuple[int, Path] | None:
+    """``(cgroup_version, directory)`` of the memory controller ``pid`` is in.
+
+    Replicated from ``gt_harness.cgroup.memory_snapshot``, which is the
+    reference implementation for this walk: same membership parse, same
+    mountinfo parse, same v2-before-v1 preference, same escape check. It is
+    replicated rather than called because that function keeps its resolution
+    INLINE and exports no helper, and reads ``memory.peak``/``memory.events``
+    eagerly on the way out - optional files that a pre-5.19 kernel does not
+    have, whose absence would otherwise take the CEILING down with them.
+    ``tests/test_index_cgroup_headroom.py`` pins the two resolvers to the same
+    answer on the fixtures ``tests/test_cgroup.py`` builds, so the copy cannot
+    drift silently.
+
+    Returns ``None`` when no memory controller can be located. Raises
+    ``ValueError`` only when one was located and its path escaped its mount -
+    a located-but-untrustworthy controller, which is not the same answer as
+    "there is none here" and must not be priced as one.
+    """
+    # Function-local, like every other gt_engine -> gt_harness reach, so
+    # gt_engine.indexer still imports on a checkout without the harness
+    # package. The octal-escape rule for mountinfo fields is CONSUMED rather
+    # than copied: a mountpoint with a space or a backslash in it has to mean
+    # the same thing to both resolvers or they can disagree about which
+    # directory they read.
+    from gt_harness.cgroup import _unescape as _cgroup_unescape
+
+    memberships = _cgroup_memberships(proc_root, pid)
+    candidates: list[tuple[int, list[str], str]] = []
+    for line in (proc_root / "self" / "mountinfo").read_text(encoding="ascii").splitlines():
+        head, _, tail = line.partition(" - ")
+        fields, filesystem = head.split(), tail.split()
+        # mountinfo: fields[3] is the mounted subtree, fields[4] the
+        # mountpoint; past the separator comes the filesystem type and, for
+        # cgroup v1, its comma-separated superblock options.
+        if len(fields) < 5 or len(filesystem) < 3:
+            continue
+        if filesystem[0] == "cgroup2" and "" in memberships:
+            candidates.append((2, fields, memberships[""]))
+        elif filesystem[0] == "cgroup" and "memory" in filesystem[2].split(","):
+            member = next((value for key, value in memberships.items()
+                           if "memory" in key.split(",")), None)
+            if member is not None:
+                candidates.append((1, fields, member))
+    # Unified before legacy: on a hybrid host both are mounted and v2 is the
+    # hierarchy the kernel actually charges.
+    #
+    # sorted(..., reverse=True) over the WHOLE tuple, character for character
+    # what gt_harness/cgroup.py:29 does, and not the version-only key this
+    # used to sort on. The version-only key was merely STABLE below the
+    # version, so with two cgroup2 mounts - the benchmark image binds the host
+    # hierarchy at /host/sys/fs/cgroup beside the namespaced one, and the
+    # membership 0::/docker/task resolves under either - it returned whichever
+    # line came first in mountinfo while the reference tie-broke on `fields`,
+    # whose [0] is the mount id AS A STRING ("9" > "31"). Two resolvers, two
+    # ceilings, 4 GiB against 256 MiB, in the same run. The tie-break is not
+    # defended as correct - sorting mount ids as text is not a ranking anybody
+    # designed - it is COPIED, because the reference is the pinned source of
+    # truth and agreement is the invariant that matters.
+    for version, fields, member in sorted(candidates, reverse=True):
+        mount_root = Path(_cgroup_unescape(fields[3]))
+        mountpoint = Path(_cgroup_unescape(fields[4])).resolve()
+        try:
+            # The mounted subtree is not always "/": a bind of the task's own
+            # directory reports root "/docker/task", and the membership path
+            # is relative to THAT, not to the hierarchy root.
+            relative = Path(member).relative_to(mount_root)
+        except ValueError:
+            continue
+        directory = (mountpoint / relative).resolve()
+        if directory != mountpoint and mountpoint not in directory.parents:
+            raise ValueError("memory controller path escaped mount")
+        usage = "memory.current" if version == 2 else "memory.usage_in_bytes"
+        if not (directory / usage).is_file():
+            continue
+        return version, directory
+    return None
+
+
+def _controller_snapshot(version: int, directory: Path) -> dict[str, object]:
+    """Read one resolved memory controller directory.
+
+    ``memory.max``/``memory.current`` decide the budget and are read through
+    ``_read_memory_scalar`` so "absent" and "would not parse" stay separable
+    from "unlimited". ``peak`` and the OOM counters are diagnostics: they are
+    best effort, and a kernel that does not export them costs us a receipt
+    field, never the ceiling.
+    """
+    limit_state, maximum = _read_memory_scalar(
+        directory / ("memory.max" if version == 2 else "memory.limit_in_bytes"))
+    _current_state, current = _read_memory_scalar(
+        directory / ("memory.current" if version == 2 else "memory.usage_in_bytes"))
+    _peak_state, peak = _read_memory_scalar(
+        directory / ("memory.peak" if version == 2 else "memory.max_usage_in_bytes"))
+    events = _cgroup_memory_events(
+        directory / ("memory.events" if version == 2 else "memory.oom_control"))
+    return {
+        "current": current,
+        "max": maximum,
+        "peak": peak,
+        # v1 has no "oom" counter - memory.oom_control reports under_oom,
+        # which is a state and not a count. Reported as absent, as
+        # gt_harness.cgroup.memory_snapshot reports it.
+        "oom": events.get("oom") if version == 2 else None,
+        "oom_kill": events.get("oom_kill"),
+        "cgroup_version": version,
+        "limit_state": limit_state,
+        "headroom_basis": _headroom_basis(limit_state, current),
+        "source": "proc_self_cgroup",
+    }
+
+
+def _cgroup_snapshot(
+    *,
+    proc_root: Path = Path("/proc"),
+    sys_root: Path = Path("/sys/fs/cgroup"),
+    pid: int | None = None,
+) -> dict[str, object]:
+    """Memory accounting for the cgroup THIS process is actually in.
+
+    The previous reader opened ``/sys/fs/cgroup/memory.*`` directly. That is
+    the unified hierarchy's ROOT, not the task's cgroup: on a v2 host its
+    ``memory.max`` is the literal ``max``, unlimited by construction, and on
+    a v1 host the file does not exist at all. So the ceiling the producer
+    would actually die against was never read - the guard saw either "no
+    limit" or "unreadable" and, through ``current=None``, priced the second
+    as a limit of zero.
+
+    ``_resolve_memory_controller`` walks ``/proc/<pid>/cgroup`` and
+    ``/proc/self/mountinfo`` to the controller directory this process is a
+    member of and validates that the resolved path cannot escape the mount,
+    and ``_controller_snapshot`` then reads THAT directory. The walk is
+    replicated from ``gt_harness.cgroup.memory_snapshot`` rather than calling
+    it, because calling it made two OPTIONAL diagnostic files decide the
+    budget: it reads ``memory.peak`` and ``memory.events`` eagerly, and
+    ``memory.peak`` only exists from Linux 5.19, so on an older v2 kernel the
+    missing file raised ``FileNotFoundError``, which is an ``OSError``,
+    indistinguishable from "no cgroup here" - and the snapshot fell back to
+    the unified root and reported ``unlimited`` for a 256 MiB cgroup whose
+    ``memory.max`` it had opened a syscall earlier. The ceiling is mandatory;
+    peak and the OOM counters are best effort and may come back ``None``.
+
+    What this is NOT is a live flip of the guard inside a container. With
+    cgroup namespaces - the benchmark's case - ``/sys/fs/cgroup`` IS the task
+    cgroup and ``/proc/self/cgroup`` reads ``0::/``, so the membership path is
+    the mount root, the resolver lands on the mountpoint itself, and it opens
+    the SAME ``memory.max``/``memory.current`` that ``_unified_root_snapshot``
+    opened at HEAD. That is why run 35262214538 journaled
+    ``limit=0..12804096`` refusals rather than a permitted build: HEAD was
+    already reading the task ceiling there. The behaviour only changes for a
+    process whose membership path is a STRICT subpath of the mount root - no
+    cgroup namespace - and that is exactly the case where HEAD read the wrong
+    (root) cgroup.
+
+    And the refusals themselves are the guard working, not a defect of it: a
+    256 MiB container sitting at 144 MiB resident has 112 MiB of headroom,
+    which is under the 128 MiB reserve, so ``_effective_index_memory_limit``
+    is 0 and every amend is refused - identically before and after this
+    change. The remedy is more container memory or a smaller reserve, and this
+    change is neither.
+
+    The roots and pid are keyword arguments so tests can stand a whole host
+    up in ``tmp_path``; the defaults are the real paths and no production call
+    site passes anything.
+    """
+    try:
+        resolved = _resolve_memory_controller(
+            os.getpid() if pid is None else pid, proc_root=proc_root
+        )
+    except OSError:
+        # The process's own cgroup could not be LOCATED: no membership file,
+        # no mountinfo, no /proc at all. Inside a cgroup namespace the
+        # container's ceiling is still visible at the unified root, so that
+        # read is the next-best evidence.
+        return _unified_root_snapshot(sys_root)
+    except ValueError:
+        # The controller WAS located and its path escaped its mount. Falling
+        # back to the unified root here would answer for a DIFFERENT, usually
+        # unlimited cgroup; report the gap instead, so the budget is spent as
+        # "no ceiling evidence" rather than as "no ceiling".
+        return _unreadable_cgroup_snapshot("controller_unreadable")
+    if resolved is None:
+        return _unified_root_snapshot(sys_root)
+    version, directory = resolved
+    # Note what is NOT here: no fallback when the located controller's
+    # memory.max is absent or unparseable. That snapshot reports
+    # limit_state="unreadable" from source="proc_self_cgroup", because a
+    # ceiling nobody could read must never be published as the unified root's
+    # "unlimited" for a cgroup the guard never opened.
+    return _controller_snapshot(version, directory)
+
+
+def _cgroup_provenance(snapshot: dict[str, object]) -> dict[str, object]:
+    """The IndexProcessResult fields that say which reading a budget came from."""
+    version = snapshot.get("cgroup_version")
+    return {
+        "cgroup_version": version if isinstance(version, int) else None,
+        "cgroup_limit_state": str(snapshot.get("limit_state", "")),
+        "cgroup_headroom_basis": str(snapshot.get("headroom_basis", "")),
     }
 
 
@@ -625,13 +932,39 @@ def _index_launch_environment(memory_limit_bytes: int, root: str, log_dir: Path)
     return child
 
 
-def _effective_index_memory_limit(snapshot: dict[str, int | None]) -> int:
+def _effective_index_memory_limit(snapshot: dict[str, object]) -> int:
+    """The producer's RSS budget, in bytes, from one cgroup reading.
+
+    With no readable ceiling - ``unlimited`` or ``unreadable`` - the answer is
+    the flat 4 GiB cap, and it is a CAP RATHER THAN A MEASUREMENT: there is no
+    ceiling evidence behind it in either case. That is deliberate for both. A
+    Windows developer box and a host with no cgroup at all read as
+    ``unreadable``, and pricing them lower would refuse legitimate local
+    amends over a fact about the host rather than about memory; the in-flight
+    RSS guard in ``_run_index_bounded`` is the backstop that bounds the child
+    either way. The two states are still told apart downstream by
+    ``headroom_basis``: ``uncapped`` saw a controller with no limit,
+    ``no_ceiling_evidence`` saw no usable limit at all.
+    """
     cgroup_max = snapshot.get("max")
-    if cgroup_max is None:
+    if not isinstance(cgroup_max, int) or isinstance(cgroup_max, bool):
         return _INDEX_RSS_LIMIT_BYTES
     current = snapshot.get("current")
+    if isinstance(current, bool) or not isinstance(current, int):
+        current = None
     if current is None:
-        return 0
+        # The ceiling is readable, the usage file is NOT. That is a diagnostic
+        # gap, not a measurement of a full cgroup, and returning 0 for it spent
+        # the gap as a refusal: 0 sits below the 64 MiB launch floor, so run
+        # 35262214538 journaled nine GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT
+        # refusals at limit=0 against need=178438144 - a graph refresh declined
+        # on a missing file rather than on missing memory. The half-of-cgroup
+        # rule alone is still evidence, so that is what is returned; the
+        # snapshot carries headroom_basis="max_only" so the refusal text and
+        # the receipt say the headroom was ESTIMATED, not measured. The 128 MiB
+        # reserve is not applied here because there is no usage to reserve
+        # against - half the cgroup is already the conservative half.
+        return min(_INDEX_RSS_LIMIT_BYTES, cgroup_max // 2)
     headroom = max(0, cgroup_max - current)
     safe_headroom = max(0, headroom - 128 * 1024 * 1024)
     # Leave half of a constrained task cgroup to the runner and its provider
@@ -650,15 +983,38 @@ def _effective_index_memory_limit(snapshot: dict[str, int | None]) -> int:
 # resident LSP/enrichment pressure this synthetic graph does not have.
 _AMEND_MEMORY_FLOOR_BASE_BYTES = 170 * 1024 * 1024
 _AMEND_MEMORY_FLOOR_PER_NODE_BYTES = 16 * 1024
+# The parent the base was measured on. Charging that base in full to EVERY
+# parent is what made the floor unusable on small repos: run 35262214538
+# journaled nine refusals at need=178438144, which decodes to an 11-node
+# parent priced at the whole 170 MiB base plus 176 KiB of slope. The task
+# cgroup was sitting ~130-140 MiB from its ceiling, so a prediction dominated
+# by a base calibrated on a 1,400x larger parent refused every amend it saw
+# and the adopted graph stayed stale for the run. Below this parent size the
+# base is prorated linearly; at and above it the base stops growing, because
+# extrapolating past the measurement is not evidence either.
+_AMEND_MEMORY_FLOOR_CALIBRATION_NODES = 15_600
+# The smallest base a prediction may carry.
+#
+# NOT an observed producer RSS. The repository records no measurement of the
+# smallest peak RSS a gt-index amend has been seen to survive on - the only
+# producer memory numbers here are the two calibration points above, and the
+# 48 MiB GOMEMLIMIT floor in _index_child_environment carries no rationale
+# and is a Go heap target rather than an observed resident set. So this is
+# pinned to 64 MiB, the launch floor _run_index_bounded already refuses
+# below: a floor beneath that would predict a producer can run in memory the
+# guard would not even launch it with. Replace it with a measurement the
+# first time one exists.
+_AMEND_MEMORY_FLOOR_MIN_BYTES = 64 * 1024 * 1024
 
 
 def _batch_amend_memory_floor(parent_graph: Path, parent_manifest: Path) -> int:
     """Predicted peak RSS for one ``-amend-parent`` run over this parent.
 
     The number answers "would the current memory limit kill this child" —
-    nothing more. An unreadable parent scale falls back to the fixed base,
-    which still refuses the truly hopeless launches while the in-flight guard
-    bounds everything above it.
+    nothing more. The base is prorated by parent size up to the calibration
+    parent and flat above it; an unreadable parent scale therefore falls back
+    to the minimum base, which still refuses the truly hopeless launches while
+    the in-flight guard bounds everything above it.
     """
     nodes = 0
     try:
@@ -670,7 +1026,16 @@ def _batch_amend_memory_floor(parent_graph: Path, parent_manifest: Path) -> int:
         pass
     if not nodes:
         _files, nodes = _graph_scale(parent_graph)
-    return _AMEND_MEMORY_FLOOR_BASE_BYTES + nodes * _AMEND_MEMORY_FLOOR_PER_NODE_BYTES
+    # Integer arithmetic, not `round(base * min(1.0, nodes / calibration))`:
+    # the result is compared against a memory limit, so it must not depend on
+    # float rounding. The two agree to within a byte.
+    base = max(
+        _AMEND_MEMORY_FLOOR_MIN_BYTES,
+        _AMEND_MEMORY_FLOOR_BASE_BYTES
+        * min(nodes, _AMEND_MEMORY_FLOOR_CALIBRATION_NODES)
+        // _AMEND_MEMORY_FLOOR_CALIBRATION_NODES,
+    )
+    return base + nodes * _AMEND_MEMORY_FLOOR_PER_NODE_BYTES
 
 
 _SECRET_RUN = re.compile(r"[A-Za-z0-9_\-]{24,}")
@@ -839,6 +1204,7 @@ def _run_index_bounded(root: str, output: Path, log_dir: Path, *,
                 memory_limit_bytes=memory_limit,
                 cgroup_memory_current_before=before.get("current"),
                 cgroup_memory_max=before.get("max"),
+                **_cgroup_provenance(before),
             )
         binary = _resolved_binary_path()
         if not binary:
@@ -941,6 +1307,7 @@ def _run_index_bounded(root: str, output: Path, log_dir: Path, *,
             cgroup_memory_peak_after=after.get("peak"),
             cgroup_oom_delta=oom_delta,
             cgroup_oom_kill_delta=oom_kill_delta,
+            **_cgroup_provenance(before),
         )
     except (OSError, subprocess.SubprocessError):
         if process is not None:
@@ -1102,6 +1469,9 @@ def _write_index_evidence(
         "cgroup_memory_peak_after": result.cgroup_memory_peak_after,
         "cgroup_oom_delta": result.cgroup_oom_delta,
         "cgroup_oom_kill_delta": result.cgroup_oom_kill_delta,
+        "cgroup_version": result.cgroup_version,
+        "cgroup_limit_state": result.cgroup_limit_state,
+        "cgroup_headroom_basis": result.cgroup_headroom_basis,
     }
     return _sealed_json(path, payload, "evidence_sha256")
 
@@ -1926,7 +2296,17 @@ def _ensure_index_incremental_unlocked(
         # no producer ran, so nothing died — and the caller's defer window
         # waits the pressure out instead of paying minutes of doomed work.
         floor = _batch_amend_memory_floor(parent_graph, parent_manifest)
-        limit = _effective_index_memory_limit(_cgroup_snapshot())
+        # Keep the snapshot: limit alone cannot distinguish a genuinely full
+        # cgroup from a misread one, and the refusal reason is the only place
+        # the operator sees it. Run 35262214538 journaled nine refusals whose
+        # cause carried limit=0..12804096 against need=178438144 with no way
+        # to tell which. max/current decide it in one run.
+        _mem = _cgroup_snapshot()
+        limit = _effective_index_memory_limit(_mem)
+        _mem_note = (
+            f":cgroup_max={_mem.get('max')}current={_mem.get('current')}"
+            f"basis={_mem.get('headroom_basis', 'unknown')}"
+        )
         if limit < floor:
             # The floor prices a whole-parent pipeline run, so on a large
             # parent inside a small cgroup it can sit permanently above the
@@ -1947,7 +2327,7 @@ def _ensure_index_incremental_unlocked(
                     return (
                         None,
                         "GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT"
-                        f":batch_amend_floor:limit={limit}need={floor}"
+                        f":batch_amend_floor:limit={limit}need={floor}{_mem_note}"
                         f":incremental_amend_uncoverable:{fallback_refusal}",
                         results,
                     )
@@ -1955,7 +2335,7 @@ def _ensure_index_incremental_unlocked(
                 return (
                     None,
                     f"GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT:batch_amend_floor:"
-                    f"limit={limit}need={floor}",
+                    f"limit={limit}need={floor}{_mem_note}",
                     results,
                 )
 

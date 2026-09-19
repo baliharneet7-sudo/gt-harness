@@ -856,3 +856,178 @@ def test_the_bare_exit_message_survives_the_module_precondition():
     assert _classify_terminal(Exception("Submitted"), {}) == "submitted"
     foreign = type("Submitted", (Exception,), {"__module__": "pier.errors"})
     assert _classify_terminal(foreign("Submitted"), {}) == "submitted"
+
+
+# --------------------------------------------------------------------------- #
+# containment_lost: the boundary failed, the workspace did not
+# --------------------------------------------------------------------------- #
+
+
+def _git_task_workspace(path):
+    """A Pier-shaped task checkout sitting at a baseline commit."""
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "GT Test"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "gt-test@example.invalid"], cwd=path, check=True
+    )
+    (path / "source.py").write_text("before = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "source.py"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=path, check=True)
+
+
+def test_containment_lost_exits_zero_and_still_exports_the_patch(monkeypatch, tmp_path):
+    """A lost containment boundary is a harness fault over a GRADABLE workspace.
+
+    Run 35256147148 (amoffat__sh-744) raised command_descendant_receipt_missing
+    with 4,660 committed bytes in the tree. RuntimeError classified as
+    internal_error, exit 5, Pier errored the trial, `[[verifier.collect]]`
+    never ran, /logs/artifacts/model.patch was absent and the task graded 0.
+
+    `containment_lost` is the outcome that says so honestly: the harness could
+    not witness the descendant boundary, and like budget_exhausted it exits 0
+    because the workspace is there to be graded and the verifier must run.
+    """
+    import scripts.miniswe_gt_run as runner
+
+    _git_task_workspace(tmp_path)
+
+    class FakeAgent:
+        model = SimpleNamespace()
+        env = SimpleNamespace(runtime_layout=SimpleNamespace(excluded_roots=()))
+        n_calls = 12
+        cost = 0
+
+        def run(self, _task):
+            (tmp_path / "source.py").write_text("after = 2\n", encoding="utf-8")
+            raise runner.ContainmentLost(
+                "command_descendant_receipt_missing:containment_unwitnessed",
+                misses=3,
+                gap="containment_unwitnessed",
+                patch_state={"status": "observed", "committed_patch_bytes": 4660},
+            )
+
+    monkeypatch.setattr(runner, "build_agent", lambda **_kwargs: (FakeAgent(), None, None))
+    metrics = tmp_path / "metrics.json"
+    patch = tmp_path / "model.patch"
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "miniswe_gt_run.py", "--task", "fix it", "--cwd", str(tmp_path),
+            "--state-dir", str(tmp_path / "state"), "--metrics", str(metrics),
+            "--patch-output", str(patch), "--gt-off",
+        ],
+    )
+
+    assert runner.main() == TERMINAL_EXIT_CODES["containment_lost"] == 0
+    # The patch export still runs: the bytes are the point of not raising.
+    assert "after = 2" in patch.read_text(encoding="utf-8")
+    report = json.loads(metrics.read_text(encoding="utf-8"))
+    assert report["terminal"] == "containment_lost"
+    assert report["exit_code"] == 0
+    assert report["terminal_reason"] == (
+        "command_descendant_receipt_missing:containment_unwitnessed"
+    )
+    assert report["containment_gap_streak"] == 3
+    assert "ContainmentLost" in report["exception"]
+
+
+def test_containment_lost_is_never_reported_as_a_clean_pass(monkeypatch, tmp_path):
+    """Exit 0 is not "the agent submitted". The roster has to say so."""
+    from scripts.miniswe_gt_run import _NON_SUBMITTED_TERMINALS, ContainmentLost
+
+    assert "containment_lost" in _NON_SUBMITTED_TERMINALS
+    assert _classify_terminal(
+        ContainmentLost("x", misses=3, gap="containment_unwitnessed", patch_state={}),
+        {},
+    ) == "containment_lost"
+    # It is a RuntimeError, and RuntimeError is the generic wrapper type the
+    # provider MESSAGE contract reads: naming it in the class table first is
+    # what keeps it out of internal_error and off exit 5.
+    assert issubclass(ContainmentLost, RuntimeError)
+
+
+def test_failed_patch_export_does_not_overwrite_containment_lost(monkeypatch, tmp_path):
+    """The campaign-1 promotion rule must not undo the exit-0 guarantee.
+
+    Promotion exists so a claimed submission cannot be graded without the patch
+    it consists of. `containment_lost` claims nothing: promoting an export
+    failure over it would restore exactly the exit-5 trial error this terminal
+    was added to prevent.
+    """
+    import scripts.miniswe_gt_run as runner
+
+    # No git init: _repository_head finds no baseline and export raises, the
+    # terminal-bench workspace shape from cohort 35298094010.
+    class FakeAgent:
+        model = SimpleNamespace()
+        env = SimpleNamespace(runtime_layout=SimpleNamespace(excluded_roots=()))
+        n_calls = 5
+        cost = 0
+
+        def run(self, _task):
+            raise runner.ContainmentLost(
+                "command_descendant_receipt_missing:worker_start_failed",
+                misses=3, gap="worker_start_failed",
+                patch_state={"status": "observed", "untracked_paths": ["fix.py"]},
+            )
+
+    monkeypatch.setattr(runner, "build_agent", lambda **_kwargs: (FakeAgent(), None, None))
+    metrics = tmp_path / "metrics.json"
+    patch = tmp_path / "model.patch"
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "miniswe_gt_run.py", "--task", "fix it", "--cwd", str(tmp_path),
+            "--state-dir", str(tmp_path / "state"), "--metrics", str(metrics),
+            "--patch-output", str(patch), "--gt-off",
+        ],
+    )
+
+    assert runner.main() == 0
+    report = json.loads(metrics.read_text(encoding="utf-8"))
+    assert report["terminal"] == "containment_lost"
+    assert report["exit_code"] == 0
+    # Recorded, never silent - and never promoted.
+    assert "patch_export_error" in report
+
+
+def test_the_run_report_carries_every_containment_gap_not_only_the_last(
+    monkeypatch, tmp_path
+):
+    """Two gaps that never reached the limit are still the thing to look at."""
+    import scripts.miniswe_gt_run as runner
+
+    _git_task_workspace(tmp_path)
+
+    class FakeEnvironment:
+        runtime_layout = SimpleNamespace(excluded_roots=())
+        containment_gap_streak = 2
+        containment_gap_commands = 2
+        containment_gaps = ["containment_unwitnessed", "worker_start_failed"]
+
+    class FakeAgent:
+        model = SimpleNamespace()
+        env = FakeEnvironment()
+        n_calls = 9
+        cost = 0
+
+        def run(self, _task):
+            return {"exit_status": "Submitted", "submission": "done"}
+
+    monkeypatch.setattr(runner, "build_agent", lambda **_kwargs: (FakeAgent(), None, None))
+    metrics = tmp_path / "metrics.json"
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "miniswe_gt_run.py", "--task", "fix it", "--cwd", str(tmp_path),
+            "--state-dir", str(tmp_path / "state"), "--metrics", str(metrics),
+            "--gt-off",
+        ],
+    )
+
+    assert runner.main() == 0
+    report = json.loads(metrics.read_text(encoding="utf-8"))
+    # The run completed and submitted: the gaps do not change that terminal.
+    assert report["terminal"] == "submitted"
+    assert report["containment_gap_commands"] == 2
+    assert report["containment_gaps"] == ["containment_unwitnessed", "worker_start_failed"]

@@ -327,6 +327,106 @@ def validate_gt_off_control(
     }
 
 
+# Losing the containment WITNESS is not losing the workspace.
+#
+# Run 35256147148 (amoffat__sh-744) proved the difference costs a task. The
+# worker receipt was missing, `raise RuntimeError` fired from inside the
+# `finally:` below - replacing the in-flight result AND jumping over the
+# publish - and a workspace holding `committed_patch_bytes: 4660,
+# committed_patch_empty: false, repository_head_moved: true` was reported as
+# `internal_error`. Exit 5 makes Pier error the trial, so `[[verifier.collect]]`
+# never runs, `/logs/artifacts/model.patch` is absent and the task grades 0.
+# The model's work was thrown away to report that a RECEIPT was missing.
+#
+# Containment is a property of the harness. Where the workspace holds work the
+# gap is recorded and the run continues; where it is pristine there is nothing
+# to conserve and broken tooling still fails fast - after its evidence is
+# published, never instead of it.
+#
+# There are two ways to lose the witness and they cost exactly the same thing,
+# so they share one counter, one terminal and one refusal shape:
+#
+#   * no worker receipt at all - `worker_start_failed` /
+#     `containment_unwitnessed`, named by `_containment_gap` below;
+#   * a receipt that EXISTS and reports the boundary failed -
+#     `descendants_not_reaped`: the command was terminated and the descendants
+#     it left were never reaped. `containment_receipt_missing` is false there,
+#     because the receipt is exactly what says so.
+CONTAINMENT_GAP_LIMIT = 3
+
+# Enough of the spool to tell the interpreter's own failure from the command's
+# output. A start failure is a "No module named" line or a traceback; neither
+# is long, and reading the whole spool here would copy a capture that is
+# already on disk.
+_CONTAINMENT_SNIFF_BYTES = 4096
+_WORKER_ENTRYPOINT_TOKEN = "miniswe_supervisor"
+_PYTHON_NO_MODULE = re.compile(r"\A[^\n]*: No module named ")
+
+
+class ContainmentLost(RuntimeError):
+    """The descendant boundary stayed unwitnessed while the workspace had work.
+
+    A NAMED class, not a bare RuntimeError: `_EXCEPTION_TERMINAL` decides the
+    terminal by class name and an anonymous RuntimeError lands on
+    `internal_error` and exit 5 - the outcome this entire path exists to avoid.
+    """
+
+    def __init__(self, message: str, *, misses: int, gap: str, patch_state: dict):
+        super().__init__(message)
+        self.misses = misses
+        self.gap = gap
+        self.patch_state = patch_state
+
+
+def _containment_gap(returncode: int | None, spool_head: bytes, spool_size: int) -> str:
+    """Name WHY no worker receipt exists, from the child's own two facts.
+
+    `worker_start_failed` - the worker never ran the command. The child is
+    launched `python -I -m scripts.miniswe_supervisor`, and `-I` drops cwd,
+    PYTHONPATH and user-site from sys.path, so an uninstalled product makes
+    every contained command fail here (scripts/linux_suite_check.sh:55-61).
+    stderr is redirected into the SAME spool as stdout, so "no spool bytes"
+    cannot be the whole rule: the bytes have to be attributed, and the
+    interpreter's own "No module named" line or a traceback through the worker
+    entry point is not output from the command.
+
+    `containment_unwitnessed` - the command ran and no receipt was written
+    anyway. A zero exit says the worker completed; a NEGATIVE returncode says a
+    signal killed it, which means it was alive - `command_worker` writes the
+    receipt as its last statement before returning 0, so only a positive exit
+    status can be a failure to start.
+    """
+    if returncode is None or returncode <= 0:
+        return "containment_unwitnessed"
+    if spool_size <= 0:
+        return "worker_start_failed"
+    text = spool_head.decode("utf-8", "replace")
+    if _PYTHON_NO_MODULE.match(text):
+        return "worker_start_failed"
+    if (text.startswith("Traceback (most recent call last):")
+            and _WORKER_ENTRYPOINT_TOKEN in text):
+        return "worker_start_failed"
+    return "containment_unwitnessed"
+
+
+def _workspace_holds_work(state: dict) -> bool:
+    """True only where the workspace holds something a grader could read.
+
+    An UNOBSERVED state is not work. `submission_patch_state` reports
+    "unavailable" for a workspace with no git baseline, and a run that cannot
+    show any work is the pristine case: fail fast on broken tooling rather than
+    convert an unreadable workspace into a completed outcome.
+    """
+    if state.get("status") != "observed":
+        return False
+    committed = state.get("committed_patch_bytes")
+    return bool(
+        (isinstance(committed, int) and not isinstance(committed, bool) and committed > 0)
+        or state.get("uncommitted_tracked")
+        or state.get("untracked_paths")
+    )
+
+
 class CredentialIsolatedLocalEnvironment(LocalEnvironment):
     """Stock local execution semantics with host credentials removed.
 
@@ -342,6 +442,66 @@ class CredentialIsolatedLocalEnvironment(LocalEnvironment):
 
         self.evidence_store = EvidenceStore(
             evidence_root or tempfile.mkdtemp(prefix="gt-task-evidence-")
+        )
+        # The pre-run HEAD, set by main(). See _containment_receipt_missing:
+        # it is the only baseline that can answer "is there work here?" after
+        # the agent has already committed.
+        self._patch_baseline = ""
+        self.containment_gap_streak = 0
+        self.containment_gap_commands = 0
+        self.containment_gaps: list[str] = []
+
+    def _record_containment_gap(
+        self, output: dict, cwd: str, gap: str, refusal: str
+    ) -> BaseException | None:
+        """Record an unwitnessed boundary; return what to raise AFTER the publish.
+
+        The one decision both gap kinds share: does this workspace hold work?
+        The baseline is the one main() captured before the agent ran, never a
+        `_repository_head` read taken here - the agent's own commit moves HEAD,
+        so a baseline read at this moment diffs HEAD against itself and calls
+        every workspace that committed work pristine, exactly the runs this
+        path exists to conserve.
+        """
+        from scripts.miniswe_supervisor import submission_patch_state
+
+        state = submission_patch_state(Path(cwd), self._patch_baseline)
+        self.containment_gap_commands += 1
+        self.containment_gaps.append(gap)
+        output["extra"].update({
+            "descendant_scope": "linux_subreaper_unwitnessed",
+            "containment_gap": gap,
+            "submission_patch_state": state,
+        })
+        if not _workspace_holds_work(state):
+            return RuntimeError(refusal)
+        self.containment_gap_streak += 1
+        output["extra"]["containment_gap_streak"] = self.containment_gap_streak
+        if self.containment_gap_streak < CONTAINMENT_GAP_LIMIT:
+            return None
+        return ContainmentLost(
+            refusal, misses=self.containment_gap_streak, gap=gap, patch_state=state,
+        )
+
+    def _containment_receipt_missing(
+        self, output: dict, cwd: str, child, spool_path: Path
+    ) -> BaseException | None:
+        """No worker receipt: diagnose the sub-case, then record it as a gap."""
+        try:
+            spool_size = spool_path.stat().st_size
+            with spool_path.open("rb") as handle:
+                spool_head = handle.read(_CONTAINMENT_SNIFF_BYTES)
+        except OSError:
+            spool_size, spool_head = 0, b""
+        gap = _containment_gap(
+            child.returncode if child is not None else None, spool_head, spool_size
+        )
+        # Nothing was written, so nothing attests the capture. Where a receipt
+        # EXISTS these two come off it instead.
+        output["extra"]["containment_receipt_missing"] = True
+        output["extra"]["capture_complete"] = False
+        return self._record_containment_gap(
+            output, cwd, gap, f"command_descendant_receipt_missing:{gap}"
         )
 
     def execution_env(self) -> dict[str, str]:
@@ -370,6 +530,7 @@ class CredentialIsolatedLocalEnvironment(LocalEnvironment):
             canonical_json_bytes(child_env)
         ).hexdigest()
         interrupted = None
+        deferred: BaseException | None = None
         command_timeout = timeout if timeout is not None else self.config.timeout
         with tempfile.NamedTemporaryFile(
             dir=self.evidence_store.root, prefix="pending-", delete=False,
@@ -422,12 +583,19 @@ class CredentialIsolatedLocalEnvironment(LocalEnvironment):
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     child.wait()
                     output["returncode"] = child.returncode
-                if contained:
-                    if not worker_receipt.is_file():
-                        raise RuntimeError("command_descendant_receipt_missing")
+                if contained and not worker_receipt.is_file():
+                    # NOT a raise from inside `finally:`. That replaced the
+                    # in-flight result and jumped over the publish below, so a
+                    # missing RECEIPT cost the run both its evidence and its
+                    # grade (35256147148). Every refusal is deferred to after
+                    # publication now.
+                    spool.flush()
+                    os.fsync(spool.fileno())
+                    deferred = self._containment_receipt_missing(
+                        output, cwd, child, Path(spool.name)
+                    )
+                elif contained:
                     terminal = json.loads(worker_receipt.read_text())
-                    if terminal["reason"] != "exited" and not terminal.get("descendants_reaped"):
-                        raise RuntimeError("command_descendants_not_reaped")
                     output["returncode"] = terminal["returncode"]
                     output["extra"]["timed_out"] = terminal["reason"] == "deadline_exceeded"
                     if terminal["reason"] != "exited":
@@ -435,6 +603,21 @@ class CredentialIsolatedLocalEnvironment(LocalEnvironment):
                     output["extra"]["descendant_scope"] = "linux_subreaper"
                     output["extra"]["capture_complete"] = terminal["capture_complete"]
                     output["extra"]["surviving_descendants"] = terminal.get("surviving_descendants", [])
+                    if terminal["reason"] != "exited" and not terminal.get("descendants_reaped"):
+                        # The receipt exists and reports the boundary failed.
+                        # Same cost as no receipt at all if it raises here: the
+                        # publish below is skipped, internal_error, exit 5, the
+                        # trial is errored and nothing is graded. The receipt's
+                        # own facts - capture_complete, surviving_descendants -
+                        # are already recorded above and stay.
+                        spool.flush()
+                        os.fsync(spool.fileno())
+                        deferred = self._record_containment_gap(
+                            output, cwd, "descendants_not_reaped",
+                            "command_descendants_not_reaped",
+                        )
+                    else:
+                        self.containment_gap_streak = 0
                 else:
                     output["extra"]["descendant_scope"] = "windows_best_effort"
                 spool.flush()
@@ -448,6 +631,8 @@ class CredentialIsolatedLocalEnvironment(LocalEnvironment):
         })
         if interrupted is not None:
             raise interrupted
+        if deferred is not None:
+            raise deferred
         output["output"] = self.evidence_store.preview(
             reference, retrieval_result=bool(re.fullmatch(
                 r"\s*gt-evidence\s+read\s+[0-9a-f]{64}\s+\d+\s+\d+\s*", command
@@ -1090,6 +1275,11 @@ TERMINAL_EXIT_CODES = {
     "submitted_unverified": 0, # agent submitted but some obligations have NO evidence (UNKNOWN)
     "stuck": 0,               # completed solver outcome; workspace remains gradable
     "budget_exhausted": 0,    # completed solver outcome; workspace remains gradable
+    # The harness lost the descendant-containment WITNESS over a workspace that
+    # holds work. Exit 0 for the same reason budget_exhausted does: the
+    # workspace is gradable and the official verifier must run. Exit 5 here is
+    # what cost run 35256147148 its 4,660 committed bytes.
+    "containment_lost": 0,
     "timeout": 3,             # provider/command timeout
     "provider_failed": 4,     # provider refused/substituted the model
     "provider_model_mismatch": 4,
@@ -1101,7 +1291,8 @@ TERMINAL_EXIT_CODES = {
 # Terminal classes that must NEVER be reported as a clean pass.
 _NON_SUBMITTED_TERMINALS = {"stuck", "budget_exhausted", "timeout",
                             "provider_failed", "provider_model_mismatch",
-                            "internal_error", "setup_error", "task_failed"}
+                            "internal_error", "setup_error", "task_failed",
+                            "containment_lost"}
 
 # Exception class name -> terminal outcome (mini-swe raises these through
 # handle_uncaught_exception, which also writes an exit message).
@@ -1134,6 +1325,11 @@ _EXCEPTION_TERMINAL = {
     "ProviderModelMismatch": "provider_model_mismatch",
     "ResearchModelMismatch": "provider_model_mismatch",
     "RunnerTerminationRequested": "timeout",
+    # Ours, and named here so it is decided by the class table rather than
+    # falling through the ladder to internal_error: ContainmentLost is a
+    # RuntimeError, which is one of the generic wrapper types the
+    # wrapped-provider MESSAGE contract reads.
+    "ContainmentLost": "containment_lost",
     # Harness/OS faults, named rather than left to the default. Cohort
     # 35298094010 lost four SUBMITTED runs to `FileNotFoundError: 'git'` (a
     # terminal-bench container ships no git binary) and run 35262214538 had a
@@ -1243,12 +1439,11 @@ _WRAPPED_PROVIDER_TYPES = frozenset({Exception, RuntimeError, TimeoutError})
 # "BadRequestError from our own harness call" - is our own text about our own
 # fault and says nothing about the provider.  Case-sensitive on purpose: these
 # are class names.
-_WRAPPED_PROVIDER_NAMES = re.compile(
-    r"^(?:%s)$" % "|".join(sorted(_PROVIDER_EXCEPTION_NAMES))
-)
+_PROVIDER_NAME_ALTERNATION = "|".join(sorted(_PROVIDER_EXCEPTION_NAMES))
+_PROVIDER_ROOT_ALTERNATION = "|".join(_PROVIDER_MODULE_ROOTS)
+_WRAPPED_PROVIDER_NAMES = re.compile(rf"^(?:{_PROVIDER_NAME_ALTERNATION})$")
 _WRAPPED_PROVIDER_QUALIFIED = re.compile(
-    r"\b(?:%s)[\w.]*\.(?:%s)\b"
-    % ("|".join(_PROVIDER_MODULE_ROOTS), "|".join(sorted(_PROVIDER_EXCEPTION_NAMES)))
+    rf"\b(?:{_PROVIDER_ROOT_ALTERNATION})[\w.]*\.(?:{_PROVIDER_NAME_ALTERNATION})\b"
 )
 _WRAPPED_PROVIDER_PHRASE = "provider model mismatch"
 
@@ -1607,6 +1802,11 @@ def main() -> int:
                     "synthetic_transport": args.synthetic_transport}
     if session is not None:
         session._patch_baseline = patch_baseline
+    # The contained command path answers "is there work here?" against this
+    # exact pre-run baseline whenever the containment boundary goes unwitnessed.
+    environment = getattr(agent, "env", None)
+    if environment is not None:
+        environment._patch_baseline = patch_baseline
     result: dict = {}
     exception: BaseException | None = None
     gt_state: dict | None = None
@@ -1690,6 +1890,17 @@ def main() -> int:
     report["exit_code"] = TERMINAL_EXIT_CODES.get(
         terminal, TERMINAL_EXIT_CODES["internal_error"]
     )
+    # Every command that ran without a witnessed boundary, not only the last
+    # one and not only the runs that reached the limit: two gaps that were
+    # survived are still the thing a reader has to see.
+    gap_commands = getattr(environment, "containment_gap_commands", 0)
+    if isinstance(gap_commands, int) and gap_commands > 0:
+        report["containment_gap_commands"] = gap_commands
+        gaps = getattr(environment, "containment_gaps", [])
+        report["containment_gaps"] = list(gaps) if isinstance(gaps, list) else []
+    if isinstance(exception, ContainmentLost):
+        report["terminal_reason"] = str(exception)
+        report["containment_gap_streak"] = exception.misses
     if not gt_active:
         report["stats"] = {"n_calls": getattr(agent, "n_calls", 0),
                            "cost": getattr(agent, "cost", 0)}

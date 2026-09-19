@@ -57,32 +57,67 @@ def test_only_closed_supported_workflow_set_is_active() -> None:
     ).stdout
     active = sorted(PurePosixPath(line).name for line in listed.splitlines() if line.strip())
     # The set stays closed on purpose: an unreviewed workflow appearing here
-    # is a supply-chain event, not a detail. The two image mirrors are
-    # workflow_dispatch-only, touch no paid path, and exist to cut task-image
-    # pull latency; they are admitted by name rather than by loosening the rule.
-    # `installed_rehearsal.yml` is admitted the same way: it runs the installed
-    # full-flow rehearsal, which serves its own synthetic transport in-process
-    # and makes no provider call, so it touches no paid path. It exists because
-    # that rehearsal previously had exactly ONE reproducer -- a single
-    # workstation whose Docker Desktop 9p mount deadlocked two runs in
-    # `p9_client_rpc` -- and evidence nobody else can reproduce is weak
-    # evidence for a release gate. `swelive_gt_harness_paid.yaml` is the
-    # reviewed paid smoke path: workflow_dispatch-only, approval-gated by its
-    # own input, and bound to the manifest pins -- admitted by name, not by
-    # loosening the rule. `producer_build.yml` is admitted the same way: it
-    # is the certified producer-build lane (dispatch-only, builds the pinned
-    # Groundtruth gt-index binary with stamped source commit/fingerprint and
-    # static-link verification), touches no paid path, and exists so the
-    # producer artifact carries an auditable CI recipe rather than an
-    # unreproducible workstation build.
+    # is a supply-chain event, not a detail. Everything retired lives in
+    # `.github/workflows-archive/`, which Actions does not register, so an
+    # archived lane cannot be dispatched, triggered, called or spent -- see
+    # that directory's README. Each name below is admitted individually,
+    # never by loosening the rule:
+    #
+    # `deepswe_cache_images.yml` / `tb2_cache_images.yml` -- the two image
+    # mirrors. workflow_dispatch-only, touch no paid path, and exist to cut
+    # task-image pull latency.
+    #
+    # `deepswe_gt_harness_product.yml` -- the provider-free acceptance gate
+    # itself. workflow_call/workflow_dispatch only, holds no secret, and
+    # `scripts/validate_product_workflow.py` fails it closed if a manifest pin
+    # or the zero-spend assertion ever becomes unreachable from it.
+    #
+    # `deepswe_gt_harness_product_p0731.yaml` -- the paid DeepSWE lane. It is
+    # approval-gated by its own `approve_paid_run` input, runs the readiness
+    # gate above before any provider call, and is the caller the product
+    # workflow's own reachability step re-validates.
+    #
+    # `swelive_gt_harness_paid.yaml` -- the reviewed paid SWE-bench-Live smoke
+    # path: workflow_dispatch-only, approval-gated by its own input, and bound
+    # to the manifest pins.
+    #
+    # `swebench_live_lite_full.yml` -- the SWE-bench-Live dispatcher, and the
+    # only caller of `swelive_gt_harness_paid.yaml`. Retiring it would strand
+    # the paid lane behind a manual dispatch with hand-typed inputs, which is
+    # the shape that produced the wrong-arm runs this gate exists to prevent.
+    #
+    # `tb2_miniswe_central.yml` -- the TB2 central lane, and a caller of the
+    # product workflow. It carries the hardened secret sanitation (the U+FEFF
+    # regression in `tests/test_env_hardening.py`) and is the only supported
+    # way to run TB2 with GT on.
+    #
+    # `task_progress.yml` -- the progress monitor. workflow_call-only, takes no
+    # secret, spends nothing of its own, and is a declared dependency of the
+    # two central lanes and the engine; `tests/test_benchmark_progress.py` and
+    # `tests/test_benchmark_workflow_dependencies.py` both bind to it.
+    #
+    # `central_provider_free.yml` -- the provider-free half of the DeepSWE
+    # central lane, called by `deepswe_miniswe_central.yml`. No secret, no
+    # provider call.
+    #
+    # `deepswe_miniswe_central.yml` and `tb2_miniswe_engine.yml` -- admitted
+    # because campaign 1 hardened them (adapter import guard, monitor timeout
+    # ownership, ruff target guard) and the dependency tests in
+    # `tests/test_benchmark_workflow_dependencies.py` assert on their text.
+    # Archiving them would delete the subject of a passing regression test
+    # rather than the risk the test describes.
     assert active == [
+        "central_provider_free.yml",
         "deepswe_cache_images.yml",
         "deepswe_gt_harness_product.yml",
         "deepswe_gt_harness_product_p0731.yaml",
-        "installed_rehearsal.yml",
-        "producer_build.yml",
+        "deepswe_miniswe_central.yml",
+        "swebench_live_lite_full.yml",
         "swelive_gt_harness_paid.yaml",
+        "task_progress.yml",
         "tb2_cache_images.yml",
+        "tb2_miniswe_central.yml",
+        "tb2_miniswe_engine.yml",
     ]
 
 

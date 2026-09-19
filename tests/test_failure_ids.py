@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -138,6 +139,27 @@ def test_wrong_origin_is_a_lineage_refusal(tmp_path):
 
 
 def test_common_hook_installation_and_post_commit_contract_are_tracked():
+    """The common-hooks contract: installed for the whole repository, auto-push OPT-IN.
+
+    `.githooks/install` points core.hooksPath at the common `.githooks` for the
+    main worktree AND every linked worktree, so post-commit runs on every commit
+    made anywhere in the repository. Publishing every one of those commits is not
+    a default anybody can consent to per-commit - git ignores post-commit's exit
+    status, so a push it starts cannot be refused after the fact. The contract is
+    therefore:
+
+      * push only when `GNX_AUTOPUSH=1` is set in the committing environment;
+      * never push `main`, `master` or `release/*`, even when opted in - print a
+        one-line notice and exit 0;
+      * a push that is attempted and fails still appends a blocker to
+        `gnx-autopush.failures.log` under the git common dir.
+
+    The receipt records that contract as `post_commit.behavior ==
+    "opt-in-auto-push"`, and its per-hook `sha256` values must be the digests of
+    the shipped files' LF bytes - a receipt digest nobody recomputes is a receipt
+    for a file that is no longer there (the pre-commit entry was stale by three
+    edits before this assertion existed).
+    """
     repository = Path(__file__).resolve().parents[1]
     install = (repository / ".githooks" / "install").read_text(encoding="utf-8")
     pre_commit = (repository / ".githooks" / "pre-commit").read_text(encoding="utf-8")
@@ -156,6 +178,9 @@ def test_common_hook_installation_and_post_commit_contract_are_tracked():
     assert "git push --porcelain" in post_commit
     assert "GNX_PUSH_REMOTE" in post_commit
     assert "gnx-autopush.failures.log" in post_commit
+    # Auto-push is opt-in and refuses the protected branches.
+    assert '"${GNX_AUTOPUSH:-}" != "1"' in post_commit
+    assert "main|master|release/*" in post_commit
     for hook in (".githooks/install", ".githooks/pre-commit", ".githooks/post-commit"):
         index = subprocess.run(
             ["git", "-C", str(repository), "ls-files", "--stage", "--", hook],
@@ -172,7 +197,12 @@ def test_common_hook_installation_and_post_commit_contract_are_tracked():
     assert receipt["schema"] == "gt.hook_installation_receipt.v1"
     assert receipt["status"] == "PASS"
     assert all(hook["mode"] == "100755" for hook in receipt["hooks"])
-    assert receipt["post_commit"]["behavior"] == "preserved-auto-push"
+    assert receipt["post_commit"]["behavior"] == "opt-in-auto-push"
+    assert receipt["post_commit"]["enable_environment"] == "GNX_AUTOPUSH=1"
+    for entry in receipt["hooks"]:
+        shipped = (repository / entry["path"]).read_bytes()
+        shipped = shipped.replace(b"\r\n", b"\n")
+        assert entry["sha256"] == hashlib.sha256(shipped).hexdigest(), entry["path"]
 
 
 def test_pre_commit_direct_command_bootstraps_repository_import_path():

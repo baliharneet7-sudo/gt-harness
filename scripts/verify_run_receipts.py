@@ -19,6 +19,11 @@ this checks for are the ones that actually happened:
   * Cohort 35298094010: ``write-compressor`` and ``sanitize-git-repo`` were
     killed by the OOM killer during initial indexing. Those are not model
     results and must not be read as any.
+  * Run 35256147148 again, from the other side: the harness could not witness
+    the descendant-containment boundary. It no longer throws the workspace
+    away for that, which means the gap now survives as a WARNING in the
+    receipts instead of as an errored trial - and a warning nobody reads is
+    the defect this module exists for.
 
 Harbor exits 0 on an errored trial, so a green job is not evidence that
 anything was graded; that pairing is reported as a WARNING rather than a
@@ -36,8 +41,16 @@ failed - ``no_trial_found``, ``no_run_receipt``, ``ambiguous_trial``,
 ``read_error`` or ``no_decidable_check`` - and a ``resolution_detail`` naming
 what WAS found instead. The last one is the run receipt that parses and says
 nothing: every check UNKNOWN with none crashed means nothing about the run was
-decided, and a receipt of six UNKNOWNs over a real task id exiting 0 is the
+decided, and a receipt of seven UNKNOWNs over a real task id exiting 0 is the
 same false pass whichever door it came through.
+Nothing a receipt carries is trusted as text. A capture receipt is written
+inside the task container, where the model runs arbitrary shell, so every
+field this module interpolates into a ``::warning``/``::error`` line is
+escaped and length-bounded first (REVIEW-11 H-1: a planted ``containment_gap``
+carrying a newline opened a second workflow command, which the Actions runner
+obeyed), and a ``containment_gap`` outside the three names the runner writes is
+counted rather than quoted.
+
 Nothing here reruns, regrades or repairs anything: it reads artifacts and
 reports.
 """
@@ -45,10 +58,11 @@ reports.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -88,6 +102,41 @@ RESOLUTION_ERRORS = (
 # but a message is not a place to paste a receipt, and this detail is written
 # into a CI annotation.
 _READ_ERROR_TEXT_LIMIT = 200
+
+# GitHub parses a line beginning with ``::`` off a step's stdio as a WORKFLOW
+# COMMAND, so any byte this module interpolates into an annotation is a command
+# the runner will obey. The fields are all read off disk and the disk is the
+# task's: the capture receipts under ``agent/gt-state/**/output_evidence/`` are
+# written inside the container where the model runs arbitrary shell, and
+# ``task_id`` comes off a receipt from that same tree. REVIEW-11 H-1
+# reproduced it end to end on a real trial copy - a planted ``containment_gap``
+# of ``"x\n::stop-commands::hunter2\n::error title=Grader::TASK PASSED"``
+# printed three lines, of which the runner read two: ``::stop-commands``
+# silences this step's own ``::error`` on rc=1, and the forged ``::error
+# title=Grader::`` states a verdict nothing produced. ``::add-mask::`` from the
+# same hole rewrites the log.
+#
+# The escaping is GitHub's own, and the order matters: ``%`` first, or the
+# escapes it writes are themselves escaped.
+# https://docs.github.com/actions/reference/workflow-commands-for-github-actions
+_GH_MESSAGE_ESCAPES = (("%", "%25"), ("\r", "%0D"), ("\n", "%0A"))
+# A ``title=``/``file=`` value ends at a colon or a comma as well, so those two
+# are escaped there and NOT in message text - a check message is mostly colons
+# and commas and escaping them would make every annotation unreadable.
+_GH_PROPERTY_ESCAPES = ((":", "%3A"), (",", "%2C"))
+
+# How much of one interpolated field an annotation carries. A receipt field is
+# model-writable and unbounded; without this, one planted string floods the job
+# log and buries every annotation around it. The receipt FILE still carries the
+# whole message - it is a file, not a log line - so nothing is lost, only the
+# line is bounded.
+_ANNOTATION_FIELD_LIMIT = 512
+# ASCII on purpose. This string is printed to stderr, and _annotate_warnings
+# runs AFTER the receipt is written and before main decides its exit code, so
+# a UnicodeEncodeError on a console whose codepage cannot hold the character
+# would escape main as a traceback and rc 1 - which is this module's "these
+# receipts contradict each other" and must never mean anything else.
+_ANNOTATION_TRUNCATION = "...(truncated)"
 
 # How many file names the refusal detail lists before it says "+N more". The
 # list is what makes "no run receipt" falsifiable, and a trial's harness
@@ -396,6 +445,33 @@ def _bounded(value: object) -> str:
     return text[:_READ_ERROR_TEXT_LIMIT] + " (truncated)"
 
 
+def _gh_escape(value: object, *, is_property: bool = False) -> str:
+    """One annotation field: length-bounded, then command-syntax escaped.
+
+    Every field interpolated into a ``::warning``/``::error``/``::notice``
+    line goes through this, which a guard in tests/test_verify_run_receipts.py
+    enforces over the module source rather than over the call sites that
+    happen to exist: an annotation added later that pastes a receipt field in
+    directly is the same defect again.
+
+    ``is_property`` is for a ``title=`` value. No title here is interpolated
+    today; the mode exists so that one cannot become so unescaped.
+
+    The bound is applied to the RAW text so the limit counts source
+    characters rather than percent-escapes, and the escaping runs last so
+    nothing it emits can be cut in half.
+    """
+    text = str(value)
+    if len(text) > _ANNOTATION_FIELD_LIMIT:
+        text = text[:_ANNOTATION_FIELD_LIMIT] + _ANNOTATION_TRUNCATION
+    escapes = _GH_MESSAGE_ESCAPES
+    if is_property:
+        escapes = escapes + _GH_PROPERTY_ESCAPES
+    for char, replacement in escapes:
+        text = text.replace(char, replacement)
+    return text
+
+
 def _read_receipt_json(path: Path | None) -> dict[str, Any] | None:
     """A run receipt as a JSON object, raising when one is there unreadable.
 
@@ -576,8 +652,129 @@ def _int(value: Any) -> int | None:
     return int(value)
 
 
-def _result(check_id: str, severity: str, message: str) -> dict[str, str]:
-    return {"check_id": check_id, "severity": severity, "message": message}
+# A bound, because this walks a task artifact tree that also holds the
+# workspace checkout. A run makes one capture receipt per command; a few
+# hundred is every command a step limit allows.
+_CAPTURE_RECEIPT_LIMIT = 500
+
+# Where the runner actually writes them. ``RuntimeLayout.resolve``
+# (gt_engine/engine_state.py) puts the evidence store at
+# ``<state-dir>/<task_id>/output_evidence`` and scripts/miniswe_gt_run.py
+# spools each command's ``*.receipt.json`` into it, so a collected trial
+# carries them under ``agent/gt-state/<task>/output_evidence/`` and nowhere
+# else - checked against the real trial copies (.tmp-swelive-*), which hold
+# 23 of them, all inside this subtree. L-4 (round 10): the walk used to be
+# an ``rglob`` over the whole trial, which also descends the task's own
+# repository checkout, so any ``*.receipt.json`` a task happens to ship - a
+# fixture, a vendored package - could report this run's containment lost.
+_CAPTURE_RECEIPT_GLOB = "agent/gt-state/**/output_evidence/*.receipt.json"
+
+# The gap names scripts/miniswe_gt_run.py writes. A capture receipt is written
+# inside the task container, so ``containment_gap`` is a model-writable string
+# and not a name: REVIEW-11 H-1 planted a workflow command in it. A value
+# outside this set still COUNTS as a gap - the receipt says the boundary went
+# unwitnessed, and refusing to count it would let a planted value hide a real
+# one - but the string itself is dropped rather than carried into
+# receipt-consistency.json and from there into a CI annotation. The count of
+# them is reported instead, because "this receipt named a gap nothing here
+# recognises" is itself worth reading.
+_KNOWN_CONTAINMENT_GAPS = frozenset(
+    {"worker_start_failed", "containment_unwitnessed", "descendants_not_reaped"}
+)
+_UNRECOGNISED_GAP = "unrecognised_gap"
+
+
+def _capture_receipt_paths(inputs: Inputs) -> Iterator[Path]:
+    """The paths to walk, lazily, so the bound below can stop the WALK.
+
+    Confined to the evidence store when a trial was resolved. With no trial
+    there is no ``agent/`` to anchor on - the flat layout - and the only
+    honest answer is the whole root, which is what this did everywhere
+    before.
+    """
+    if inputs.trial is not None:
+        return inputs.trial.glob(_CAPTURE_RECEIPT_GLOB)
+    return inputs.root.rglob("*.receipt.json")
+
+
+def _containment_capture_receipts(
+    inputs: Inputs,
+) -> tuple[int, set[str], bool, int] | None:
+    """The per-command capture receipts that report an unwitnessed boundary.
+
+    Keyed on ``containment_gap``, which BOTH gap kinds write, and never on
+    ``containment_receipt_missing``: the unreaped-descendant gap is reported by
+    a worker receipt that exists, so that flag is absent there and a scan built
+    on it would read the run as clean.
+
+    ``None`` means they could not be read, which is this module's UNKNOWN: a
+    tree that cannot be walked has not been checked. A receipt that is not
+    JSON, or not an object, says nothing about containment and is skipped -
+    unlike the two RUN receipts, these are not read strictly, because the tree
+    holds files this checker knows nothing about (round 8, N-1).
+
+    The third element is "the walk hit the bound". L-4 (round 10): the bound
+    used to be applied AFTER ``sorted()``, which materialises every path in
+    the tree before it can bite - the cost the bound exists to avoid - and
+    then dropped the alphabetically LAST receipts, which is precisely what a
+    run that died late wrote. ``islice`` bounds the WALK, one path past the
+    limit so the caller can tell a full read from a cut-short one, and the
+    slice is sorted so what IS read is the same set in the same order twice.
+    Dropping the rest silently would make a partial scan look exhaustive, so
+    the caller says it out loud instead.
+
+    The fourth element is how many receipts named a gap outside
+    ``_KNOWN_CONTAINMENT_GAPS``. Their raw values never leave this function
+    (REVIEW-11 H-1): the set carries ``_UNRECOGNISED_GAP`` for all of them.
+    """
+    unwitnessed = 0
+    unrecognised = 0
+    gaps: set[str] = set()
+    try:
+        found = list(
+            itertools.islice(_capture_receipt_paths(inputs), _CAPTURE_RECEIPT_LIMIT + 1)
+        )
+        truncated = len(found) > _CAPTURE_RECEIPT_LIMIT
+        for path in sorted(found[:_CAPTURE_RECEIPT_LIMIT]):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            gap = payload.get("containment_gap")
+            if isinstance(gap, str) and gap:
+                unwitnessed += 1
+                if gap in _KNOWN_CONTAINMENT_GAPS:
+                    gaps.add(gap)
+                else:
+                    unrecognised += 1
+                    gaps.add(_UNRECOGNISED_GAP)
+    except OSError:
+        return None
+    return unwitnessed, gaps, truncated, unrecognised
+
+
+def _result(
+    check_id: str,
+    severity: str,
+    message: str,
+    *,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One check's entry. ``detail`` carries what a sentence cannot.
+
+    The key is omitted when there is nothing to say, so the receipt's shape
+    is unchanged for every check that never uses it.
+    """
+    result: dict[str, Any] = {
+        "check_id": check_id,
+        "severity": severity,
+        "message": message,
+    }
+    if detail is not None:
+        result["detail"] = detail
+    return result
 
 
 # --- checks ----------------------------------------------------------------
@@ -780,16 +977,135 @@ def check_oom_signature(inputs: Inputs, **_: Any) -> dict[str, str]:
     return _result(check_id, OK, f"child_returncode={supervisor.get('child_returncode')} reason={reason!r}")
 
 
+def check_containment_gap_reported(inputs: Inputs, **_: Any) -> dict[str, str]:
+    """Run 35256147148: containment was lost over 4,660 bytes of committed work.
+
+    The runner used to raise ``command_descendant_receipt_missing`` from inside
+    a ``finally:``, which skipped the publish, classified as ``internal_error``
+    and exited 5 - Pier errored the trial and nothing was graded. It now
+    conserves the workspace and records the gap, so the gap has to be READ
+    somewhere or the fix has merely made the failure quiet.
+
+    Two causes, one check: no worker receipt at all
+    (``worker_start_failed`` / ``containment_unwitnessed``), or a receipt that
+    exists and reports the descendants were never reaped
+    (``descendants_not_reaped``). Both cost the same thing when they raise, so
+    both are conserved the same way and both are read here.
+
+    WARNING, never CONTRADICTION: the two receipts do not disagree. The run is
+    gradable and the containment guarantee is not, and refusing the run for
+    saying so honestly would punish the report for being accurate.
+    """
+    check_id = "containment_gap_reported"
+    report = inputs.report
+    if not isinstance(report, dict):
+        return _result(check_id, UNKNOWN, "no miniswe_report.json to read")
+    terminal = report.get("terminal")
+    missing = _int(report.get("containment_gap_commands"))
+    misses = _int(report.get("containment_gap_streak"))
+    gaps = report.get("containment_gaps")
+    named = ", ".join(sorted({str(gap) for gap in gaps})) if isinstance(gaps, list) and gaps else ""
+    if terminal == "containment_lost":
+        count = misses if misses is not None else missing
+        return _result(
+            check_id,
+            WARNING,
+            f"terminal=containment_lost after {count} consecutive commands with an "
+            f"unwitnessed containment boundary{f' ({named})' if named else ''}; the "
+            "workspace was conserved, the descendant boundary was not",
+        )
+    if missing:
+        return _result(
+            check_id,
+            WARNING,
+            f"{missing} command(s) ran with an unwitnessed containment boundary"
+            f"{f' ({named})' if named else ''}; the run survived it, the guarantee "
+            "did not",
+        )
+    # The report may not exist yet when a run dies mid-command: the per-command
+    # capture receipt is written first and carries the same fact.
+    scanned = _containment_capture_receipts(inputs)
+    if scanned is None:
+        return _result(check_id, UNKNOWN, "the capture receipts could not be read")
+    unwitnessed, scanned_gaps, truncated, unrecognised = scanned
+    # The marker rides on whatever this path decides, because a scan that
+    # stopped at the bound is a partial one whether or not it happened to
+    # find a gap before it stopped.
+    detail: dict[str, Any] = {}
+    if truncated:
+        detail.update(truncated=True, capture_receipts_read=_CAPTURE_RECEIPT_LIMIT)
+    if unrecognised:
+        detail["unrecognised_gaps"] = unrecognised
+    cut = (
+        f"; the capture-receipt scan was truncated at {_CAPTURE_RECEIPT_LIMIT} "
+        "receipts and the rest were not read"
+        if truncated
+        else ""
+    )
+    odd = (
+        f"; {unrecognised} of them named a gap this checker does not recognise, "
+        f"counted as {_UNRECOGNISED_GAP} with the model-written value dropped"
+        if unrecognised
+        else ""
+    )
+    if unwitnessed:
+        return _result(
+            check_id,
+            WARNING,
+            f"{unwitnessed} capture receipt(s) report a containment gap "
+            f"({', '.join(sorted(scanned_gaps))}) while miniswe_report.json "
+            f"does not{odd}{cut}",
+            detail=detail or None,
+        )
+    if not isinstance(terminal, str) or not terminal:
+        # Nothing said anything: no terminal, no counter, no capture receipt.
+        # Absence of evidence is UNKNOWN here, and it has to stay UNKNOWN or a
+        # receipt that decides nothing walks past the no_decidable_check gate.
+        return _result(
+            check_id,
+            UNKNOWN,
+            f"miniswe_report.json carries no terminal and no containment fields{cut}",
+            detail=detail or None,
+        )
+    if truncated:
+        # M-2 (REVIEW-11): the marker went into the detail and the severity
+        # stayed OK, so a scan that never looked was annotated by nothing and
+        # read as a pass. Flooding ``output_evidence`` with inert
+        # ``*.receipt.json`` names is reachable from inside the task
+        # container, and 501 of them push a genuine gap receipt out of the
+        # bounded walk. The flood is itself the signal: a run writes one
+        # capture receipt per command and a step limit allows a few hundred,
+        # so past the bound is not a normal run. WARNING, not UNKNOWN: this
+        # check did look, at a tree that was made unreadable, and UNKNOWN here
+        # would feed the no_decidable_check refusal a verdict it did not earn.
+        return _result(
+            check_id,
+            WARNING,
+            f"terminal={terminal!r}; no containment gap in the "
+            f"{_CAPTURE_RECEIPT_LIMIT} capture receipts read, but the scan was "
+            "truncated at that bound and the rest were not read, so this check "
+            f"did not decide whether one was reported{odd}",
+            detail=detail or None,
+        )
+    return _result(
+        check_id,
+        OK,
+        f"terminal={terminal!r}; no containment gap reported{odd}",
+        detail=detail or None,
+    )
+
+
 # Each check is registered under the id it reports, so the refusal receipt
 # can name every check without running a single one. The pairing is guarded
 # by a test that compares these ids with what the checks actually report.
-CHECKS: tuple[tuple[str, Callable[..., dict[str, str]]], ...] = (
+CHECKS: tuple[tuple[str, Callable[..., dict[str, Any]]], ...] = (
     ("child_exit_vs_terminal", check_child_exit_vs_terminal),
     ("committed_work_vs_empty_submission", check_committed_work_vs_empty_submission),
     ("valid_run_vs_infra_state", check_valid_run_vs_infra_state),
     ("provider_failed_without_provider_failures", check_provider_failed_without_provider_failures),
     ("green_job_zero_graded", check_green_job_zero_graded),
     ("oom_signature", check_oom_signature),
+    ("containment_gap_reported", check_containment_gap_reported),
 )
 
 CHECK_IDS: tuple[str, ...] = tuple(check_id for check_id, _check in CHECKS)
@@ -804,7 +1120,7 @@ def run_checks(
     """Every check, always, in a fixed order - a silent check is a missing one.
 
     A check that raises is that one check's UNKNOWN, carrying the exception,
-    and the other five still run. H-2 (round 6): one failing check used to
+    and the others still run. H-2 (round 6): one failing check used to
     take the whole run down to the refusal receipt - six UNKNOWNs and exit 2 -
     which erased the contradictions the remaining checks had already found,
     and reported "the receipts could not be read" about receipts that had
@@ -836,7 +1152,7 @@ def run_checks(
                     submitted_patch_bytes=submitted_patch_bytes,
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - one broken check, five good ones
+        except Exception as exc:  # noqa: BLE001 - one broken check, the rest good
             crashed: dict[str, Any] = dict(
                 _result(
                     check_id,
@@ -960,8 +1276,34 @@ def _unresolved(exc: BaseException, json_path: str | None) -> int:
     """
     detail = f"{type(exc).__name__}: {exc}"
     _emit(build_unresolved_receipt("read_error", detail), json_path)
-    print(f"::error title=Unresolved receipts::{detail}", file=sys.stderr)
+    print(f"::error title=Unresolved receipts::{_gh_escape(detail)}", file=sys.stderr)
     return 2
+
+
+def _annotate_warnings(receipt: dict[str, Any], inputs: Inputs) -> None:
+    """Print one ``::warning`` per WARNING check, after the receipt is written.
+
+    L-3 (round 10): WARNING existed only inside receipt-consistency.json. The
+    process printed ``::error`` and nothing else and exited 0 for a warning,
+    so ``containment_gap_reported`` and ``green_job_zero_graded`` - both of
+    which exist because the failure they name is now QUIET - reached nobody
+    without a download. "A warning nobody reads" is this module's own phrase
+    for what it was doing.
+
+    Only WARNING. INFO is a fact about the run (an oom signature), UNKNOWN is
+    the absence of an input, and OK is nothing at all; annotating those would
+    bury the two lines that matter. The exit code is untouched: a WARNING is
+    not a contradiction and must never redden a job.
+    """
+    label = receipt.get("task_id") or str(inputs.trial or inputs.root)
+    for check in receipt["checks"]:
+        if check.get("severity") != WARNING:
+            continue
+        print(
+            f"::warning title=Receipt warning::{_gh_escape(label)}: "
+            f"{_gh_escape(check['check_id'])}: {_gh_escape(check['message'])}",
+            file=sys.stderr,
+        )
 
 
 def _emit(receipt: dict[str, Any], json_path: str | None) -> bool:
@@ -982,7 +1324,8 @@ def _emit(receipt: dict[str, Any], json_path: str | None) -> bool:
             print(text)
     except (OSError, ValueError) as exc:
         print(
-            f"::error title=Receipt not written::{type(exc).__name__}: {exc}",
+            "::error title=Receipt not written::"
+            f"{_gh_escape(f'{type(exc).__name__}: {exc}')}",
             file=sys.stderr,
         )
         return False
@@ -1019,7 +1362,7 @@ def main(argv: list[str] | None = None) -> int:
         inputs = load_inputs(Path(args.artifact_dir))
     except AmbiguousTrialError as exc:
         _emit(build_unresolved_receipt("ambiguous_trial", str(exc)), args.json_path)
-        print(f"::error title=Ambiguous trial::{exc}", file=sys.stderr)
+        print(f"::error title=Ambiguous trial::{_gh_escape(exc)}", file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - the net below, at the read stage
         return _unresolved(exc, args.json_path)
@@ -1049,10 +1392,10 @@ def main(argv: list[str] | None = None) -> int:
         error = "no_trial_found" if inputs.trial is None else "no_run_receipt"
         detail = _unresolved_detail(inputs)
         _emit(build_unresolved_receipt(error, detail), args.json_path)
-        print(f"::error title=Unresolved receipts::{detail}", file=sys.stderr)
+        print(f"::error title=Unresolved receipts::{_gh_escape(detail)}", file=sys.stderr)
         return 2
     # run_checks contains a failing check itself now, so this net no longer
-    # decides the verdict of five working checks (H-2). It stays because the
+    # decides the verdict of the working checks (H-2). It stays because the
     # assembly around them can still break - ``_result`` itself, or
     # build_receipt reading task_id off a malformed receipt - and rc=1 must
     # mean "the receipts contradict each other" and nothing else, ever.
@@ -1068,7 +1411,7 @@ def main(argv: list[str] | None = None) -> int:
     # Round 9: the third door. A gt-run.json that parses as an object but
     # carries no key any check reads resolved the task, made every check
     # UNKNOWN, and exited 0 - six UNKNOWNs over a real task id, the shape the
-    # two gates above exist to refuse. Six of six UNKNOWN with nothing crashed
+    # two gates above exist to refuse. Every check UNKNOWN with nothing crashed
     # is a run about which nothing was decided, and that is unresolved by
     # definition. A real receipt decides at least one check, so a healthy run
     # cannot trip this: the shipped emitter writes ~25 keys.
@@ -1079,9 +1422,10 @@ def main(argv: list[str] | None = None) -> int:
     ):
         detail = _undecidable_detail(inputs)
         _emit(build_unresolved_receipt("no_decidable_check", detail), args.json_path)
-        print(f"::error title=Unresolved receipts::{detail}", file=sys.stderr)
+        print(f"::error title=Unresolved receipts::{_gh_escape(detail)}", file=sys.stderr)
         return 2
     written = _emit(receipt, args.json_path)
+    _annotate_warnings(receipt, inputs)
     # The order is the whole point. rc 1 means "these receipts contradict each
     # other" and it is decided by what was found on disk, so nothing that
     # happened afterwards may downgrade it: L-5 (round 6) had an unwritable

@@ -1,0 +1,5 @@
+# The hooks are POSIX shell and Python executed by git and by `sh`; a CRLF
+# checkout (core.autocrlf=true, the Windows default) makes `sh` fail on the
+# shebang line. failure-gate.json and the installation receipt are compared
+# byte-for-byte, so they are pinned for the same reason.
+* text eol=lf

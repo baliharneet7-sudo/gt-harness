@@ -17,6 +17,14 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+# The closed vocabulary of DESIGNED delivery refusals, imported from the
+# module that owns the ceilings those reasons name. delivery_budget imports
+# nothing from this package (only ``re``), so this is a leaf dependency and
+# not a cycle. A refusal in this vocabulary is GT declining to deliver on
+# purpose, which is suppression with a named reason - not a feature that
+# fired into the dark.
+from .delivery_budget import DELIVERY_REFUSAL_REASONS
+
 DIRECT_FEATURES: dict[str, dict[str, Any]] = {
     "caller_contract": {
         "kind": "FACT", "boundaries": ("file_view", "edit_result"),
@@ -676,6 +684,87 @@ def summarize_features(
             if reason not in summary[feature_id]["reasons"]:
                 summary[feature_id]["reasons"].append(reason)
 
+    # The ladder above is a MAX over records and it CLEARS the reason list on
+    # a priority increase, so no per-record decision can express "this feature
+    # was ONLY ever refused by a designed ceiling" - a budget reason at
+    # priority 2 would outrank, and erase, a TRIGGERED_DARK reason recorded in
+    # a different row (and, in the other record order, be erased by it). The
+    # budget route therefore writes nothing to the ladder while rows stream;
+    # it is accumulated here and resolved once, below, against everything the
+    # feature earned. This leaves ``update`` and the priority numbers alone.
+    #
+    # HOW THIS DIFFERS FROM THE PINNED HEAD, precisely (REVIEW-11 M-3). This
+    # is NOT a no-op; the earlier "zero diff vs HEAD in status and reasons"
+    # wording was wrong. What is true, exactly: on every artifact in this repo
+    # the STATUS of every feature is identical to HEAD's, and the reason lists
+    # are set-equal EXCEPT that a designed refusal now survives onto a
+    # higher-status record in every arrival order. Two shapes diverge, both of
+    # them HEAD being order-dependent and this code not:
+    #
+    #   1. Reason ORDER. HEAD appended in arrival order, so a
+    #      refusal-then-dark record pair read
+    #      ['localization_fire_once', 'unexplained_miss'] while the reversed
+    #      pair read ['unexplained_miss', 'localization_fire_once']. Here the
+    #      dark reasons always come first (in arrival order among themselves)
+    #      and the refusals follow, sorted, so BOTH orders now produce
+    #      ['unexplained_miss', 'localization_fire_once']. Consumers read
+    #      reasons as a set (scripts/gt_live_gate.py:401) and nothing hashes
+    #      this projection, so order-independence is an improvement, not a
+    #      break - but "zero diff" is only true as a SET comparison.
+    #
+    #   2. Reason RESURRECTION, and it is intended. HEAD's ``update`` clears
+    #      the reason list on a priority increase, so a refusal that arrived
+    #      BEFORE a delivery was erased by it: refusal-then-delivery gave
+    #      DELIVERED_UNEXPOSED with ['sealed_and_delivered'], while
+    #      delivery-then-refusal kept ['sealed_and_delivered',
+    #      'localization_fire_once']. The finalisation below runs after every
+    #      row, so the refusal now survives onto the higher-status record in
+    #      BOTH orders. A designed refusal that actually happened is evidence
+    #      and belongs on the receipt whatever order the rows arrived in;
+    #      HEAD's answer was a function of arrival order rather than of what
+    #      GT did. The STATUS is unchanged either way - the higher priority
+    #      still wins.
+    budget_reasons: dict[str, list[str]] = {}
+    dark_reasons: dict[str, list[str]] = {}
+
+    def note_budget(feature_id: str, reason: str) -> None:
+        """Record a designed-refusal reason without touching the ladder."""
+        if feature_id not in summary or not reason:
+            return
+        seen = budget_reasons.setdefault(feature_id, [])
+        if reason not in seen:
+            seen.append(reason)
+
+    def mark_dark(feature_id: str, reason: str) -> None:
+        """Raise TRIGGERED_DARK and remember that this feature went dark."""
+        if feature_id in summary and reason:
+            seen = dark_reasons.setdefault(feature_id, [])
+            if reason not in seen:
+                seen.append(reason)
+        update(feature_id, "TRIGGERED_DARK", reason)
+
+    def resolve_budget_reasons() -> None:
+        """Fold the deferred refusals in once every row has been accounted.
+
+        A feature with ANY dark evidence stays TRIGGERED_DARK and carries its
+        dark reasons first, then the refusals, in every record order - so the
+        audit-side conjunction in ``scripts/gt_audit.py`` (excuse a RED
+        feature only when EVERY reason is in the closed vocabulary) still sees
+        the unexplained reason and still calls it RED. A feature whose only
+        dark-side evidence is designed refusals is named suppression. Both go
+        through ``update``, so a higher-priority status already earned
+        (DELIVERED_UNEXPOSED and up) still wins, unchanged - though it now
+        carries the refusal reason in every arrival order rather than only
+        when the refusal row happened to arrive last (see the note above).
+        """
+        for feature_id, reasons in budget_reasons.items():
+            status = (
+                "TRIGGERED_DARK" if dark_reasons.get(feature_id)
+                else "SUPPRESSED_WITH_REASON"
+            )
+            for reason in sorted(reasons):
+                update(feature_id, status, reason)
+
     delivery_to_features: dict[str, list[str]] = {}
     exposed_ids: set[str] = set()
     response_ids: set[str] = set()
@@ -810,11 +899,34 @@ def summarize_features(
             feature_id = str(payload.get("feature_id") or "")
             if bool(payload.get("eligible")):
                 outcome = str(payload.get("outcome") or "")
-                update(
-                    feature_id,
-                    "TRIGGERED_DARK",
-                    outcome or "producer_abstained",
-                )
+                # scripts/gt_audit.py::_native_feature_projection projects a
+                # ``delivery_refused`` row into this event with the refusal
+                # reason as the outcome. Reported as TRIGGERED_DARK, a ceiling
+                # GT declined on purpose reads as "fired and the model never
+                # got it, unexplained".
+                #
+                # The evidence, stated exactly (REVIEW-11 M-4). SWE-Live
+                # attestation run 35252797829, aiogram__aiogram-1594, shows
+                # the refusal SHAPE and only that: 16 ``delivery_refused``
+                # rows, 9 localization_task_ceiling / 5 boundary_claim_ceiling
+                # / 2 localization_fire_once. It does NOT show the defect - on
+                # that run the refused features (localization, cochange_prior)
+                # are also delivered and witnessed, so they reach WITNESSED
+                # with empty reasons under HEAD and under this code alike, and
+                # the refusal decided no status. The defect is the invariant,
+                # not that run: a feature whose ONLY dark-side evidence is a
+                # designed refusal must not be reported TRIGGERED_DARK. No
+                # local artifact exhibits it; the hand-built fixture
+                # tests/fixtures/attribution/refused_never_witnessed.events.jsonl
+                # does, and pins the delta against HEAD's module.
+                #
+                # Only the closed vocabulary is excused, and only by the
+                # finalisation below: any other outcome stays dark, and a
+                # feature that ALSO went dark stays dark whatever the order.
+                if outcome in DELIVERY_REFUSAL_REASONS:
+                    note_budget(feature_id, outcome)
+                else:
+                    mark_dark(feature_id, outcome or "producer_abstained")
             else:
                 update(
                     feature_id,
@@ -855,7 +967,7 @@ def summarize_features(
             ]
             for feature_id in feature_ids:
                 if outcome == "returned_fact":
-                    update(feature_id, "TRIGGERED_DARK", "candidate_returned")
+                    mark_dark(feature_id, "candidate_returned")
                 elif "instrumentation_gap" in categories or outcome == "fault":
                     update(
                         feature_id,
@@ -877,8 +989,20 @@ def summarize_features(
                     for reason in reason_names or ["required_input_absent"]:
                         update(feature_id, "INELIGIBLE", reason)
                 else:
+                    # No producer currently abstains with a budget reason - the
+                    # runtime writes those to ``delivery_refused`` instead - so
+                    # this is defence in depth, keyed on the reason because the
+                    # emitter lives in gt_engine/delivery_budget.py and attaches
+                    # no category. Reasons are split, not judged as a record:
+                    # a refusal is deferred to the finalisation, anything else
+                    # is dark immediately, so a mixed record is dark and keeps
+                    # both - identical to a dark row and a refusal row arriving
+                    # separately, in either order.
                     for reason in reason_names or ["producer_abstained"]:
-                        update(feature_id, "TRIGGERED_DARK", reason)
+                        if reason in DELIVERY_REFUSAL_REASONS:
+                            note_budget(feature_id, reason)
+                        else:
+                            mark_dark(feature_id, reason)
             continue
         if event_type == "control.decision":
             feature_id = str(payload.get("feature_id") or "")
@@ -905,6 +1029,8 @@ def summarize_features(
                 update(feature_id, "TELEMETRY_FAULT", reason)
             elif feature_id:
                 update(feature_id, "INELIGIBLE", reason)
+
+    resolve_budget_reasons()
 
     consistent_actions = {
         "target_referenced",
