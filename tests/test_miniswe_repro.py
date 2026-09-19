@@ -3,12 +3,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import inspect
-from types import MethodType
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import MethodType
 
 import pytest
 
@@ -834,7 +834,7 @@ def test_terminal_capture_observes_a_call_that_bypasses_query(tmp_path):
     native_query = FakeModel.query  # as GT captures it, before the recorder
     native_query(model, [{"role": "user", "content": "bootstrap"}])
     for step in range(8):
-        model.query([{"role": "user", "content": "step %d" % step}])
+        model.query([{"role": "user", "content": f"step {step}"}])
     rows = _rows(observer)
     assert len([r for r in rows if r["event"] == "provider_request"]) == 9
     assert len([r for r in rows if r["event"] == "provider_response"]) == 9

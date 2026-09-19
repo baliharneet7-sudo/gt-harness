@@ -721,7 +721,7 @@ def test_the_receipt_is_not_injective_in_the_account_balance(
         assert receipt["funds_headroom_bucket"] == bucket
         assert receipt["account_amounts_recorded"] is False
         assert "available_usd" not in receipt
-    for balance, (_, written) in zip(balances, receipts):
+    for balance, (_, written) in zip(balances, receipts, strict=True):
         # Neither the balance nor the usage figure may survive into the artifact.
         assert str(balance) not in written
         assert str(usage) not in written

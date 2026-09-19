@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = (
     ROOT / ".github" / "workflows" / "tb2_miniswe_central.yml",
