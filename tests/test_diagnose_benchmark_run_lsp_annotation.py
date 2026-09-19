@@ -78,8 +78,22 @@ def _plant_task(root: Path, task_id: str, receipts: list[dict] | None) -> Path:
     return root / task_id
 
 
-def _run(tmp_path: Path, monkeypatch, capsys, rows: list[dict]) -> tuple[str, str]:
-    """Render one report; return (stderr, step summary markdown)."""
+def _run(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    rows: list[dict],
+    diagnostics: list | None = None,
+    *,
+    github_actions: bool = False,
+) -> tuple[str, str]:
+    """Render one report; return (stderr, step summary markdown).
+
+    ``GITHUB_ACTIONS`` is always set, never merely left alone: whether this
+    widget emits workflow-command lines is the thing under test in the
+    injection cases below, and inheriting the runner's own value would make
+    every other case here mean something different on CI than on a laptop.
+    """
     payload = {
         "tasks": [
             {"task_id": row["task_id"], "primary_diagnostic": "none",
@@ -96,8 +110,13 @@ def _run(tmp_path: Path, monkeypatch, capsys, rows: list[dict]) -> tuple[str, st
         def to_mapping(self):
             return payload
 
+    # Assigned after the class body: a class body is not a closure over the
+    # enclosing function's locals.
+    _Report.diagnostics = list(diagnostics or [])
+
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("GITHUB_ACTIONS", "true" if github_actions else "false")
     monkeypatch.setattr(diagnose, "diagnose_artifact_root", lambda *a, **k: _Report())
     exit_code = diagnose.main(["--root", str(tmp_path)])
     assert exit_code == 0, "annotation must not move the exit code"
@@ -454,3 +473,333 @@ def test_a_relative_root_still_anchors_the_trials_below_it(tmp_path, monkeypatch
     assert diagnose._task_dirs_by_id(Path(".")) == {
         "rust-task": Path("tb2-gt-job-1") / "rust-task__9f3c1a2b"
     }
+
+
+# --- nothing this widget prints may be a workflow command -------------------
+# REVIEW-12 MEDIUM. GitHub reads a line that BEGINS with ``::`` off a step's
+# stdio as a workflow command. Every field below is read out of an artifact
+# the model wrote inside its own container: a capability row's ``evidence``
+# and ``capability`` come straight off ``agent/diagnostics.json``, and a
+# diagnostics event's ``task_id`` and ``phase`` are ``str(row.get(...))`` in
+# gt_engine.run_diagnostics._load_events with no character class imposed.
+#
+# ``normalized_cause`` is the field REVIEW-12 named and the one that was
+# already safe - ``DiagnosticEvent.normalized_cause`` is ``_normalize(cause)``,
+# i.e. ``[a-z0-9_]`` and nothing else. It carries the payload here anyway,
+# because what this pins is the RENDERER: the day the renderer prints a raw
+# ``cause``, or ``_normalize`` is relaxed, the hole is back and nothing else
+# in the suite would notice.
+#
+# The payload is REVIEW-11 H-1's, reproduced end to end on a real trial copy:
+# three lines of which the runner reads two. ``::stop-commands`` silences
+# every later annotation in the job - including this step's own ``::error``
+# on a failing run - and the forged ``::error title=Grader::`` states a
+# verdict nothing produced.
+_INJECTION = "x\n::stop-commands::hunter2\n::error title=Grader::TASK PASSED"
+
+
+class _Code:
+    """``event.code`` is a closed StrEnum; the stub carries only ``.value``."""
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+class _Event:
+    """One diagnostics event as ``diagnose.main`` consumes it.
+
+    A real ``DiagnosticEvent`` cannot be built with this text in
+    ``normalized_cause``, which is exactly why the renderer is pinned against
+    a stub: this must fail when the renderer stops escaping, not only when
+    the producer stops normalizing.
+    """
+
+    def __init__(
+        self, severity: str, code: str, task_id: str, phase: str, cause: str
+    ) -> None:
+        self.severity = severity
+        self.code = _Code(code)
+        self.task_id = task_id
+        self.phase = phase
+        self.normalized_cause = cause
+
+
+def _commands(stderr: str) -> list[str]:
+    """Every line of ``stderr`` the Actions runner would obey as a command."""
+    return [line for line in stderr.split("\n") if line.startswith("::")]
+
+
+def test_a_planted_diagnostic_cannot_open_a_second_workflow_command(
+    tmp_path, monkeypatch, capsys
+):
+    """One event, one annotation - whatever the event's text contains."""
+    event = _Event("ERROR", "GT_PROVIDER_FAILED", _INJECTION, _INJECTION, _INJECTION)
+
+    stderr, _ = _run(tmp_path, monkeypatch, capsys, [], [event], github_actions=True)
+
+    commands = _commands(stderr)
+    assert len(commands) == 1, stderr
+    assert commands[0].startswith("::error title=GT_PROVIDER_FAILED::")
+    assert not any(line.startswith("::stop-commands") for line in stderr.split("\n"))
+    assert not any(
+        line.startswith("::error title=Grader") for line in stderr.split("\n")
+    )
+    # Inert, not dropped: the payload is still readable inside the one line.
+    assert "%0A" in commands[0]
+    assert "hunter2" in commands[0]
+
+
+def test_a_planted_capability_row_cannot_forge_an_annotation(
+    tmp_path, monkeypatch, capsys
+):
+    """The capability line interpolates ``evidence``, which is model-written."""
+    stderr, _ = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [_capability_row("t", evidence=_INJECTION)],
+        github_actions=True,
+    )
+
+    commands = _commands(stderr)
+    assert len(commands) == 1, stderr
+    assert commands[0].startswith("::error title=capability_not_working::")
+    assert not any(line.startswith("::stop-commands") for line in stderr.split("\n"))
+    assert "%0A" in commands[0]
+
+
+def test_the_human_stderr_line_is_never_a_workflow_command_either(
+    tmp_path, monkeypatch, capsys
+):
+    """The plain ``[GT]`` line is printed to the same stream the runner parses.
+
+    Escaping only the ``::`` line would leave the hole wide open: the runner
+    does not care which print statement a line came from, and this one is
+    printed whether or not ``GITHUB_ACTIONS`` is set.
+    """
+    event = _Event("WARNING", "GT_SETUP_ERROR", "t", _INJECTION, "ok")
+
+    stderr, _ = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [_capability_row("t", evidence=_INJECTION)],
+        [event],
+        github_actions=False,
+    )
+
+    assert _commands(stderr) == [], stderr
+    # The lines are still there, and still say what happened.
+    assert "[GT][WARNING][GT_SETUP_ERROR]" in stderr
+    assert "[GT][CAPABILITY][DEGRADED] lsp_promotion" in stderr
+
+
+def test_a_severity_chooses_the_annotation_kind(tmp_path, monkeypatch, capsys):
+    """WARNING is a ``::warning``; the routing survives the escaping change."""
+    event = _Event("WARNING", "GT_SETUP_ERROR", "t", "setup", "boom")
+
+    stderr, _ = _run(tmp_path, monkeypatch, capsys, [], [event], github_actions=True)
+
+    assert _commands(stderr) == [
+        "::warning title=GT_SETUP_ERROR::[GT][WARNING][GT_SETUP_ERROR] task=t "
+        "phase=setup cause=boom"
+    ]
+
+
+# --- REVIEW-13 MEDIUM-1: the verdict is the part that must not be cut -------
+# The capability line reads ``... evidence=<model> [VERDICT: <host>]``. The
+# model's field comes first and the harness's verdict last, so a bound applied
+# to the COMPOSED line spends the whole budget on the container's bytes and
+# truncates away the one part of the line the container cannot forge - the
+# answer to "was promoting nothing right here?". Every field is bounded on its
+# own instead; the composed line is verified, never re-cut.
+
+
+def test_a_long_evidence_field_cannot_truncate_the_host_verdict(
+    tmp_path, monkeypatch, capsys
+):
+    """2,000 characters of evidence, and the verdict still arrives."""
+    _plant_task(tmp_path, "rust-task", [{
+        "schema": "gt.lsp_promotion_task.v1",
+        "status": "no_op",
+        "languages_promotable": ["rust"],
+        "languages_attempted": ["rust"],
+        "languages_completed": [],
+        "languages_unavailable": [],
+    }])
+    flood = _NO_OP_EVIDENCE + "x" * 2_000
+
+    stderr, rendered = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [_capability_row("rust-task", evidence=flood)],
+        github_actions=True,
+    )
+
+    human = [line for line in stderr.split("\n") if line.startswith("[GT][CAPABILITY]")]
+    commands = _commands(stderr)
+    assert len(human) == 1, stderr
+    assert len(commands) == 1, stderr
+    # The flood is bounded ...
+    assert "x" * 600 not in human[0]
+    assert "x" * 600 not in commands[0]
+    assert "...(truncated)" in human[0]
+    # ... and the verdict, which follows it, is still on both lines.
+    assert "[UNEXPECTED:" in human[0], human[0]
+    assert "[UNEXPECTED:" in commands[0], commands[0]
+    assert "rust" in commands[0]
+    # The step summary is a markdown file, not a log line, and keeps the row
+    # the sealed report carries.
+    assert "UNEXPECTED" in rendered
+
+
+def test_a_long_phase_cannot_truncate_the_cause_off_an_event_line(
+    tmp_path, monkeypatch, capsys
+):
+    """Same rule on the event line: ``phase`` is model-written and comes
+    before ``cause``, so a composed-line bound would eat the cause."""
+    event = _Event("ERROR", "GT_PROVIDER_FAILED", "t", "p" * 2_000, "the_real_cause")
+
+    stderr, _ = _run(tmp_path, monkeypatch, capsys, [], [event], github_actions=True)
+
+    commands = _commands(stderr)
+    assert len(commands) == 1, stderr
+    assert "cause=the_real_cause" in commands[0], commands[0]
+    assert "cause=the_real_cause" in stderr
+    assert "p" * 600 not in commands[0]
+
+
+def test_a_planted_field_is_bounded_and_escaped_on_both_lines(
+    tmp_path, monkeypatch, capsys
+):
+    """Per-field bounding must not have cost the escaping."""
+    event = _Event("ERROR", "GT_PROVIDER_FAILED", _INJECTION, _INJECTION, _INJECTION)
+
+    stderr, _ = _run(tmp_path, monkeypatch, capsys, [], [event], github_actions=True)
+
+    assert len(_commands(stderr)) == 1, stderr
+    assert not any(line.startswith("::stop-commands") for line in stderr.split("\n"))
+    # Escaped once, not twice: the human line and the annotation carry the
+    # same bytes for the same field.
+    assert "%250A" not in stderr
+    # Escaped ONCE: the annotation carries the human line byte for byte, so a
+    # reader is not shown two different renderings of the same field.
+    human = [line for line in stderr.split("\n") if line.startswith("[GT][ERROR]")]
+    assert len(human) == 1, stderr
+    assert _commands(stderr)[0].endswith(human[0])
+    assert human[0].count("%0A") == 6, human[0]
+
+
+# --- REVIEW-14 HIGH-1: the renderer must not die on the data it renders -----
+# gh_verbatim REFUSES a composed message longer than the line limit, which is
+# right - past the allowance it is a caller defect, not a data condition. But
+# the first limit (8 * 512) was arithmetically unreachable: gh_escape bounds
+# the RAW field and escapes AFTER, and escaping expands by up to 3x, so three
+# container-written fields already compose ~4,690 characters. The ValueError
+# was therefore raised on ordinary adversarial data, uncaught, inside the
+# render loop of a job that has already finished paying for its run: the first
+# oversized row killed every later annotation AND the whole
+# GITHUB_STEP_SUMMARY, and both paid attestation callers went red with no
+# diagnostics at all.
+#
+# Two things had to be true, and both are pinned here: the limit admits every
+# line a bounded-field caller can compose, and the renderer contains a render
+# failure to the row it happened on.
+
+_RENDER_FLOOD = "%" * 3_000
+_RENDER_NEWLINES = "\n" * 3_000
+
+
+def test_adversarial_fields_do_not_end_the_render(tmp_path, monkeypatch, capsys):
+    """Three flooded fields on the event line, and the run still reports."""
+    adversarial = _Event(
+        "ERROR", "GT_PROVIDER_FAILED", _RENDER_FLOOD, _RENDER_NEWLINES, _RENDER_FLOOD
+    )
+    normal = _Event("WARNING", "GT_SETUP_ERROR", "later-task", "setup", "boom")
+    _plant_task(tmp_path, "flooded", [])
+
+    stderr, rendered = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [_capability_row("flooded", evidence=_NO_OP_EVIDENCE + _RENDER_FLOOD)],
+        [adversarial, normal],
+        github_actions=True,
+    )
+
+    commands = _commands(stderr)
+    # One per event, one for the degraded capability. Nothing was lost, and
+    # nothing raised.
+    assert len(commands) == 3, commands
+    assert commands[0].startswith("::error title=GT_PROVIDER_FAILED::")
+    # The row AFTER the adversarial one is the whole point: it used to never
+    # be reached.
+    assert commands[1] == (
+        "::warning title=GT_SETUP_ERROR::[GT][WARNING][GT_SETUP_ERROR] "
+        "task=later-task phase=setup cause=boom"
+    )
+    assert commands[2].startswith("::error title=capability_not_working::")
+    assert "line could not be rendered" not in stderr
+    # And the step summary - written after the loop - still exists.
+    assert "## GroundTruth diagnostic summary" in rendered
+    assert "### Capabilities" in rendered
+
+
+def test_a_render_failure_is_contained_to_its_own_row(
+    tmp_path, monkeypatch, capsys
+):
+    """A renderer that crashes on adversarial input is worse than one that
+    says so. The trap in gh_verbatim stays loud, but it is caught per row."""
+
+    def _boom(kind, title, message):
+        raise ValueError("planted caller defect")
+
+    monkeypatch.setattr(diagnose, "gh_command_escaped", _boom)
+    events = [
+        _Event("ERROR", "GT_PROVIDER_FAILED", "t", "p", "c"),
+        _Event("WARNING", "GT_SETUP_ERROR", "t2", "p2", "c2"),
+    ]
+
+    stderr, rendered = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [_capability_row("t")],
+        events,
+        github_actions=True,
+    )
+
+    commands = _commands(stderr)
+    assert len(commands) == 3, commands
+    assert all(
+        line.startswith("::error title=Diagnostics renderer::") for line in commands
+    ), commands
+    assert "GT_PROVIDER_FAILED: line could not be rendered (" in commands[0]
+    assert "GT_SETUP_ERROR: line could not be rendered (" in commands[1]
+    assert "capability_not_working: line could not be rendered (" in commands[2]
+    assert " chars)" in commands[0]
+    # The human lines are unaffected: only the annotation could not be built.
+    assert "[GT][ERROR][GT_PROVIDER_FAILED] task=t phase=p cause=c" in stderr
+    # And the summary is still written.
+    assert "## GroundTruth diagnostic summary" in rendered
+
+
+def test_the_fallback_annotation_is_fixed_text_and_one_line(
+    tmp_path, monkeypatch, capsys
+):
+    """Nothing model-written reaches the fallback but the closed enum code."""
+
+    def _boom(kind, title, message):
+        raise ValueError("planted caller defect")
+
+    monkeypatch.setattr(diagnose, "gh_command_escaped", _boom)
+    event = _Event("ERROR", "GT_PROVIDER_FAILED", _INJECTION, _INJECTION, _INJECTION)
+
+    stderr, _ = _run(tmp_path, monkeypatch, capsys, [], [event], github_actions=True)
+
+    commands = _commands(stderr)
+    assert len(commands) == 1, commands
+    assert "hunter2" not in commands[0]
+    assert "stop-commands" not in commands[0]
+    assert not any(line.startswith("::stop-commands") for line in stderr.split("\n"))

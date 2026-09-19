@@ -67,6 +67,24 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+# Launched by path (python scripts/<name>.py) the repository root is not on
+# sys.path and the shared annotation builder cannot be imported; every
+# workflow uses python -m, but the path form must keep working too.
+#
+# The membership test is not decoration (REVIEW-13 LOW-1). An unconditional
+# insert grows sys.path every time anything re-enters this module, and a
+# duplicated root shadows a path a caller deliberately prepended. Membership
+# rather than ``sys.path[0]``: a root already anywhere on the path resolves
+# the import, and moving it to the front would be the change nobody asked for.
+if __package__ in (None, ""):
+    import sys as _sys
+
+    _REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
+    if _REPOSITORY_ROOT not in _sys.path:
+        _sys.path.insert(0, _REPOSITORY_ROOT)
+
+from scripts.gh_annotations import gh_escape as _gh_escape
+
 SCHEMA = "gt.receipt_consistency.v1"
 PROGRESS_SCHEMA = "gt.benchmark_progress.v1"
 
@@ -103,40 +121,19 @@ RESOLUTION_ERRORS = (
 # into a CI annotation.
 _READ_ERROR_TEXT_LIMIT = 200
 
-# GitHub parses a line beginning with ``::`` off a step's stdio as a WORKFLOW
-# COMMAND, so any byte this module interpolates into an annotation is a command
-# the runner will obey. The fields are all read off disk and the disk is the
-# task's: the capture receipts under ``agent/gt-state/**/output_evidence/`` are
-# written inside the container where the model runs arbitrary shell, and
-# ``task_id`` comes off a receipt from that same tree. REVIEW-11 H-1
-# reproduced it end to end on a real trial copy - a planted ``containment_gap``
-# of ``"x\n::stop-commands::hunter2\n::error title=Grader::TASK PASSED"``
-# printed three lines, of which the runner read two: ``::stop-commands``
-# silences this step's own ``::error`` on rc=1, and the forged ``::error
-# title=Grader::`` states a verdict nothing produced. ``::add-mask::`` from the
-# same hole rewrites the log.
+# REVIEW-11 H-1 / REVIEW-12 MEDIUM. GitHub parses a line beginning with ``::``
+# off a step's stdio as a WORKFLOW COMMAND, so any byte this module
+# interpolates into an annotation is a command the runner will obey. The
+# fields are all read off disk and the disk is the task's: the capture
+# receipts under ``agent/gt-state/**/output_evidence/`` are written inside the
+# container where the model runs arbitrary shell, and ``task_id`` comes off a
+# receipt from that same tree.
 #
-# The escaping is GitHub's own, and the order matters: ``%`` first, or the
-# escapes it writes are themselves escaped.
-# https://docs.github.com/actions/reference/workflow-commands-for-github-actions
-_GH_MESSAGE_ESCAPES = (("%", "%25"), ("\r", "%0D"), ("\n", "%0A"))
-# A ``title=``/``file=`` value ends at a colon or a comma as well, so those two
-# are escaped there and NOT in message text - a check message is mostly colons
-# and commas and escaping them would make every annotation unreadable.
-_GH_PROPERTY_ESCAPES = ((":", "%3A"), (",", "%2C"))
-
-# How much of one interpolated field an annotation carries. A receipt field is
-# model-writable and unbounded; without this, one planted string floods the job
-# log and buries every annotation around it. The receipt FILE still carries the
-# whole message - it is a file, not a log line - so nothing is lost, only the
-# line is bounded.
-_ANNOTATION_FIELD_LIMIT = 512
-# ASCII on purpose. This string is printed to stderr, and _annotate_warnings
-# runs AFTER the receipt is written and before main decides its exit code, so
-# a UnicodeEncodeError on a console whose codepage cannot hold the character
-# would escape main as a traceback and rc 1 - which is this module's "these
-# receipts contradict each other" and must never mean anything else.
-_ANNOTATION_TRUNCATION = "...(truncated)"
+# The escaper, the two escape tables, the 512-character bound and the rest of
+# that reasoning now live in scripts/gh_annotations.py, because
+# scripts/diagnose_benchmark_run.py needed the same primitive and did not have
+# it. ``_gh_escape`` is the import alias for it: the name, the call sites and
+# the bytes they emit are unchanged from REVIEW-11.
 
 # How many file names the refusal detail lists before it says "+N more". The
 # list is what makes "no run receipt" falsifiable, and a trial's harness
@@ -443,33 +440,6 @@ def _bounded(value: object) -> str:
     if len(text) <= _READ_ERROR_TEXT_LIMIT:
         return text
     return text[:_READ_ERROR_TEXT_LIMIT] + " (truncated)"
-
-
-def _gh_escape(value: object, *, is_property: bool = False) -> str:
-    """One annotation field: length-bounded, then command-syntax escaped.
-
-    Every field interpolated into a ``::warning``/``::error``/``::notice``
-    line goes through this, which a guard in tests/test_verify_run_receipts.py
-    enforces over the module source rather than over the call sites that
-    happen to exist: an annotation added later that pastes a receipt field in
-    directly is the same defect again.
-
-    ``is_property`` is for a ``title=`` value. No title here is interpolated
-    today; the mode exists so that one cannot become so unescaped.
-
-    The bound is applied to the RAW text so the limit counts source
-    characters rather than percent-escapes, and the escaping runs last so
-    nothing it emits can be cut in half.
-    """
-    text = str(value)
-    if len(text) > _ANNOTATION_FIELD_LIMIT:
-        text = text[:_ANNOTATION_FIELD_LIMIT] + _ANNOTATION_TRUNCATION
-    escapes = _GH_MESSAGE_ESCAPES
-    if is_property:
-        escapes = escapes + _GH_PROPERTY_ESCAPES
-    for char, replacement in escapes:
-        text = text.replace(char, replacement)
-    return text
 
 
 def _read_receipt_json(path: Path | None) -> dict[str, Any] | None:

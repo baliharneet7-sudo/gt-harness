@@ -14,6 +14,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Launched by path (python scripts/<name>.py) the repository root is not on
+# sys.path and the shared annotation builder cannot be imported; every
+# workflow uses python -m, but the path form must keep working too.
+#
+# The membership test is not decoration (REVIEW-13 LOW-1). An unconditional
+# insert grows sys.path every time anything re-enters this module, and a
+# duplicated root shadows a path a caller deliberately prepended. Membership
+# rather than ``sys.path[0]``: a root already anywhere on the path resolves
+# the import, and moving it to the front would be the change nobody asked for.
+if __package__ in (None, ""):
+    import sys as _sys
+
+    _REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
+    if _REPOSITORY_ROOT not in _sys.path:
+        _sys.path.insert(0, _REPOSITORY_ROOT)
+
+from scripts.gh_annotations import gh_command
+
 _SCHEMA = "gt.provider_route.v1"
 _SHA40 = re.compile(r"[0-9a-f]{40}")
 _REQUIRED_KEYS = {
@@ -838,10 +856,21 @@ def main() -> int:
         # An unbounded key or an unpriced model skips the funds gate while the
         # status stays PASS. Annotate the run so the skip is visible in the job
         # log instead of reading as a cleared gate.
+        # REVIEW-13 MEDIUM-2. The two interpolated fields are a closed
+        # vocabulary this module computes, so this was not exploitable - but
+        # it was an unescaped ``::`` line built by hand, which is the shape
+        # the repository-wide guard exists to refuse. One builder, one place
+        # that knows the command syntax; the fields are bounded and escaped
+        # so a future funds_reason read off a provider response cannot end
+        # the line and start a second command.
         print(
-            "::warning::provider funds gate not cleared: "
-            f"verdict={receipt['funds_verdict'] or 'unassessed'} "
-            f"reason={receipt['funds_reason'] or 'none'}"
+            gh_command(
+                "warning",
+                "Provider funds",
+                "provider funds gate not cleared: "
+                f"verdict={receipt['funds_verdict'] or 'unassessed'} "
+                f"reason={receipt['funds_reason'] or 'none'}",
+            )
         )
     return int(receipt["status"] != "PASS")
 

@@ -27,6 +27,24 @@ import os
 from pathlib import Path
 from typing import Any
 
+# Launched by path (python scripts/<name>.py) the repository root is not on
+# sys.path and the shared annotation builder cannot be imported; every
+# workflow uses python -m, but the path form must keep working too.
+#
+# The membership test is not decoration (REVIEW-13 LOW-1). An unconditional
+# insert grows sys.path every time anything re-enters this module, and a
+# duplicated root shadows a path a caller deliberately prepended. Membership
+# rather than ``sys.path[0]``: a root already anywhere on the path resolves
+# the import, and moving it to the front would be the change nobody asked for.
+if __package__ in (None, ""):
+    import sys as _sys
+
+    _REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
+    if _REPOSITORY_ROOT not in _sys.path:
+        _sys.path.insert(0, _REPOSITORY_ROOT)
+
+from scripts.gh_annotations import gh_command
+
 PASSED = "passed"
 FAILED_TASK = "failed_task"
 FAILED_INFRA = "failed_infra"
@@ -225,7 +243,19 @@ def aggregate(args: argparse.Namespace) -> int:
 
     graded = counts[PASSED] + counts[FAILED_TASK]
     if counts[FAILED_INFRA] and graded == 0:
-        print("::warning::every task failed on infrastructure; this run produced no benchmark result")
+        # The message is a constant, so nothing here was exploitable either.
+        # It goes through the one builder anyway: the repository-wide guard
+        # (tests/test_verify_run_receipts.py) refuses a hand-built ``::``
+        # literal outright rather than asking each reader to decide whether
+        # this particular one is safe.
+        print(
+            gh_command(
+                "warning",
+                "No benchmark result",
+                "every task failed on infrastructure; "
+                "this run produced no benchmark result",
+            )
+        )
     return 0
 
 

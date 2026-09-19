@@ -7,8 +7,12 @@ when two of them are read side by side, which is exactly what nothing did.
 from __future__ import annotations
 
 import ast
+import importlib
 import json
+import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -3231,18 +3235,141 @@ def _workflow_command_fstrings(tree: ast.Module) -> list[ast.JoinedStr]:
     return found
 
 
-def test_every_workflow_command_field_goes_through_gh_escape():
-    """The rule is the module's, not one call site's.
+# Every module in this repository that prints a ``::`` workflow command, with
+# how many command f-strings it is expected to own. The count is the half of
+# the guard that stops it passing because it found nothing.
+#
+# REVIEW-12: the guard used to cover verify_run_receipts alone, which is how
+# scripts/diagnose_benchmark_run.py came to interpolate a capability row's
+# ``evidence`` and a diagnostics event's ``task_id``/``phase`` - both read off
+# an artifact written inside the task container - into ``::error`` lines with
+# no escaping at all. The rule is the REPOSITORY's, not one module's, so the
+# escaper moved to scripts/gh_annotations.py and this guard moved with it.
+#
+# REVIEW-13 MEDIUM-2: this table was hand-typed, and its claim to cover
+# "every module that may print a ``::`` line" was simply false -
+# scripts/provider_preflight.py and scripts/gt_task_visibility.py each printed
+# one and neither was listed. A hand-typed inventory of a security rule is an
+# inventory that is wrong the first time someone adds a module, so
+# ``test_the_guarded_set_is_discovered_not_remembered`` now walks the source
+# tree and fails BY NAME on a module that grew a command literal without being
+# added here. The table stays explicit - discovery says which modules must be
+# in it, the table says what each one is allowed to contain.
+#
+# ``0`` is not "this module is exempt": it means the module owns no ``::``
+# literal, because every annotation it prints is built by ``gh_command`` /
+# ``gh_command_escaped`` - which live in gh_annotations and are guarded there.
+# The companion test below asserts those modules really do call one of them,
+# so a module cannot satisfy its ``0`` by quietly dropping its annotations.
+#
+# REVIEW-13 LOW-2 - WHAT THIS GUARD CANNOT SEE. It reads ``::`` LITERALS. A
+# module that prints a line the runner would obey without ever writing ``::``
+# in its source is invisible to it: ``print(row.get("evidence"))`` where the
+# evidence begins with ``::``, a value read out of a receipt and echoed, a
+# command assembled from ``chr(58)``, or a line printed by a subprocess this
+# repository shells out to. The guard is a floor, not a proof, and it must not
+# be read as one: any NEW print of artifact-derived text to stdout or stderr
+# still needs a human to ask where that text came from.
+#
+# It is also PYTHON-only by construction. scripts/ci/substrate_proof.sh and
+# the workflow YAML both echo ``::warning::``/``::error::`` lines directly,
+# and an AST walk cannot read shell. Those emitters are reviewed separately -
+# the orchestrator has confirmed they interpolate only planner-owned literals
+# and matrix values, never artifact-derived text - and this guard makes no
+# claim about them. A future shell emitter that echoes a receipt field is a
+# hole this test will not find.
+_GUARDED_MODULES = (
+    ("scripts/verify_run_receipts.py", 6),
+    ("scripts/gh_annotations.py", 2),
+    ("scripts/diagnose_benchmark_run.py", 0),
+    ("scripts/provider_preflight.py", 0),
+    ("scripts/gt_task_visibility.py", 0),
+    ("scripts/tb2_report.py", 0),
+)
+
+# Where discovery looks. Tests are excluded on purpose: a test that pins an
+# annotation's bytes has to spell them, and a string in a test is never
+# printed to a runner's stdio. Vendored trees are excluded because they are
+# not ours to route through gh_annotations.
+#
+# REVIEW-14 MEDIUM-2: ``scripts/*.py`` was NOT recursive, so scripts/ci/,
+# scripts/swebench/ and scripts/verify/ were never walked at all - a
+# "discovery" that could not see three directories of the tree it claimed to
+# cover. Both globs are recursive now.
+_DISCOVERY_GLOBS = ("scripts/**/*.py", "gt_engine/**/*.py")
+_DISCOVERY_EXCLUDED = ("tests", "vendor", "third_party", "__pycache__", ".venv")
+
+# What makes a string constant a COLUMN-ZERO workflow command rather than a
+# separator. GitHub reads ``::<name>`` at the start of a line; a command name
+# follows the colons immediately, with no space. That distinction is load
+# bearing: gt_engine/contract.py's ``_PARAM_TYPE_SEPARATOR = "::"`` and
+# gt_engine/contract_text.py's ``f":: {fact['type']}"`` both start with ``::``
+# and neither is a command - flagging them would train the next reader to add
+# an exemption instead of a fix.
+_COMMAND_LITERAL = re.compile(r"^::[a-z][a-z-]*(?:$|[ :])")
+
+# The other shape a command literal takes, and the one a regex over constants
+# cannot see (REVIEW-14 MEDIUM-2): ``f"::{kind}::{message}"``, where the
+# command NAME is interpolated and the only constant is a bare ``"::"``. That
+# is exactly how gh_annotations builds every command, so the module that owns
+# the primitive was invisible to the walk that is supposed to find owners of
+# the primitive. An f-string whose first part is the constant ``"::"`` counts.
+_COMMAND_FSTRING_HEAD = "::"
+
+# Modules that own a ``::``-prefixed constant which is NOT a workflow command.
+# Each entry carries the reason AND a premise that
+# ``test_every_discovery_exemption_still_holds`` re-checks, because an
+# exemption nobody re-derives is an exemption that outlives its reason.
+_DISCOVERY_EXEMPTIONS = {
+    "scripts/verify/deepswe_outcome.py": (
+        "reads a ``::error::`` prefix off a captured trial log and strips it; "
+        "the constant is an argument to str.startswith and len, never printed"
+    ),
+}
+
+# Writers whose argument really is printed at column zero. Used only to check
+# an exemption's premise - see _DISCOVERY_EXEMPTIONS.
+_PRINTING_CALLS = frozenset({"print", "write", "writelines"})
+
+# ``_gh_escape`` is verify_run_receipts' import alias for the same function -
+# ``test_the_private_escaper_is_the_shared_one`` pins that identity - and the
+# call sites keep the old name so REVIEW-11's escaping behaviour stays
+# byte-identical through that move. ``gh_verbatim`` is gh_annotations' other
+# safety function: it does not escape, it REFUSES - a line break or an
+# unbounded length in an already-escaped message raises rather than being
+# printed. Both are audited in one module, which is the point of naming them
+# here rather than allowing "any call".
+_ESCAPER_NAMES = frozenset({"gh_escape", "_gh_escape", "gh_verbatim"})
+
+# The two builders in gh_annotations. A module with no ``::`` literal of its
+# own must call one of them.
+_COMMAND_BUILDERS = frozenset({"gh_command", "gh_command_escaped"})
+
+
+def _command_literals(node: ast.AST) -> list[str]:
+    """Every ``::``-prefixed string constant anywhere inside ``node``."""
+    return [
+        child.value
+        for child in ast.walk(node)
+        if isinstance(child, ast.Constant)
+        and isinstance(child.value, str)
+        and child.value.startswith("::")
+    ]
+
+
+@pytest.mark.parametrize(("relative", "expected"), _GUARDED_MODULES)
+def test_every_workflow_command_field_goes_through_gh_escape(relative, expected):
+    """The rule is the repository's, not one call site's.
 
     An annotation added later that interpolates a receipt field directly is
     the same defect again, so this is checked over the source rather than
     over the lines that happen to exist today.
     """
-    tree = ast.parse(_MODULE.read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
     commands = _workflow_command_fstrings(tree)
 
     # The guard must not pass because it found nothing.
-    assert len(commands) >= 6, len(commands)
+    assert len(commands) == expected, [ast.unparse(node) for node in commands]
     for command in commands:
         for part in command.values:
             if not isinstance(part, ast.FormattedValue):
@@ -3250,19 +3377,370 @@ def test_every_workflow_command_field_goes_through_gh_escape():
             call = part.value
             assert isinstance(call, ast.Call), ast.unparse(command)
             assert isinstance(call.func, ast.Name), ast.unparse(command)
-            assert call.func.id == "_gh_escape", ast.unparse(command)
+            assert call.func.id in _ESCAPER_NAMES, ast.unparse(command)
     # And no ``::`` literal reaches a print any other way: every one in the
-    # module is the head of an f-string checked above.
-    heads = {id(command.values[0]) for command in commands}
+    # module is part of an f-string checked above.
+    checked = {
+        id(part)
+        for command in commands
+        for part in command.values
+        if isinstance(part, ast.Constant)
+    }
     stray = [
         node.value
         for node in ast.walk(tree)
         if isinstance(node, ast.Constant)
         and isinstance(node.value, str)
         and node.value.startswith("::")
-        and id(node) not in heads
+        and id(node) not in checked
     ]
     assert stray == [], stray
+    # Nor is one assembled at runtime. An f-string is the only construction
+    # the check above can read, so ``"::error " + detail``, ``"::error %s" %
+    # detail`` and ``"::error {}".format(detail)`` are refused outright rather
+    # than trusted to have escaped anything.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+            assert _command_literals(node) == [], (relative, ast.unparse(node))
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"format", "join"}
+        ):
+            assert _command_literals(node.func.value) == [], (
+                relative,
+                ast.unparse(node),
+            )
+
+
+def _imported_names(tree: ast.Module, module: str) -> set[str]:
+    """Every name bound by ``from <module> import ...`` in ``tree``."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == module:
+            names |= {alias.asname or alias.name for alias in node.names}
+    return names
+
+
+def _builder_calls(tree: ast.Module) -> list[ast.Call]:
+    """Every call to a gh_annotations command builder in ``tree``."""
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _COMMAND_BUILDERS
+    ]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [relative for relative, expected in _GUARDED_MODULES if expected == 0],
+)
+def test_a_module_with_no_command_literal_still_annotates_through_gh_command(relative):
+    """``0`` command f-strings means "built by gh_annotations", not "silent".
+
+    Without this, a module could satisfy the guard above by deleting its
+    annotations - which is exactly the change nobody would notice until a
+    failing run stopped being annotated.
+
+    REVIEW-13 LOW-1: this used to gate on ``"gh_command" in source``, which a
+    comment mentioning the name satisfies and a renamed import defeats. It is
+    an AST question - is the builder IMPORTED from gh_annotations, and is it
+    CALLED - so it is asked of the AST.
+    """
+    tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+    calls = _builder_calls(tree)
+    if not calls:
+        # A module with neither a ``::`` literal nor a builder call prints no
+        # workflow command at all. That is a legitimate state and the
+        # discovery test is what keeps it honest, but the import must not be
+        # there either - an imported-and-unused builder means an annotation
+        # was deleted and the import left behind.
+        assert not (_imported_names(tree, "scripts.gh_annotations") & _COMMAND_BUILDERS), (
+            relative
+        )
+        return
+    imported = _imported_names(tree, "scripts.gh_annotations")
+    for call in calls:
+        assert call.func.id in imported, (relative, ast.unparse(call))
+        assert not call.keywords, ast.unparse(call)
+        assert len(call.args) == 3, ast.unparse(call)
+    # And the import has to RESOLVE both ways the module can be launched.
+    # ``from scripts.gh_annotations import ...`` is an absolute package
+    # import: under ``python -m scripts.<name>`` - how every call site in
+    # .github/workflows runs these - the repository root is already on
+    # sys.path, and under ``python scripts/<name>.py`` it is not. Routing a
+    # module through gh_annotations does NOT commit it to the ``-m`` form
+    # (REVIEW-14 MEDIUM-1: that claim was written here while
+    # verify_run_receipts had regressed from rc 0 to rc 1 on the path form);
+    # each of these scripts carries a bootstrap for the path form, and
+    # ``test_every_routed_script_still_runs_when_launched_by_path`` runs them.
+    importlib.import_module(relative.removesuffix(".py").replace("/", "."))
+
+
+def _module_command_literals(tree: ast.Module) -> list[str]:
+    """Every command literal in ``tree``, in both shapes it can take."""
+    literals: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and _COMMAND_LITERAL.match(node.value)
+        ):
+            literals.append(node.value)
+        # ``f"::{kind}::{message}"`` - the command name is interpolated, so
+        # the only constant is ``"::"`` and the regex above cannot see it.
+        if isinstance(node, ast.JoinedStr) and node.values:
+            head = node.values[0]
+            if (
+                isinstance(head, ast.Constant)
+                and isinstance(head.value, str)
+                and head.value == _COMMAND_FSTRING_HEAD
+            ):
+                literals.append(ast.unparse(node))
+    return literals
+
+
+def _source_modules() -> list[tuple[str, ast.Module]]:
+    """Every module the discovery walk covers, parsed once."""
+    modules: list[tuple[str, ast.Module]] = []
+    seen: set[str] = set()
+    for pattern in _DISCOVERY_GLOBS:
+        for path in sorted(ROOT.glob(pattern)):
+            relative = path.relative_to(ROOT)
+            name = relative.as_posix()
+            if any(part in _DISCOVERY_EXCLUDED for part in relative.parts):
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            modules.append((name, ast.parse(path.read_text(encoding="utf-8"))))
+    return modules
+
+
+def _discovered_modules() -> dict[str, list[str]]:
+    """Every source module owning a column-zero workflow-command literal."""
+    found: dict[str, list[str]] = {}
+    for name, tree in _source_modules():
+        literals = _module_command_literals(tree)
+        if literals:
+            found[name] = literals
+    return found
+
+
+def test_the_guarded_set_is_discovered_not_remembered():
+    """A module that grows a ``::`` command must be named here, by this test.
+
+    REVIEW-13 MEDIUM-2. The table above was hand-typed and wrong: it claimed
+    to cover every module that may print a workflow command while
+    scripts/provider_preflight.py printed
+    ``::warning::provider funds gate not cleared: ...`` and
+    scripts/gt_task_visibility.py printed a constant ``::warning::`` line,
+    neither of them listed, neither of them escaped. Remembering is not a
+    control. The failure message names the module so the next person does not
+    have to work out what the guard is complaining about.
+    """
+    discovered = _discovered_modules()
+    listed = {relative for relative, _ in _GUARDED_MODULES}
+    unguarded = {
+        name: literals
+        for name, literals in discovered.items()
+        if name not in listed and name not in _DISCOVERY_EXEMPTIONS
+    }
+
+    assert unguarded == {}, (
+        "these modules print a workflow command and are in neither "
+        f"_GUARDED_MODULES nor _DISCOVERY_EXEMPTIONS: {sorted(unguarded)}"
+    )
+    # And the walk must actually be walking: a glob that matches nothing, or
+    # an exclusion that swallows the tree, would make the assertion above
+    # vacuously true forever.
+    assert "scripts/verify_run_receipts.py" in discovered, sorted(discovered)
+    # REVIEW-14 MEDIUM-2, both halves. The module that OWNS the command
+    # builder has to be found by its own walk - it builds ``f"::{kind}..."``,
+    # so a constant-only rule never saw it ...
+    assert "scripts/gh_annotations.py" in discovered, sorted(discovered)
+    # ... and the walk has to reach the subdirectories a non-recursive glob
+    # skipped. These three were invisible; the assertion names a file in each
+    # so a glob narrowed later fails here rather than silently.
+    walked = {name for name, _ in _source_modules()}
+    for expected in (
+        "scripts/verify/deepswe_outcome.py",
+        "scripts/swebench/build_ll_predictions.py",
+        "scripts/ci/live_check_update.py",
+    ):
+        if (ROOT / expected).is_file():
+            assert expected in walked, expected
+    assert any(name.startswith("scripts/ci/") for name in walked), sorted(walked)[:5]
+    assert any(name.startswith("scripts/swebench/") for name in walked)
+    assert any(name.startswith("scripts/verify/") for name in walked)
+
+
+def test_every_discovery_exemption_still_holds():
+    """An exemption is a claim about a module. Claims get re-checked.
+
+    REVIEW-14 MEDIUM-2 asked for the one non-command ``::`` constant in the
+    newly-walked subdirectories to be exempted BY NAME WITH A REASON. A reason
+    in a comment rots; this asserts the premise instead - the constant must
+    not reach anything that writes a line.
+    """
+    trees = dict(_source_modules())
+    for name in _DISCOVERY_EXEMPTIONS:
+        assert name in trees, f"exemption for a module the walk no longer covers: {name}"
+        printed = []
+        for node in ast.walk(trees[name]):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            written = (
+                func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute)
+                else ""
+            )
+            if written not in _PRINTING_CALLS:
+                continue
+            printed.extend(
+                child.value
+                for argument in node.args
+                for child in ast.walk(argument)
+                if isinstance(child, ast.Constant)
+                and isinstance(child.value, str)
+                and child.value.startswith("::")
+            )
+        assert printed == [], (name, printed)
+
+
+def test_an_indented_command_word_is_not_a_column_zero_command():
+    """scripts/swebench/build_ll_predictions.py, proved rather than assumed.
+
+    Its line 161 prints ``f"  ::warning:: {len(extra)} artifact(s) ..."``. It
+    is NOT a workflow command and needs no builder: GitHub parses ``::`` only
+    at the START of a line, and this one begins with two spaces. That is the
+    whole of its safety, so the indentation is what this test pins - delete
+    the two spaces and the discovery walk fails by name on the next run.
+    """
+    module = ROOT / "scripts" / "swebench" / "build_ll_predictions.py"
+    if not module.is_file():
+        pytest.skip("build_ll_predictions.py is not in this tree")
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    near_misses = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "::warning" in node.value
+    ]
+
+    assert near_misses, "the literal this exemption is about is gone; drop the test"
+    for text in near_misses:
+        assert not text.startswith("::"), text
+        assert text[: text.index("::")].strip() == "", text
+    assert module.as_posix() not in _discovered_modules()
+
+
+def test_discovery_tells_a_command_apart_from_a_separator():
+    """``::`` is a type separator in gt_engine; it is not a command.
+
+    gt_engine/contract.py binds ``_PARAM_TYPE_SEPARATOR = "::"`` and
+    contract_text.py writes ``f":: {fact['type']}"``. Both start with ``::``
+    and neither is a workflow command - GitHub wants a command NAME straight
+    after the colons. A discovery rule that flagged them would be answered
+    with an exemption list, and an exemption list is how the real one gets
+    exempted too.
+    """
+    assert _COMMAND_LITERAL.match("::warning::x")
+    assert _COMMAND_LITERAL.match("::error title=T::x")
+    assert _COMMAND_LITERAL.match("::stop-commands::x")
+    assert _COMMAND_LITERAL.match("::endgroup")
+    assert not _COMMAND_LITERAL.match("::")
+    assert not _COMMAND_LITERAL.match(":: int")
+    assert not _COMMAND_LITERAL.match("a::b")
+    assert not _COMMAND_LITERAL.match("::Warning::x")
+
+
+# Every script that imports scripts.gh_annotations and is also launched by
+# path somewhere. ``python -m scripts.<name>`` puts the repository root on
+# sys.path for free; ``python scripts/<name>.py`` does not, and an absolute
+# ``from scripts...`` import then fails at import time - rc 1 before the
+# script has done anything, which for a preflight gate reads as a refusal.
+_PATH_LAUNCHED_SCRIPTS = (
+    "scripts/verify_run_receipts.py",
+    "scripts/provider_preflight.py",
+    "scripts/gt_task_visibility.py",
+)
+
+
+@pytest.mark.parametrize("relative", _PATH_LAUNCHED_SCRIPTS)
+def test_every_routed_script_still_runs_when_launched_by_path(relative):
+    """REVIEW-14 MEDIUM-1, measured through a real interpreter.
+
+    verify_run_receipts got the gh_annotations import and not the bootstrap
+    the other two got, so ``python scripts/verify_run_receipts.py --help``
+    regressed from rc 0 to rc 1. An AST check cannot see that; only running it
+    can. ``--help`` exits 0 in argparse and touches no artifact, so this is a
+    pure import-resolution question.
+    """
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / relative), "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ModuleNotFoundError" not in completed.stderr
+
+
+@pytest.mark.parametrize("relative", _PATH_LAUNCHED_SCRIPTS)
+def test_the_path_bootstrap_does_not_insert_a_root_that_is_already_there(relative):
+    """REVIEW-13 LOW-1 / REVIEW-14 MEDIUM-1: insert only if absent.
+
+    The bootstrap runs only under the path form, so it cannot run twice in one
+    process today - but an unconditional ``sys.path.insert(0, ...)`` is a
+    growing list the moment anything re-enters it, and a duplicated root
+    shadows a deliberately-prepended path. Membership is the check, not
+    ``sys.path[0]``: a root anywhere on the path already resolves the import.
+    """
+    tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+    inserts = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "insert"
+        and "path" in ast.unparse(node.func.value)
+    ]
+
+    assert len(inserts) == 1, [ast.unparse(node) for node in inserts]
+    # The insert must sit under a membership test, not on its own.
+    guards = [
+        ast.unparse(node.test)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and any(insert in ast.walk(node) for insert in inserts)
+    ]
+    assert any("not in" in guard and "path" in guard for guard in guards), guards
+
+
+def test_the_private_escaper_is_the_shared_one():
+    """verify_run_receipts keeps the old NAME and none of the old code.
+
+    REVIEW-12 moved the escaper to scripts/gh_annotations.py so that
+    diagnose_benchmark_run could not go on without one. The alias is what
+    keeps REVIEW-11's call sites - and the behaviour they were pinned to -
+    byte-identical through the move.
+    """
+    from scripts import gh_annotations, verify_run_receipts
+
+    assert verify_run_receipts._gh_escape is gh_annotations.gh_escape
+    # And the private tables went with it: a second copy is a second thing to
+    # forget to update.
+    source = _MODULE.read_text(encoding="utf-8")
+    assert "_GH_MESSAGE_ESCAPES" not in source
+    assert "_GH_PROPERTY_ESCAPES" not in source
+    assert "def _gh_escape" not in source
 
 
 def test_an_unrecognised_gap_name_is_counted_never_carried(tmp_path, capsys):

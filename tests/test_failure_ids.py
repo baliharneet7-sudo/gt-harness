@@ -203,6 +203,18 @@ def test_common_hook_installation_and_post_commit_contract_are_tracked():
         shipped = (repository / entry["path"]).read_bytes()
         shipped = shipped.replace(b"\r\n", b"\n")
         assert entry["sha256"] == hashlib.sha256(shipped).hexdigest(), entry["path"]
+    # REVIEW-12 LOW-1. `evidence` is the receipt's claim about how it was
+    # certified, and an unasserted number is a number nobody re-derives - the
+    # per-hook digests were stale by three edits for exactly that reason.
+    # `passed` is the RECORDED COMMAND's current result, not a target: adding
+    # a test to this file or changing a hook moves it, and the way to move it
+    # is to run `python -m pytest -q tests/test_failure_ids.py` again and copy
+    # what it printed - never to edit the number until this assertion passes.
+    assert receipt["evidence"]["command"] == (
+        "python -m pytest -q tests/test_failure_ids.py"
+    )
+    assert receipt["evidence"]["exit_code"] == 0
+    assert receipt["evidence"]["passed"] == 11
 
 
 def test_pre_commit_direct_command_bootstraps_repository_import_path():

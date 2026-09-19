@@ -816,9 +816,15 @@ def test_cli_warns_when_an_unbounded_key_skips_the_funds_gate(
     )
     assert provider_preflight.main() == 0
     printed = capsys.readouterr().out
-    assert "::warning::" in printed
-    assert "unbounded_key" in printed
-    assert "provider_key_limit_unbounded" in printed
+    # REVIEW-13 MEDIUM-2: the annotation is built by scripts.gh_annotations
+    # now, so it carries a title and - the point of the change - every
+    # interpolated field is escaped and bounded. It is still ONE line: a
+    # planted verdict or reason cannot open a second workflow command.
+    commands = [line for line in printed.split("\n") if line.startswith("::")]
+    assert len(commands) == 1, printed
+    assert commands[0].startswith("::warning title=Provider funds::")
+    assert "unbounded_key" in commands[0]
+    assert "provider_key_limit_unbounded" in commands[0]
 
 
 def test_cli_does_not_warn_when_the_funds_gate_clears(
@@ -833,7 +839,8 @@ def test_cli_does_not_warn_when_the_funds_gate_clears(
         sys, "argv", _cli_argv(MANIFEST, tmp_path / "receipt.json")
     )
     assert provider_preflight.main() == 0
-    assert "::warning::" not in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert [line for line in printed.split("\n") if line.startswith("::")] == []
 
 
 def test_endpoints_url_follows_the_manifest_path_and_quotes_the_model_id(

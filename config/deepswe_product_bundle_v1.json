@@ -1278,6 +1278,7 @@
   "scripts/build_muse_smoke20_baseline.py",
   "scripts/diagnose_benchmark_run.py",
   "scripts/freeze_har81_recordings.py",
+  "scripts/gh_annotations.py",
   "scripts/gt_audit.py",
   "scripts/gt_live_gate.py",
   "scripts/gt_product_acceptance.py",

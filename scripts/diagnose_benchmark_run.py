@@ -9,7 +9,38 @@ import sys
 from pathlib import Path
 
 from gt_engine.run_diagnostics import diagnose_artifact_root
+from scripts.gh_annotations import gh_command, gh_command_escaped, gh_escape
 from scripts.gt_audit import annotated_capability_rows
+
+# REVIEW-12 MEDIUM. Every line this module prints to stderr lands in the same
+# stream the Actions runner parses for WORKFLOW COMMANDS, and every field it
+# interpolates is read out of an artifact the model wrote inside its own
+# container: a capability row's ``capability``/``state``/``evidence`` come
+# straight off ``<task>/agent/diagnostics.json``, and a diagnostics event's
+# ``task_id`` and ``phase`` are ``str(row.get(...))`` in
+# gt_engine.run_diagnostics._load_events with no character class imposed.
+# ``severity`` and ``code`` are the two that are not: the first is validated
+# against three names and the second is a closed StrEnum.
+#
+# A planted ``\n::stop-commands::x\n`` therefore silenced every later
+# annotation in the job, and ``\n::error title=Grader::TASK PASSED`` forged a
+# verdict - in two workflows that run this on a paid attestation root
+# (deepswe_gt_harness_product_p0731.yaml, swelive_gt_harness_paid.yaml).
+#
+# So: every interpolated field goes through ``gh_escape`` and the annotation
+# is built by ``gh_command_escaped``. Escaping only the ``::`` line would
+# leave the hole open - the runner does not care which print statement a line
+# came from, only that it starts at column zero.
+#
+# REVIEW-13 MEDIUM-1: the bound is per FIELD, never on the composed line.
+# Both lines below are model-written at the head and host-computed at the tail
+# (``phase=<artifact> cause=<normalised>``,
+# ``evidence=<artifact> [VERDICT: <what the harness decided>]``). A 512-char
+# bound applied to the whole line spends the budget on the container's bytes
+# and truncates the verdict away - the one part of the line the container
+# cannot forge, and the only reason the line is printed at all. So each field
+# is bounded on its own and ``gh_command_escaped`` verifies the composition
+# rather than cutting it again.
 
 # The collectors write the diagnostics document to exactly these places
 # under a trial directory, and the trial sits at the root, one level below it
@@ -163,6 +194,34 @@ def _annotated(root: Path, rows: list[dict]) -> list[dict]:
     return annotated
 
 
+def _annotate(kind: str, title: str, line: str) -> None:
+    """Emit one annotation for one row, or say why it could not be emitted.
+
+    ``gh_verbatim`` REFUSES a composed message past the line allowance, and it
+    is right to: past that it is a caller defect, not a data condition. But
+    this renderer runs at the END of a job that has already paid for its run,
+    and a ValueError escaping here loses every LATER annotation and the whole
+    GITHUB_STEP_SUMMARY over the text of ONE row (REVIEW-14 HIGH-1, which is
+    exactly what an oversized line did). A renderer that crashes on
+    adversarial input is worse than one that says so, so the refusal is caught
+    per row and reported as itself.
+
+    The fallback carries no artifact-derived text at all: ``title`` is a
+    closed DiagnosticCode value or a literal, and the length is an integer.
+    """
+    try:
+        print(gh_command_escaped(kind, title, line), file=sys.stderr)
+    except ValueError:
+        print(
+            gh_command(
+                "error",
+                "Diagnostics renderer",
+                f"{title}: line could not be rendered ({len(line)} chars)",
+            ),
+            file=sys.stderr,
+        )
+
+
 def _lsp_annotation(row: dict) -> str:
     """`` [VERDICT: detail]`` for an annotated row, else ``""``."""
     verdict = str(row.get("lsp_no_op_verdict") or "")
@@ -187,13 +246,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     for event in report.diagnostics:
         line = (
-            f"[GT][{event.severity}][{event.code.value}] task={event.task_id} "
-            f"phase={event.phase} cause={event.normalized_cause}"
+            f"[GT][{gh_escape(event.severity)}]"
+            f"[{gh_escape(event.code.value)}] "
+            f"task={gh_escape(event.task_id)} "
+            f"phase={gh_escape(event.phase)} "
+            f"cause={gh_escape(event.normalized_cause)}"
         )
         print(line, file=sys.stderr)
         if os.environ.get("GITHUB_ACTIONS") == "true":
             annotation = "error" if event.severity == "ERROR" else "warning"
-            print(f"::{annotation} title={event.code.value}::{line}", file=sys.stderr)
+            _annotate(annotation, event.code.value, line)
     # Capabilities that did not work must be visible at the END of the task,
     # not only as an error string inside a receipt someone has to go and read.
     # A run whose language servers or embedder never came up finishes looking
@@ -229,14 +291,16 @@ def main(argv: list[str] | None = None) -> int:
                 if row.get("refused") or row.get("degraded")]
     for row in degraded:
         line = (
-            f"[GT][CAPABILITY][{row.get('state')}] {row.get('capability')} "
-            f"required={row.get('required')} evidence={row.get('evidence')}"
-            f"{_lsp_annotation(row)}"
+            f"[GT][CAPABILITY][{gh_escape(row.get('state'))}] "
+            f"{gh_escape(row.get('capability'))} "
+            f"required={gh_escape(row.get('required'))} "
+            f"evidence={gh_escape(row.get('evidence'))}"
+            f"{gh_escape(_lsp_annotation(row))}"
         )
         print(line, file=sys.stderr)
         if os.environ.get("GITHUB_ACTIONS") == "true":
             severity = "error" if row.get("required") else "warning"
-            print(f"::{severity} title=capability_not_working::{line}", file=sys.stderr)
+            _annotate(severity, "capability_not_working", line)
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
