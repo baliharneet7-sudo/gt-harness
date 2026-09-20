@@ -106,12 +106,18 @@ def test_only_closed_supported_workflow_set_is_active() -> None:
     # `tests/test_benchmark_workflow_dependencies.py` assert on their text.
     # Archiving them would delete the subject of a passing regression test
     # rather than the risk the test describes.
+    # `producer_build.yml` -- the certified producer build. workflow_dispatch-
+    # only, pinned to an exact upstream `source_commit`, and its only output is
+    # an artifact: the sanctioned path that re-issues producer identity when
+    # the GT source commit moves, admitted by name rather than by loosening
+    # the rule.
     assert active == [
         "central_provider_free.yml",
         "deepswe_cache_images.yml",
         "deepswe_gt_harness_product.yml",
         "deepswe_gt_harness_product_p0731.yaml",
         "deepswe_miniswe_central.yml",
+        "producer_build.yml",
         "swebench_live_lite_full.yml",
         "swelive_gt_harness_paid.yaml",
         "task_progress.yml",

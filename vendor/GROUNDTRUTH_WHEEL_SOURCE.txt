@@ -1,45 +1,6 @@
 artifact=groundtruth_mcp-1.0.0-py3-none-any.whl
 source_repository=https://github.com/harneet2512/groundtruth
-source_commit=4f19c80a6263cc0f45539ad329f4d3a200941231
-source_tree=357e8d2e49ac34d4bff01e9485782d3c15915261
-sha256=160120290c2584a2a6e54a61ba9b5e6327de4eabb62656f18c0a8fbce0092180
-build_command=python -m pip wheel --no-deps --no-build-isolation (from git archive)
-
-NOTE: wheel is built from `git archive` output, never a Windows working
-tree — the archive carries committed blob bytes (LF) while an autocrlf
-checkout materializes CRLF, which byte-fails correspondence on Linux
-(the 0d3c72c5 build hit exactly that: 300+ files "changed" in CI).
-
-upstream_fix=e65febd3 + 4f19c80a on branch wheel-patch-lsp-inventory
-(parent 3f5ff8e):
-  e65febd3 — runtime language-matrix wave landed upstream:
-    groundtruth/resolve.py — pyright-langserver/pyright readiness budget
-    at 150s; server<->budget invariant so every promotable language's
-    server has a readiness budget (smoke20 bandit-taint cold-start fix).
-    groundtruth/runtime/obligations.py — subject_bound_test_runner proof
-    consolidated onto canonical TEST_RUNNER_RE/TEST_PASS_RE/TEST_FAIL_RE.
-    groundtruth/runtime/patterns.py — per-language runner/pass/fail/
-    static/compiler/env marker coverage (go, rust, java/mvn/gradle,
-    dotnet, node/jest/vitest/bun/deno/ava, ruby/bundler/rspec, php,
-    swift, elixir, sbt, bazel); single shared wrapper-prefix constant;
-    path-prefixed binaries (./mvnw, vendor/bin/phpunit,
-    node_modules/.bin/*); coded compile diagnostics anchored to
-    file:line: error shape.
-    groundtruth/runtime/repo_adapters.py — JS adapter no longer emits
-    npm test for absent/placeholder scripts.test; subpackage manifest
-    reach via manager scoping flags; per-language test_commands
-    coverage.
-    groundtruth/runtime/test_runner.py — runner detection widened
-    (dotnet/sbt/mix/phpunit/bazel/deno/bun); count families (bun
-    pass/fail, dotnet Passed:/Failed:, maven Tests run:); per-language
-    passing-name parsers; ::-path and bare-name .rs identity resolution.
-  4f19c80a — style: ruff-format conformance on the same files
-  (format-only; fixes the lint failure that red CI on e65febd3).
-  Verified: verify_wheel_source correspondence PASS vs src/
-  (git-archive LF export, 323 files byte-identical, no worktree delta).
-  Superseded CRLF-built artifact sha256:
-  0d3c72c549a4eb99149687cc46a5d96ad9287dc63fa51b297a8b98e7a8ba2082
-
-Recorded source tree carries the committed 4f19c80a tree.
-This pin records the vendored artifact's identity only. It does not certify installed
-validation or whole-product readiness; those are recorded in Linear HAR-87.
+source_commit=5681eeae99fb272e7e12b68e624e6f293878be97
+source_tree=06abc3818704ceefc5fc3b7944ee78f741db09e1
+worktree_delta=none (built from committed tree 5681eeae; producer binary is the CI artifact from run 35520971900)
+sha256=0a4eaf2e73581955ac043fb5bab7d1eaee7739b63459972d59194ac21677cd99
