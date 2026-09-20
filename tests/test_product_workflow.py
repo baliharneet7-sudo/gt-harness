@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -200,3 +201,18 @@ def test_paid_smoke_requires_all_exact_task_image_digests_before_provider_gate()
     )[1].split(
         "  provider_gate:", 1
     )[0]
+
+
+def test_producer_schema_assertion_is_read_from_the_manifest_not_hardcoded() -> None:
+    """A literal schema version in the workflow silently rots on a rebind.
+
+    Every other producer identity in that step (commit, tags, digests) is
+    compared against `config/deepswe_product_bundle_v1.json`. The graph schema
+    version was the one literal, and it still said `v15.2-trust-tier` after the
+    producer moved to `v15.4-callsite-actuals` - green locally, failing only in
+    CI, which is the shape this gate exists to prevent.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    literals = re.findall(r'"v1[0-9]+\.[0-9]+-[a-z-]+"', text)
+    assert literals == [], f"workflow hardcodes producer schema version(s): {literals}"
+    assert 'expected["graph_schema_version"]' in text

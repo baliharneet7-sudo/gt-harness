@@ -14,6 +14,32 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "gt.producer_artifact.v2"
+BUILD_INFO_SUFFIX = ".build-info.json"
+
+
+class ProducerArtifactError(RuntimeError):
+    """The receipt cannot be issued without reading the artifact it describes."""
+
+
+def _build_info_for(binary: Path) -> dict[str, Any]:
+    """Read the binary's own build-info sidecar.
+
+    The schema version and capability list belong to the producer that was
+    built; hardcoding them here would keep stamping the previous producer's
+    identity onto a new binary, which is exactly the drift the receipt exists
+    to make impossible.
+    """
+    sidecar = binary.with_suffix(binary.suffix + BUILD_INFO_SUFFIX)
+    if not sidecar.is_file():
+        raise ProducerArtifactError(f"no build-info sidecar beside the binary: {sidecar}")
+    try:
+        info = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ProducerArtifactError(f"unreadable build-info: {sidecar}: {exc}") from exc
+    for field in ("graph_schema_version", "capabilities"):
+        if not info.get(field):
+            raise ProducerArtifactError(f"build-info is missing {field}: {sidecar}")
+    return info
 
 
 def _run(*args: str, cwd: Path) -> str:
@@ -53,17 +79,14 @@ def issue(*, source: Path, binary: Path, output: Path, goos: str, goarch: str,
     source_commit = _run("git", "rev-parse", "HEAD", cwd=source)
     source_tree = _run("git", "rev-parse", "HEAD^{tree}", cwd=source)
     manifest_sha, manifest_files = _source_manifest(source)
+    produced = _build_info_for(binary)
     build_info = {
         "schema": "gt-index.build.v1",
         "git_commit": source_commit,
         "go_toolchain": toolchain,
         "build_tags": tags,
-        "graph_schema_version": "v15.2-trust-tier",
-        "capabilities": [
-            "atomic_graph_publication", "call_resolution_v2", "framework_surface_resolution_v1",
-            "incremental_stale_suppression", "parse_failure_accounting",
-            "retained_call_candidates", "versioned_query_policy",
-        ],
+        "graph_schema_version": produced["graph_schema_version"],
+        "capabilities": list(produced["capabilities"]),
     }
     build_material = json.dumps(build_info, sort_keys=True, separators=(",", ":")).encode()
     receipt: dict[str, Any] = {
@@ -80,7 +103,7 @@ def issue(*, source: Path, binary: Path, output: Path, goos: str, goarch: str,
         "cgo_enabled": bool(cgo),
         "build_tags": tags,
         "build_id": hashlib.sha256(build_material).hexdigest(),
-        "graph_schema_version": "v15.2-trust-tier",
+        "graph_schema_version": build_info["graph_schema_version"],
         "capabilities": build_info["capabilities"],
         "binary_path": str(binary).replace("\\", "/"),
         "binary_sha256": _sha256(binary),

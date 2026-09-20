@@ -126,7 +126,8 @@ jobs:
           # Verify source identity
           test "$(git -C "${SOURCE_ROOT}" rev-parse HEAD)" = "${SOURCE_COMMIT}"
           test "$(git -C "${SOURCE_ROOT}" rev-parse HEAD^{tree})" = "${SOURCE_TREE}"
-          # Use the vendored binary (built by CI run 33856088171) rather than
+          # Use the vendored binary (a CI artifact of the producer build run
+          # recorded in vendor/GROUNDTRUTH_WHEEL_SOURCE.txt) rather than
           # rebuilding — Go CGO static builds are not byte-reproducible across
           # different runner instances. The vendored binary IS a CI artifact;
           # this step verifies its identity matches the bundle.
@@ -152,7 +153,7 @@ jobs:
           assert info["git_commit"] == expected["producer_build"]["source_commit"]
           assert info["go_toolchain"] == "go1.22.5"
           assert info["build_tags"] == expected["producer_build"]["build_tags"]
-          assert info["graph_schema_version"] == "v15.2-trust-tier"
+          assert info["graph_schema_version"] == expected["graph_schema_version"]
           assert info["executable_sha256"] == digest
           assert digest == expected["producer_sha256"]
           assert hashlib.sha256((root / "build-info.json").read_bytes()).hexdigest() == expected["producer_build"]["build_info_sha256"]
