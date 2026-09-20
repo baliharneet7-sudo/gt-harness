@@ -1281,11 +1281,15 @@ def _planner_receipt(tmp_path: Path, monkeypatch, *, unresolved_reason: str) -> 
         "dataset": tmp_path,
         "static_unsupported": {},
         "SUPERVISOR_GRACE_SECONDS": 120,
+        "GT_OVERHEAD_EXTENSION_SECONDS": 1500,
         "musl_reason": lambda task_dir: None,
         "unresolved_base_reason": lambda task_dir: unresolved_reason,
         "unparsed_dockerfile_reason": lambda task_dir: None,
-        "resolve_budget": lambda path, multiplier: {
-            "execution_budget_sec": 600,
+        "resolve_budget": lambda path, multiplier, overhead_extension_sec=0.0: {
+            "execution_budget_sec": 600 + overhead_extension_sec,
+            "benchmark_budget_sec": 600,
+            "gt_overhead_extension_sec": overhead_extension_sec,
+            "deviates_from_benchmark_budget": bool(overhead_extension_sec),
             "task_config_sha256": "c" * 64,
         },
     }
@@ -1565,3 +1569,25 @@ def test_planner_falls_back_to_backslash_on_a_duplicated_escape_directive() -> N
     assert directives(["# escape=`", "# escape=`", "FROM ubuntu:24.04"]) == "\\"
     # One declaration, of either token, still resolves.
     assert directives(["# escape=`", "FROM ubuntu:24.04"]) == "`"
+
+
+def test_tb2_pays_for_gt_setup_like_every_other_paid_lane() -> None:
+    """The graph build and planning call must not run on the agent's clock.
+
+    `GT_OVERHEAD_EXTENSION_SECONDS` exists because GT spends measured time
+    before the agent's first step: 247s of image, checkout and graph build plus
+    a 702s planning call on the run its docstring cites, 18% of that task's
+    budget. The DeepSWE and SWE-Live paid lanes both add it. TB2 did not, so it
+    alone charged GT's setup to the agent and then recorded the deadline as the
+    agent's result.
+
+    The extension is a declared deviation from the benchmark's own budget, so
+    the receipt has to carry the untouched benchmark figure beside it.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "GT_OVERHEAD_EXTENSION_SECONDS" in text
+    assert "overhead_extension_sec=GT_OVERHEAD_EXTENSION_SECONDS" in text
+    assert '"benchmark_budget_seconds"' in text
+    assert '"gt_overhead_extension_seconds"' in text
+    assert '"deviates_from_benchmark_budget"' in text
