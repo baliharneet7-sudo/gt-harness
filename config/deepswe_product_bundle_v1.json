@@ -49,7 +49,7 @@
       "schema": "gt.producer_build_binding.v1",
       "status": "VERIFIED",
       "source_commit": "d51a527614e8457c371c08aa793ee9a1364eafe7",
-      "source_tree": "06abc3818704ceefc5fc3b7944ee78f741db09e1",
+      "source_tree": "9a2a89fecf67e57c0261c947041e00ebdfc94963",
       "binary_sha256": "f8610e4d4c600cfcf9ae17f6f5ad6edbb4c6d36a88dddb8a30e49798f2cd7b42",
       "build_info_path": "vendor/gt-index-linux-amd64.build-info.json",
       "build_info_sha256": "9a23d4ead730d7de778dcb9bbe266be8d1e711039e67f4f0cfedc6a228af5497",
