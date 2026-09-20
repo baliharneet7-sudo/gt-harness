@@ -865,7 +865,7 @@ def test_typical_path_similarity_distinct_label(tmp_path):
 
 
 def test_baseline_outcomes_smoke20_shape(tmp_path):
-    tasks = make_tasks_root(tmp_path)
+    make_tasks_root(tmp_path)
     base = tmp_path / "smoke20-x.json"
     base.write_text(json.dumps({
         "baseline": {"pass_rate": 0.5, "task_count": 2},
@@ -902,8 +902,14 @@ SMOKE_ROOT = Path(r"D:\gt_runs\33646776586")
 SMOKE_TASKS = Path(r"D:\deepswe-bench-435ee89\tasks")
 
 
+# The gold-patch assertion reads SMOKE_TASKS, so both fixtures have to be
+# present for the result to mean anything. Guarding only the bundle turned a
+# missing task checkout into a failed assertion about gold files, which reads
+# as a defect in the evaluator rather than an absent fixture.
 @pytest.mark.skipif(not SMOKE_ROOT.is_dir(),
                     reason="GT-on smoke bundle not present")
+@pytest.mark.skipif(not SMOKE_TASKS.is_dir(),
+                    reason="DeepSWE task checkout not present")
 def test_real_bundle_ingests_one_task():
     task_dirs = sorted(p for p in SMOKE_ROOT.iterdir()
                        if p.is_dir() and "-task-" in p.name)
