@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import tomllib
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
@@ -56,11 +57,33 @@ def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _tracked_files(root: Path) -> list[Path] | None:
+    """Files git tracks under ``root``; None when ``root`` is not a checkout.
+
+    Run artifacts land in the worktree as untracked `.tmp-*` trees full of
+    agent state, whose machine fields read as malformed ids. Scanning them
+    made the validator fail on a clean checkout for a reason no commit could
+    fix, which trains a reader to ignore it. Repository content is what git
+    tracks; anything else is a local by-product.
+    """
+    listed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--cached"],
+        capture_output=True,
+    )
+    if listed.returncode != 0:
+        return None
+    names = listed.stdout.decode("utf-8", "surrogateescape").split(chr(0))
+    return [root / name for name in names if name]
+
+
 def _iter_files(root: Path) -> Iterable[Path]:
     if root.is_file():
         yield root
         return
-    for path in sorted(root.rglob("*"), key=lambda candidate: candidate.as_posix()):
+    tracked = _tracked_files(root)
+    scanned = root.rglob("*") if tracked is None else tracked
+    candidates = sorted(scanned, key=lambda candidate: candidate.as_posix())
+    for path in candidates:
         if not path.is_file():
             continue
         try:

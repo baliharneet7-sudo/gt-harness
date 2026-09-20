@@ -424,7 +424,7 @@ def test_recorded_capture_payloads_are_not_machine_documents(tmp_path: Path) -> 
     # the FD-definition scanner must skip the recorded fixture root while
     # still flagging the same bytes anywhere else.
     capture = "[GT_CONTEXT_UNIT] {\"failure_id\": \"FD-001\"}\n"
-    recorded = _write(
+    _write(
         tmp_path
         / "smoke20_recorded"
         / "task"
@@ -435,7 +435,7 @@ def test_recorded_capture_payloads_are_not_machine_documents(tmp_path: Path) -> 
         / "abc.json",
         capture,
     )
-    authored = _write(tmp_path / "docs" / "payload.json", capture)
+    _write(tmp_path / "docs" / "payload.json", capture)
     _write(tmp_path / "ledger.md", "### FD-001 - canonical defect\n")
 
     report = validate_failure_ids.validate([tmp_path])
@@ -477,3 +477,50 @@ def test_repository_snapshot_and_ci_are_wired() -> None:
         "--expected-ledger-payload-sha256 "
         "3aefe224c70975266cdc777d231bc4ecb8b3fa38e98d7921d4ffcb5f6a2c7592"
     ) in workflow
+
+
+def _git_repo(root: Path) -> None:
+    import subprocess
+
+    for args in (["init", "-q"], ["add", "-A"]):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@e.x", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=root, check=True, capture_output=True,
+    )
+
+
+def test_untracked_run_artifacts_are_not_scanned_in_a_git_checkout(tmp_path: Path) -> None:
+    """A downloaded run artifact is not repository content.
+
+    Benchmark runs leave `.tmp-*` trees of agent state in the worktree. Those
+    carry machine fields that read as malformed ids, so the validator failed
+    on a clean checkout for reasons no commit could fix, and the failure had
+    to be explained away every time instead of being read.
+    """
+    _write(tmp_path / "README.md", "Reference FD-030.\n")
+    _git_repo(tmp_path)
+    _write(tmp_path / ".tmp-swelive-123" / "state" / "delivery.json", '{"failure_id": "FD-2"}\n')
+
+    report = validate_failure_ids.validate([tmp_path])
+
+    assert report["malformed_definitions"] == []
+    assert report["status"] == "pass"
+    assert report["files_scanned"] == 1
+
+
+def test_tracked_content_is_still_scanned_in_a_git_checkout(tmp_path: Path) -> None:
+    _write(tmp_path / "ledger.md", "### FD-29 - malformed\n")
+    _git_repo(tmp_path)
+
+    report = validate_failure_ids.validate([tmp_path])
+
+    assert report["malformed_definitions"] == ["ledger.md:1:FD-29"]
+
+
+def test_a_directory_that_is_not_a_checkout_is_scanned_whole(tmp_path: Path) -> None:
+    _write(tmp_path / "notes" / "ledger.md", "### FD-29 - malformed\n")
+
+    report = validate_failure_ids.validate([tmp_path])
+
+    assert report["malformed_definitions"] == ["notes/ledger.md:1:FD-29"]
