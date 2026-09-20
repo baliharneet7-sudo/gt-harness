@@ -216,3 +216,29 @@ def test_producer_schema_assertion_is_read_from_the_manifest_not_hardcoded() -> 
     literals = re.findall(r'"v1[0-9]+\.[0-9]+-[a-z-]+"', text)
     assert literals == [], f"workflow hardcodes producer schema version(s): {literals}"
     assert 'expected["graph_schema_version"]' in text
+
+
+def test_workflow_fetches_every_commit_the_recorded_runs_verify_against() -> None:
+    """Recorded-content verification shells out to git for these commits.
+
+    `gt_harness.recorded_content` resolves each recorded run's renderer
+    `source_commit` with `git rev-parse` and `git cat-file`. Those commits sit
+    on a side lineage that no branch reaches, so a CI clone that fetches only
+    branch heads does not carry them and the acceptance arm fails with
+    `renderer_provenance_invalid` - green on a developer machine whose object
+    store still holds them, red only in CI. Found by a clean clone of the
+    HAR-90 rebind.
+    """
+    provider_free = WORKFLOW.read_text(encoding="utf-8")
+    recorded = ROOT / "tests" / "fixtures" / "har81_attestation" / "recorded_runs"
+    commits = sorted(
+        {
+            directory.name
+            for run in recorded.iterdir()
+            for directory in (run / "renderer_sources").iterdir()
+            if directory.is_dir()
+        }
+    )
+    assert commits, "no recorded renderer sources to check"
+    missing = [commit for commit in commits if commit not in provider_free]
+    assert missing == [], f"workflow never fetches recorded renderer commits: {missing}"

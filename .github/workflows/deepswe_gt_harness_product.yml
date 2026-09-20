@@ -187,6 +187,19 @@ jobs:
           git fetch --force --no-tags origin \
             '+refs/tags/fixtures/har41-e56c7ef1:refs/tags/fixtures/har41-e56c7ef1' \
             '+refs/tags/fixtures/har64-7bbbc9d0:refs/tags/fixtures/har64-7bbbc9d0'
+          # The three recorded runs verify their renderer sources by asking
+          # git for each run's source_commit (gt_harness/recorded_content.py
+          # runs rev-parse and cat-file against them). Those commits are on
+          # no branch either, so the same tag treatment applies: without it
+          # the acceptance arm fails with renderer_provenance_invalid in CI
+          # only. Found by a clean clone of the HAR-90 rebind.
+          git fetch --force --no-tags origin \
+            '+refs/tags/fixtures/har81-renderer-35766673:refs/tags/fixtures/har81-renderer-35766673' \
+            '+refs/tags/fixtures/har81-renderer-529d835a:refs/tags/fixtures/har81-renderer-529d835a' \
+            '+refs/tags/fixtures/har81-renderer-ca744e7e:refs/tags/fixtures/har81-renderer-ca744e7e'
+          git cat-file -e 357666739cfe778b71508c68341948087f639b89^{commit}
+          git cat-file -e 529d835a2b3e1c6c3e3752cd8bfa477b27b591a0^{commit}
+          git cat-file -e ca744e7ebb7d03b6d11e31eeab8600cdb3669bdd^{commit}
           git fetch --force --no-tags origin \
             e56c7ef17eaffee36c80ff4dde4f0cd3991c4dcd \
             7bbbc9d0b7f02f8cdaab79ad82ee86884b738eb5
