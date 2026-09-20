@@ -460,3 +460,91 @@ Read HAR-88's status board, then this file. Check `git status` in `D:\w\t`
 and that both remotes are at the head this file names. Do not ask the user
 to restate the model, source pin, verifier, parallelism or failure policy —
 they are all here and in `config/`. Do not dispatch without authorisation.
+
+## 13. HAR-90 rebind: the dispatch branch now runs the current GT (2026-09-20)
+
+The benchmark must measure the GT that exists, so the dispatch branch was
+rebound from producer `d2e4a1c3` / schema `v15.2-trust-tier` to `5681eeae` /
+`v15.4-callsite-actuals`. Rebinding rather than merging: `git merge-tree`
+reports about 294 conflicts between this branch and `main`, almost all of it
+the workflow archive.
+
+| Identity | Value |
+|---|---|
+| Groundtruth source | `5681eeae99fb272e7e12b68e624e6f293878be97` |
+| Wheel | `0a4eaf2e73581955ac043fb5bab7d1eaee7739b63459972d59194ac21677cd99` |
+| Producer binary | `8dceeec11cd5cfbc7d45c5bf089e6c31ad6b0b6b360d4ab6f21c3d986e0ade25` |
+| build-info | `cb383b8e94a351879f799c68fd7790c01e32a936d51fa6a82120bd7122b7db05` |
+| Source fingerprint | `fa3f016a172931ea8190b6d30235eb8fe2028dfdebdc93f3cdb48cec23af32ae` |
+| Producer CI run | `35520971900` in `harneet2512/groundtruth`, success |
+| Manifest `vendor` pin | `f559a836` → `24ffd387` |
+
+Commits: `a2af121d` (artifacts, bundle, `producer_build.yml` admitted to the
+closed set), `3f367718` and `cc3cecf7` (vendor re-pins), `0dc52aac`,
+`69840800`, `d419c8bd`, `31108a72`, `37423747`.
+
+### Four defects the rebind exposed, all fixed
+
+1. **The product workflow asserted a literal schema version.** Every other
+   producer identity in that step was compared against the bundle; the graph
+   schema was compared against `"v15.2-trust-tier"`, so the rebind would have
+   failed in CI and nowhere else. It now reads the bundle, and a test refuses
+   any literal schema version in the workflow.
+2. **`scripts/issue_producer_artifact.py` stamped a fixed schema and
+   capability list** into a receipt about a binary it never opened. It now
+   reads the binary's build-info sidecar and refuses to issue without it.
+3. **The vendored source was not the certified source.** All 208 fingerprinted
+   files carried CRLF where the certified commit stores LF, so the content
+   fingerprint came out `e59f0fca` against the binary's declared `fa3f016a`.
+   The commit marker still matched, which is the exact shape the second
+   binding exists to catch: a source tree that is not the source, passing by
+   assertion. Re-extracted with conversion disabled; it reproduces `fa3f016a`.
+   **This defect came in with main's own rebind and is not caught there**, because
+   the binding tests live only on this branch.
+4. **A stale file survived the copy.** `git checkout <ref> -- vendor/` adds and
+   updates but cannot delete, so one file from the previous snapshot remained.
+
+### Two checks that were failing for reasons no commit could fix
+
+- **The failure-id validator walked the whole worktree**, so a downloaded run
+  artifact made it fail on a clean checkout: 16,270 files scanned, malformed
+  ids reported out of agent state. It now lists tracked files in a checkout
+  and keeps the full walk elsewhere. The repo scans clean: 992 files, zero
+  malformed.
+- **The real-bundle smoke guarded one fixture and read two.** With the DeepSWE
+  task checkout removed in the disk cleanup it failed with "gold patch should
+  resolve for a real task", which reads as an evaluator defect. Both fixtures
+  are guarded now, and the checkout is restored at pinned snapshot `435ee89`.
+
+### Two more defects the clean clone caught
+
+5. **CI could not verify the recorded runs.** Recorded-content verification
+   asks git for each run's renderer `source_commit`; all three sit on a side
+   lineage no branch reaches, so a CI clone never carries them and the
+   acceptance arm fails with `renderer_provenance_invalid`. It passes on any
+   machine whose object store still holds them, which is every machine we
+   develop on. Fixed with `fixtures/har81-renderer-*` tags on all three
+   remotes, fetched by refspec and checked with `cat-file`, and a test that
+   derives the required commits from the recorded-runs directory itself.
+6. **A leftover file and a CRLF snapshot** are items 3 and 4 above; both were
+   invisible until the content fingerprint and the clean clone ran.
+
+### Verification of the rebound branch
+
+| Check | Result |
+|---|---|
+| Full suite, local worktree (4 slices) | all exit 0 |
+| Full suite, fresh `--no-local` clone with fixture tags (4 slices) | all exit 0 |
+| Product acceptance | 14/14 |
+| Manifest object pins | all 8 match HEAD |
+| Manifest seal | recomputes to `73730c5a6c3e65d4` |
+| Vendored source fingerprint | reproduces `fa3f016a`, 208 files |
+| Workflow reachability validators | no failures, both workflows |
+| Failure-id validator | pass, 992 tracked files, 0 malformed |
+| Workflows parse | all 13 |
+| ruff over the delta | clean |
+
+The benchmark lanes now measure producer `5681eeae` at schema
+`v15.4-callsite-actuals`. What remains before a paid run is unchanged and
+listed in section 7b: re-read StreamLake's promotional price, decide DeepSWE
+reasoning effort, route SWE-Live to its 0423 baseline.

@@ -3,6 +3,12 @@
 Checked 2026-09-20, offline, zero spend. Everything below was verified here,
 not taken from the handoff text.
 
+**RESOLVED 2026-09-20.** The dispatch branch was rebound to producer
+`5681eeae` / `v15.4-callsite-actuals` and now passes its full suite in a fresh
+clone. Six defects surfaced and were fixed; see section 13 of
+`gt_hardening_rsi_2026-09-18.md`. What follows is the assessment as written
+before the rebind.
+
 ## The headline
 
 **Two branches each hold half of a benchmark-ready harness, and neither is
