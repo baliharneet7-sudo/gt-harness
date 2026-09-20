@@ -427,6 +427,36 @@ def _workspace_holds_work(state: dict) -> bool:
     )
 
 
+def _reap_descendants(child: subprocess.Popen, *, contained: bool, posix: bool) -> None:
+    """Kill the child's descendants, whatever the shell left behind.
+
+    A background writer can outlive the shell that started it, and no child may
+    mutate a published output artifact, so the whole process group goes.
+
+    The group is signalled only for a pid that can own one. `killpg` on a
+    non-positive pid raises EINVAL, which killed the contained branch on Linux
+    while every Windows run skipped the branch and looked green; `killpg(0)`
+    is worse, because it signals the harness's own group. A group that is
+    already gone, or that this process may not signal, is not a failure of the
+    run either - the descendants are what matter, and they are gone.
+    """
+    if posix:
+        if contained and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=7)
+            except subprocess.TimeoutExpired:
+                pass
+        if isinstance(child.pid, int) and child.pid > 0:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+    elif child.poll() is None:
+        subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 class CredentialIsolatedLocalEnvironment(LocalEnvironment):
     """Stock local execution semantics with host credentials removed.
 
@@ -565,22 +595,7 @@ class CredentialIsolatedLocalEnvironment(LocalEnvironment):
                 output["exception_info"] = f"An error occurred while executing the command: {exc}"
             finally:
                 if child is not None:
-                    # Kill descendants even if the shell exited before a background
-                    # writer. No child may mutate a published output artifact.
-                    if os.name == "posix":
-                        if contained and child.poll() is None:
-                            child.terminate()
-                            try:
-                                child.wait(timeout=7)
-                            except subprocess.TimeoutExpired:
-                                pass
-                        try:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    elif child.poll() is None:
-                        subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    _reap_descendants(child, contained=contained, posix=os.name == "posix")
                     child.wait()
                     output["returncode"] = child.returncode
                 if contained and not worker_receipt.is_file():

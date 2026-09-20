@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -948,8 +949,24 @@ def test_paid_workflow_logs_a_bucket_and_never_a_headroom_ratio(
 
 
 @pytest.mark.parametrize("workflow", PAID_WORKFLOWS, ids=lambda path: path.stem)
-def test_paid_workflow_keeps_crlf_and_parses_as_yaml(workflow: Path) -> None:
-    raw = workflow.read_bytes()
+def test_paid_workflow_line_endings_are_committed_and_it_parses_as_yaml(
+    workflow: Path,
+) -> None:
+    """Pin the bytes CI reads, which are the committed ones.
 
-    assert raw.count(b"\r\n") == raw.count(b"\n")
-    assert yaml.safe_load(raw.decode("utf-8"))["jobs"]["provider_gate"]["steps"]
+    This asserted CRLF over the worktree. That is a property of the checkout,
+    not of the repository: git writes CRLF here under autocrlf and LF on the
+    runner, so the check passed on Windows and failed on Linux over content
+    that was identical in git. These blobs are stored LF, so LF is what the
+    run actually consumes and what a future normalization must not silently
+    flip.
+    """
+    committed = subprocess.run(
+        ["git", "show", f"HEAD:{workflow.relative_to(ROOT).as_posix()}"],
+        capture_output=True, check=True, cwd=ROOT,
+    ).stdout
+
+    assert committed.count(b"\r\n") == 0, "committed workflow bytes are LF"
+    assert committed.count(b"\n") > 0
+    text = workflow.read_text(encoding="utf-8")
+    assert yaml.safe_load(text)["jobs"]["provider_gate"]["steps"]

@@ -779,3 +779,64 @@ def test_the_containment_subcase_separates_interpreter_bytes_from_command_bytes(
     assert _containment_gap(0, b"", 0) == "containment_unwitnessed"
     assert _containment_gap(-9, b"", 0) == "containment_unwitnessed"
     assert _containment_gap(None, b"", 0) == "containment_unwitnessed"
+
+
+def test_reaping_never_signals_a_group_the_child_does_not_own(monkeypatch):
+    """A child pid that is not a group leader must not take the harness with it.
+
+    The reap path called `os.killpg(child.pid, SIGKILL)` on whatever pid the
+    child reported and caught only ProcessLookupError. A non-positive pid
+    raises OSError(EINVAL) on Linux, which is how the contained branch died in
+    CI while every Windows run skipped the branch and looked green; a pid of 0
+    is worse, because killpg(0) signals the harness's own process group.
+    """
+    import os as _os
+    import signal as _signal
+
+    from scripts.miniswe_gt_run import _reap_descendants
+
+    # SIGKILL exists on every posix host and on no Windows one; the branch
+    # under test is the posix branch, so the constant is supplied here.
+    monkeypatch.setattr(_signal, "SIGKILL", _signal.SIGTERM, raising=False)
+    signalled: list[int] = []
+    monkeypatch.setattr(_os, "killpg", lambda pid, sig: signalled.append(pid), raising=False)
+
+    for pid in (-1, 0):
+        _reap_descendants(_StubWorkerChildPid(pid), contained=True, posix=True)
+    assert signalled == [], "a pid that cannot own a group must never reach killpg"
+
+    _reap_descendants(_StubWorkerChildPid(4321), contained=True, posix=True)
+    assert signalled == [4321]
+
+
+def test_reaping_survives_a_group_that_is_already_gone(monkeypatch):
+    """EINVAL, ESRCH and EPERM all mean the descendants are not ours to kill."""
+    import os as _os
+    import signal as _signal
+
+    from scripts.miniswe_gt_run import _reap_descendants
+
+    monkeypatch.setattr(_signal, "SIGKILL", _signal.SIGTERM, raising=False)
+
+    def refuse(pid, sig):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(_os, "killpg", refuse, raising=False)
+    _reap_descendants(_StubWorkerChildPid(4321), contained=True, posix=True)
+
+
+class _StubWorkerChildPid:
+    """A child that has exited, carrying only the pid under test."""
+
+    def __init__(self, pid):
+        self.pid = pid
+        self.returncode = 0
+
+    def poll(self):
+        return 0
+
+    def terminate(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
