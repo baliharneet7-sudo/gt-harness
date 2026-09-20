@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -242,3 +243,24 @@ def test_workflow_fetches_every_commit_the_recorded_runs_verify_against() -> Non
     assert commits, "no recorded renderer sources to check"
     missing = [commit for commit in commits if commit not in provider_free]
     assert missing == [], f"workflow never fetches recorded renderer commits: {missing}"
+
+
+def test_manifest_git_pins_are_full_length_like_the_workflow_demands() -> None:
+    """The workflow rejects an abbreviated pin, and only in CI.
+
+    `Resolve immutable product pins` requires 40-hex commits and a 64-hex
+    producer digest, exiting `product_manifest_git_pin_invalid` otherwise. A
+    manifest carrying `9604bec7` for the review-inbox commit therefore failed
+    every run on main from the HAR-90 rebind onward, while every local check
+    stayed green: nothing offline read the pin's length.
+    """
+    manifest = json.loads((ROOT / "config" / "deepswe_product_bundle_v1.json").read_text(encoding="utf-8"))
+    groundtruth = manifest["groundtruth"]
+    commits = {
+        "source_commit": groundtruth["source_commit"],
+        "source_tree": groundtruth["source_tree"],
+        "review_inbox_commit": groundtruth["lineage_exception"]["review_inbox_commit"],
+    }
+    abbreviated = {name: value for name, value in commits.items() if not re.fullmatch(r"[0-9a-f]{40}", value)}
+    assert abbreviated == {}, f"abbreviated git pins the workflow will refuse: {abbreviated}"
+    assert re.fullmatch(r"[0-9a-f]{64}", groundtruth["producer_sha256"])

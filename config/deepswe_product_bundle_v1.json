@@ -993,7 +993,7 @@
         "tests/wrapper/test_router_v2_telemetry.py",
         "tools/sweagent/gt_pre_finish_gate/lib/gt_pre_finish_gate.py"
       ],
-      "review_inbox_commit": "9604bec7",
+      "review_inbox_commit": "9604bec7586e3114fc20b7c2b1777b696b1a4fd9",
       "review_packets": [
         {
           "packet_id": "har70-groundtruth-db9daf9e",
@@ -1109,7 +1109,7 @@
           ]
         }
       ],
-      "attestation_digest_sha256": "73730c5a6c3e65d464468b66469503122b980f556cabd8b837aa423f48ee5c97"
+      "attestation_digest_sha256": "f221f9063abf0c0eb9bb9cedf7b17b639acab2a49efd9314f9d23d67d91be216"
     }
   },
   "capabilities": [
