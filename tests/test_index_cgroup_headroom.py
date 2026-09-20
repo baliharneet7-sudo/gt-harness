@@ -787,3 +787,86 @@ def test_the_indexer_does_not_import_gt_harness_at_module_scope() -> None:
         if name.startswith("gt_harness")
     ]
     assert offenders == [], offenders
+
+
+def test_page_cache_is_not_memory_pressure() -> None:
+    """Run 35539593546: every TB2 task refused at a cgroup full of file cache.
+
+    The container reported max=2147483648 and current=2146897920 - 585 KiB
+    free - so the reserve took the headroom below zero and the indexer refused
+    three times with GT_INDEX_MEMORY_HEADROOM_INSUFFICIENT. No graph, no GT,
+    and Harbor recorded infrastructure_failed for the whole cohort.
+
+    `memory.current` on cgroup v2 counts the page cache, which the kernel
+    reclaims on demand. The same receipt proves it was cache: oom_kill_delta
+    was 0, and a cgroup genuinely out of anonymous memory would have been
+    killed rather than left sitting at its ceiling.
+    """
+    snapshot = {
+        "max": 2147483648,
+        "current": 2146897920,
+        "reclaimable": 1932735283,  # ~1.8 GiB of inactive file pages
+        "limit_state": "limited",
+        "headroom_basis": "max_and_current_less_reclaimable",
+    }
+
+    limit = indexer._effective_index_memory_limit(snapshot)
+
+    assert limit > 0, "reclaimable cache must not read as pressure"
+    assert limit <= 2147483648 // 2, "the half-of-cgroup rule still applies"
+
+
+def test_anonymous_pressure_still_refuses_when_nothing_is_reclaimable() -> None:
+    """The guard stays: a cgroup that is genuinely full still reads as 0."""
+    assert indexer._effective_index_memory_limit(
+        {"max": 200 * MIB, "current": 190 * MIB, "reclaimable": 0,
+         "limit_state": "limited",
+         "headroom_basis": "max_and_current_less_reclaimable"}
+    ) == 0
+
+
+def test_reclaimable_is_never_counted_beyond_what_is_in_use() -> None:
+    """A stat file claiming more cache than usage must not invent headroom."""
+    snapshot = {"max": 1024 * MIB, "current": 200 * MIB, "reclaimable": 900 * MIB,
+                "limit_state": "limited",
+                "headroom_basis": "max_and_current_less_reclaimable"}
+    assert indexer._effective_index_memory_limit(snapshot) == min(
+        indexer._INDEX_RSS_LIMIT_BYTES, 512 * MIB, (1024 - 128) * MIB)
+
+
+def test_a_missing_stat_file_reads_as_no_reclaimable_evidence() -> None:
+    """Without memory.stat the arithmetic is exactly what it was before."""
+    snapshot = {"max": 1024 * MIB, "current": 200 * MIB, "reclaimable": None,
+                "limit_state": "limited", "headroom_basis": "max_and_current"}
+    assert indexer._effective_index_memory_limit(snapshot) == min(
+        indexer._INDEX_RSS_LIMIT_BYTES, 512 * MIB, (1024 - 200 - 128) * MIB)
+
+
+def test_snapshot_reads_reclaimable_cache_from_memory_stat(tmp_path: Path) -> None:
+    """The discount is worthless unless the reading reaches the decision."""
+    proc_root, sys_root, directory = _mock_roots(
+        tmp_path, version=2, limit=str(2 * 1024 * MIB), current=str(2046 * MIB)
+    )
+    (directory / "memory.stat").write_text(
+        "anon 104857600\ninactive_file 1932735283\nslab_reclaimable 16777216\n",
+        encoding="ascii",
+    )
+
+    snapshot = indexer._cgroup_snapshot(proc_root=proc_root, sys_root=sys_root, pid=42)
+
+    assert snapshot["reclaimable"] == 1932735283 + 16777216
+    assert snapshot["headroom_basis"] == "max_and_current_less_reclaimable"
+    assert indexer._effective_index_memory_limit(snapshot) > 0
+
+
+def test_a_cgroup_without_memory_stat_reports_no_reclaimable_reading(
+    tmp_path: Path,
+) -> None:
+    proc_root, sys_root, _directory = _mock_roots(
+        tmp_path, version=2, limit=str(1024 * MIB), current=str(200 * MIB)
+    )
+
+    snapshot = indexer._cgroup_snapshot(proc_root=proc_root, sys_root=sys_root, pid=42)
+
+    assert snapshot["reclaimable"] is None
+    assert snapshot["headroom_basis"] == "max_and_current"

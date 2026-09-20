@@ -528,7 +528,9 @@ def _read_memory_scalar(path: Path) -> tuple[str, int | None]:
     return _LIMIT_LIMITED, value
 
 
-def _headroom_basis(limit_state: str, current: int | None) -> str:
+def _headroom_basis(
+    limit_state: str, current: int | None, reclaimable: int | None = None
+) -> str:
     """Which readings the headroom was computed from, for the refusal text.
 
     ``uncapped`` and ``no_ceiling_evidence`` both spend the flat cap (see
@@ -542,7 +544,13 @@ def _headroom_basis(limit_state: str, current: int | None) -> str:
         return "uncapped"
     if limit_state != _LIMIT_LIMITED:
         return "no_ceiling_evidence"
-    return "max_and_current" if current is not None else "max_only"
+    if current is None:
+        return "max_only"
+    return (
+        "max_and_current_less_reclaimable"
+        if reclaimable is not None
+        else "max_and_current"
+    )
 
 
 def _cgroup_memory_events(path: Path) -> dict[str, int]:
@@ -556,12 +564,46 @@ def _cgroup_memory_events(path: Path) -> dict[str, int]:
     return events
 
 
+def _cgroup_reclaimable_bytes(directory: Path, version: int) -> int | None:
+    """Page cache and reclaimable slab in this cgroup, or None if unreadable.
+
+    Counted conservatively: inactive file pages and reclaimable slab only.
+    Active file pages are reclaimable too, but they are in use right now, and
+    the point of this number is what the kernel would hand back under
+    pressure without anyone noticing. A cgroup with no stat file gets None,
+    which leaves the arithmetic exactly as it was.
+    """
+    wanted = ("inactive_file", "slab_reclaimable")
+    name = "memory.stat"
+    total: int | None = None
+    try:
+        text = (directory / name).read_text(encoding="ascii")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or parts[0] not in wanted:
+            continue
+        try:
+            value = int(parts[1])
+        except ValueError:
+            continue
+        if value < 0:
+            continue
+        total = value if total is None else total + value
+    if total is None and version == 1:
+        # v1 spells it `total_inactive_file`; absent means absent, not zero.
+        return None
+    return total
+
+
 def _unreadable_cgroup_snapshot(source: str) -> dict[str, object]:
     """No usable reading at all - a gap, never a measurement."""
     return {
         "current": None,
         "max": None,
         "peak": None,
+        "reclaimable": None,
         "oom": None,
         "oom_kill": None,
         "cgroup_version": None,
@@ -582,16 +624,18 @@ def _unified_root_snapshot(sys_root: Path) -> dict[str, object]:
     current_state, current = _read_memory_scalar(sys_root / "memory.current")
     peak_state, peak = _read_memory_scalar(sys_root / "memory.peak")
     events = _cgroup_memory_events(sys_root / "memory.events")
+    reclaimable = _cgroup_reclaimable_bytes(sys_root, 2)
     readable = {limit_state, current_state, peak_state} != {_LIMIT_UNREADABLE}
     return {
         "current": current,
         "max": maximum,
         "peak": peak,
+        "reclaimable": reclaimable,
         "oom": events.get("oom"),
         "oom_kill": events.get("oom_kill"),
         "cgroup_version": 2 if readable else None,
         "limit_state": limit_state,
-        "headroom_basis": _headroom_basis(limit_state, current),
+        "headroom_basis": _headroom_basis(limit_state, current, reclaimable),
         "source": "unified_root" if readable else "unavailable",
     }
 
@@ -711,10 +755,12 @@ def _controller_snapshot(version: int, directory: Path) -> dict[str, object]:
         directory / ("memory.peak" if version == 2 else "memory.max_usage_in_bytes"))
     events = _cgroup_memory_events(
         directory / ("memory.events" if version == 2 else "memory.oom_control"))
+    reclaimable = _cgroup_reclaimable_bytes(directory, version)
     return {
         "current": current,
         "max": maximum,
         "peak": peak,
+        "reclaimable": reclaimable,
         # v1 has no "oom" counter - memory.oom_control reports under_oom,
         # which is a state and not a count. Reported as absent, as
         # gt_harness.cgroup.memory_snapshot reports it.
@@ -722,7 +768,7 @@ def _controller_snapshot(version: int, directory: Path) -> dict[str, object]:
         "oom_kill": events.get("oom_kill"),
         "cgroup_version": version,
         "limit_state": limit_state,
-        "headroom_basis": _headroom_basis(limit_state, current),
+        "headroom_basis": _headroom_basis(limit_state, current, reclaimable),
         "source": "proc_self_cgroup",
     }
 
@@ -965,7 +1011,22 @@ def _effective_index_memory_limit(snapshot: dict[str, object]) -> int:
         # reserve is not applied here because there is no usage to reserve
         # against - half the cgroup is already the conservative half.
         return min(_INDEX_RSS_LIMIT_BYTES, cgroup_max // 2)
-    headroom = max(0, cgroup_max - current)
+    # `memory.current` counts the page cache, which the kernel reclaims on
+    # demand, so a cgroup that has just loaded a task image reads as full
+    # while none of that memory is actually spoken for. Run 35539593546 lost
+    # every TB2 task to it: max 2,147,483,648 against current 2,146,897,920,
+    # 585 KiB apparent headroom, three refusals per task, no graph, and a
+    # cohort graded infrastructure_failed. The same receipts recorded
+    # oom_kill_delta 0, which is the proof it was cache: real anonymous
+    # pressure at the ceiling gets killed, not parked there.
+    reclaimable = snapshot.get("reclaimable")
+    if isinstance(reclaimable, bool) or not isinstance(reclaimable, int):
+        reclaimable = 0
+    # Never more than what is in use: a stat file that claims otherwise is a
+    # bad reading, and inventing headroom from it is the one outcome worse
+    # than refusing.
+    in_use = max(0, current - max(0, min(reclaimable, current)))
+    headroom = max(0, cgroup_max - in_use)
     safe_headroom = max(0, headroom - 128 * 1024 * 1024)
     # Leave half of a constrained task cgroup to the runner and its provider
     # transcript and reserve 128 MiB from currently available memory. Tiny or
