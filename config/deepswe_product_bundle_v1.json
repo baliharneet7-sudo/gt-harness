@@ -22,13 +22,13 @@
   },
   "groundtruth": {
     "repository": "https://github.com/harneet2512/groundtruth.git",
-    "source_commit": "d51a527614e8457c371c08aa793ee9a1364eafe7",
-    "source_tree": "9a2a89fecf67e57c0261c947041e00ebdfc94963",
+    "source_commit": "032014efb0ed986bfdeb5933f83d67ac0c3e41b2",
+    "source_tree": "0aae7c0c6347093a917f3c5563d7fd882453f85e",
     "graph_schema_version": "v15.4-callsite-actuals",
     "wheel_path": "vendor/groundtruth_mcp-1.0.0-py3-none-any.whl",
     "wheel_sha256": "0a4eaf2e73581955ac043fb5bab7d1eaee7739b63459972d59194ac21677cd99",
     "producer_path": "vendor/gt-index-linux-amd64",
-    "producer_sha256": "f8610e4d4c600cfcf9ae17f6f5ad6edbb4c6d36a88dddb8a30e49798f2cd7b42",
+    "producer_sha256": "d56b58d83bb307f3512b836ee83e89b65f8a1bbdd5730b5e6a778511ae42cd24",
     "provenance_status": "VERIFIED_ROUTE_B_SOURCE_BOUND",
     "wheel_runtime_status": "VERIFIED_VENDORED_ROUTE_B",
     "accepted_default_ref": "origin/gt-trial",
@@ -48,11 +48,11 @@
     "producer_build": {
       "schema": "gt.producer_build_binding.v1",
       "status": "VERIFIED",
-      "source_commit": "d51a527614e8457c371c08aa793ee9a1364eafe7",
-      "source_tree": "9a2a89fecf67e57c0261c947041e00ebdfc94963",
-      "binary_sha256": "f8610e4d4c600cfcf9ae17f6f5ad6edbb4c6d36a88dddb8a30e49798f2cd7b42",
+      "source_commit": "032014efb0ed986bfdeb5933f83d67ac0c3e41b2",
+      "source_tree": "0aae7c0c6347093a917f3c5563d7fd882453f85e",
+      "binary_sha256": "d56b58d83bb307f3512b836ee83e89b65f8a1bbdd5730b5e6a778511ae42cd24",
       "build_info_path": "vendor/gt-index-linux-amd64.build-info.json",
-      "build_info_sha256": "9a23d4ead730d7de778dcb9bbe266be8d1e711039e67f4f0cfedc6a228af5497",
+      "build_info_sha256": "4a3c09688aec750638184fcc549006918880e955c46a4d50a7cf2cb3ca3a3d8d",
       "builder_image_digest": "af9b40f2b1851be993763b85288f8434af87b5678af04355b1e33ff530b5765f",
       "build_tags": "netgo,osusergo,sqlite_fts5",
       "static_linking": true
@@ -64,7 +64,7 @@
       "reason_code": "digest_recorded_source_descends_from_unadvanced_default",
       "accepted_default_ref": "origin/gt-trial",
       "accepted_default_commit": "ea79b92669cbfa549e43a0286fc92ae942348a76",
-      "source_commit": "d51a527614e8457c371c08aa793ee9a1364eafe7",
+      "source_commit": "032014efb0ed986bfdeb5933f83d67ac0c3e41b2",
       "certified_source_commit": "cffca1fd29001577bf35a3355b7238e6cedd1130",
       "ancestry_path": [
         "ea79b92669cbfa549e43a0286fc92ae942348a76",
@@ -209,7 +209,8 @@
         "f43783fccba63474e469660b471cdcc7a54ad75e",
         "56106068f909dd64f20c8e10fbe85e6ce7cb6122",
         "5681eeae99fb272e7e12b68e624e6f293878be97",
-        "d51a527614e8457c371c08aa793ee9a1364eafe7"
+        "d51a527614e8457c371c08aa793ee9a1364eafe7",
+        "032014efb0ed986bfdeb5933f83d67ac0c3e41b2"
       ],
       "post_certification_changed_paths": [
         ".gitattributes",
@@ -995,7 +996,7 @@
         "tests/wrapper/test_router_v2_telemetry.py",
         "tools/sweagent/gt_pre_finish_gate/lib/gt_pre_finish_gate.py"
       ],
-      "review_inbox_commit": "50d6c3cb35bc74df95daddc150fcb86474fea69d",
+      "review_inbox_commit": "b5e329a242e9df9c054f1a8317ed8d24f4ad44b9",
       "review_packets": [
         {
           "packet_id": "har70-groundtruth-db9daf9e",
@@ -1100,6 +1101,15 @@
           "packet_digest_sha256": "b32eb7f22ed3a394ac2e8527a62e7e5a364ea7b0edcfc2a8bce4f3b4c9b4630a",
           "kind": "check_outcome",
           "status": "PASS"
+        },
+        {
+          "path": "inbox/HAR-90/har90-certified-producer-032014ef.json",
+          "basis": "certified_producer_build_green",
+          "packet_id": "har90-certified-producer-032014ef",
+          "head_sha": "032014efb0ed986bfdeb5933f83d67ac0c3e41b2",
+          "packet_digest_sha256": "41ed9caf699ca1051740ff4440d2b76579525c9894fdc7fe7b8090f24d7f3ccd",
+          "kind": "check_outcome",
+          "status": "PASS"
         }
       ],
       "product_review_packets": [
@@ -1120,7 +1130,7 @@
           ]
         }
       ],
-      "attestation_digest_sha256": "9c62a80e48556e2dca913e07f9a0cd207d6881901aa241a7f609a4ffa9afa308"
+      "attestation_digest_sha256": "bc6cafa2ebb6bb16f75684c7766f90442e819693fc8b8b9632fd9613be5adb1b"
     }
   },
   "capabilities": [
