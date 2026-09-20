@@ -22,8 +22,8 @@
   },
   "groundtruth": {
     "repository": "https://github.com/harneet2512/groundtruth.git",
-    "source_commit": "5681eeae99fb272e7e12b68e624e6f293878be97",
-    "source_tree": "06abc3818704ceefc5fc3b7944ee78f741db09e1",
+    "source_commit": "d51a527614e8457c371c08aa793ee9a1364eafe7",
+    "source_tree": "9a2a89fecf67e57c0261c947041e00ebdfc94963",
     "graph_schema_version": "v15.4-callsite-actuals",
     "wheel_path": "vendor/groundtruth_mcp-1.0.0-py3-none-any.whl",
     "wheel_sha256": "0a4eaf2e73581955ac043fb5bab7d1eaee7739b63459972d59194ac21677cd99",
@@ -64,7 +64,7 @@
       "reason_code": "digest_recorded_source_descends_from_unadvanced_default",
       "accepted_default_ref": "origin/gt-trial",
       "accepted_default_commit": "ea79b92669cbfa549e43a0286fc92ae942348a76",
-      "source_commit": "5681eeae99fb272e7e12b68e624e6f293878be97",
+      "source_commit": "d51a527614e8457c371c08aa793ee9a1364eafe7",
       "certified_source_commit": "cffca1fd29001577bf35a3355b7238e6cedd1130",
       "ancestry_path": [
         "ea79b92669cbfa549e43a0286fc92ae942348a76",
@@ -208,7 +208,8 @@
         "4e346402f534e9d126d10d5719087b9899ac2efc",
         "f43783fccba63474e469660b471cdcc7a54ad75e",
         "56106068f909dd64f20c8e10fbe85e6ce7cb6122",
-        "5681eeae99fb272e7e12b68e624e6f293878be97"
+        "5681eeae99fb272e7e12b68e624e6f293878be97",
+        "d51a527614e8457c371c08aa793ee9a1364eafe7"
       ],
       "post_certification_changed_paths": [
         ".gitattributes",
@@ -393,6 +394,7 @@
         "gt-index/internal/store/content_address_test.go",
         "gt-index/internal/store/core_only_reader_test.go",
         "gt-index/internal/store/incremental.go",
+        "gt-index/internal/store/nodes_fts_test.go",
         "gt-index/internal/store/parsed_facts.go",
         "gt-index/internal/store/parsed_facts_test.go",
         "gt-index/internal/store/phase_receipt.go",
@@ -993,7 +995,7 @@
         "tests/wrapper/test_router_v2_telemetry.py",
         "tools/sweagent/gt_pre_finish_gate/lib/gt_pre_finish_gate.py"
       ],
-      "review_inbox_commit": "9604bec7586e3114fc20b7c2b1777b696b1a4fd9",
+      "review_inbox_commit": "50d6c3cb35bc74df95daddc150fcb86474fea69d",
       "review_packets": [
         {
           "packet_id": "har70-groundtruth-db9daf9e",
@@ -1089,6 +1091,15 @@
           "status": "PASS",
           "basis": "certified_producer_build_green",
           "packet_digest_sha256": "312a77c6eb688aee150ced5d1bca1b1cf4f02644b1851a41528b81311ab4cd1c"
+        },
+        {
+          "path": "inbox/HAR-90/har90-certified-producer-d51a5276.json",
+          "basis": "certified_producer_build_green",
+          "packet_id": "har90-certified-producer-d51a5276",
+          "head_sha": "d51a527614e8457c371c08aa793ee9a1364eafe7",
+          "packet_digest_sha256": "b32eb7f22ed3a394ac2e8527a62e7e5a364ea7b0edcfc2a8bce4f3b4c9b4630a",
+          "kind": "check_outcome",
+          "status": "PASS"
         }
       ],
       "product_review_packets": [
@@ -1109,7 +1120,7 @@
           ]
         }
       ],
-      "attestation_digest_sha256": "f221f9063abf0c0eb9bb9cedf7b17b639acab2a49efd9314f9d23d67d91be216"
+      "attestation_digest_sha256": "9c62a80e48556e2dca913e07f9a0cd207d6881901aa241a7f609a4ffa9afa308"
     }
   },
   "capabilities": [
