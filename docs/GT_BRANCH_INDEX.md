@@ -66,6 +66,16 @@ Its output is `docs/internal/UNSAVED_WORK.md`, and `docs/internal/README.md`
 explains the routine and what the verdicts mean. Run it before deleting
 anything.
 
+## 3b. HAR-90 landed on main and is not in the dispatch branch
+
+`origin/main` now pins a newer GT producer (`5681eeae`, schema
+`v15.4-callsite-actuals`) from the HAR-90 parser-exact substrate work, while
+the dispatch branch still pins `d2e4a1c3` / `v15.2-trust-tier`. Main has no
+benchmark lanes and none of the hardening; the dispatch branch has no HAR-90
+artifacts. Neither is benchmark ready alone, and a straight merge conflicts in
+about 294 places. What was verified and what a rebind needs:
+`docs/benchmarks/har90_vs_hardening_readiness_2026-09-20.md`.
+
 ## 4. Branches on GitHub
 
 `merged` means contained in `origin/main`. `open` means not merged; it may be
