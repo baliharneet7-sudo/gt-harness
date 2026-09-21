@@ -2287,6 +2287,45 @@ def _copy_graph_for_amend(parent: Path, candidate: Path) -> None:
         shutil.copyfile(log, candidate.with_name(candidate.name + "-wal"))
 
 
+def _producer_stderr_tail(stderr_tail: str) -> str:
+    """The END of the producer's stderr, collapsed to one bounded line.
+
+    The fatal line is always the last thing gt-index writes; the head is a
+    phase banner. Callers put this in a reason that journals truncate, so it
+    is bounded here rather than at each site.
+    """
+    return " ".join(str(stderr_tail or "").split())[-120:]
+
+
+def _build_failure_diagnostic(evidence: dict[str, object] | None) -> str:
+    """Name a failed BUILD with what the producer actually reported.
+
+    ``index_unavailable(error="nonzero_exit")`` is a blind receipt, the same
+    blindness ``_amend_failure_reason`` was written for. In TB2 run
+    35560215706 write-compressor journaled it eight times while the sealed
+    evidence beside it held the cause in full:
+
+        Parsed 0/1 files in 1ms (1 parse failures, 100.0%)
+          - decomp.c: parser-incomplete syntax tree
+        INDEX FAILED: 0/1 files parsed - graph would be empty
+
+    Nothing in the journal named a parser, a file or a policy, so the run read
+    as "the repository is unindexable" and the producer defect behind it was
+    invisible until someone downloaded the trial directory. The status, the
+    exit code and a bounded stderr tail now travel with the diagnostic.
+    """
+    if evidence is None:
+        return "gt-index failed without valid sealed evidence"
+    diagnostic = str(evidence.get("status") or "index build failed")
+    exit_code = evidence.get("exit_code")
+    if isinstance(exit_code, int):
+        diagnostic += f":exit={exit_code}"
+    stderr = _producer_stderr_tail(str(evidence.get("stderr_tail") or ""))
+    if stderr:
+        diagnostic += f":stderr={stderr}"
+    return diagnostic
+
+
 def _amend_failure_reason(process_result: IndexProcessResult) -> str:
     """Name a failed amend with the diagnostic the process reported.
 
@@ -2300,9 +2339,7 @@ def _amend_failure_reason(process_result: IndexProcessResult) -> str:
     reason = f"amend_failed:{process_result.error_code or process_result.status}"
     if process_result.exit_code is not None:
         reason += f":exit={process_result.exit_code}"
-    # Keep the END of the tail: the fatal line is always the last thing the
-    # producer writes, and the head is only ever a phase banner.
-    stderr = " ".join(process_result.stderr_tail.split())[-120:]
+    stderr = _producer_stderr_tail(process_result.stderr_tail)
     if stderr:
         reason += f":stderr={stderr}"
     return reason
@@ -3784,10 +3821,8 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                 if bound and failure is not None
                 else "index_failure_evidence_invalid"
             ),
-            error_diagnostic=(
-                str(evidence.get("status") or "index build failed")
-                if bound and evidence is not None
-                else "gt-index failed without valid sealed evidence"
+            error_diagnostic=_build_failure_diagnostic(
+                evidence if bound else None
             ),
             resource_evidence_path=str(evidence_path) if bound else "",
             resource_evidence_sha256=evidence_file_sha if bound else "",

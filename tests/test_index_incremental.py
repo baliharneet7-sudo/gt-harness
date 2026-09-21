@@ -768,6 +768,46 @@ def test_failed_amend_falls_back_to_a_full_rebuild_and_names_why(tmp_path, monke
     assert not receipt.success
 
 
+def test_a_failed_build_names_the_producers_own_error():
+    """The same blindness on the path that runs first.
+
+    TB2 run 35560215706, write-compressor: eight
+    ``index_unavailable(error="nonzero_exit")`` rows while the sealed evidence
+    beside them held the whole cause - a C file whose partial syntax tree was
+    counted as a parse failure, making 0 of 1 files "parsed", so the producer
+    refused a graph it had already extracted four functions into. Nothing in
+    the journal named a file, a parser or a policy, and the run read as an
+    unindexable repository for the rest of the episode.
+    """
+    evidence = {
+        "status": "nonzero_exit",
+        "exit_code": 1,
+        "stderr_tail": (
+            "Pass 2: parsing 1 files (2 workers)...\n"
+            "  Parsed 0/1 files in 1ms (1 parse failures, 100.0%)\n"
+            "  [WARN] parse failures (first 1):\n"
+            "    - decomp.c: parser-incomplete syntax tree\n"
+            "2026/09/21 05:48:40 INDEX FAILED: 0/1 files parsed - graph would "
+            "be empty (sample: [decomp.c: parser-incomplete syntax tree])\n"
+        ),
+    }
+
+    diagnostic = indexer._build_failure_diagnostic(evidence)
+
+    assert diagnostic.startswith("nonzero_exit:exit=1")
+    assert "INDEX FAILED: 0/1 files parsed" in diagnostic
+    # One journal row per event, and the caller truncates at 300.
+    assert "\n" not in diagnostic
+    assert len(diagnostic) <= 300
+
+
+def test_a_build_failure_without_evidence_still_says_so():
+    """An absent seal is its own diagnosis, not a missing one."""
+    assert indexer._build_failure_diagnostic(None) == (
+        "gt-index failed without valid sealed evidence"
+    )
+
+
 def test_a_failed_amend_names_the_producers_own_error(tmp_path, monkeypatch):
     """``amend_failed:GT_INDEX_PROCESS_FAILED`` alone was a blind receipt.
 
