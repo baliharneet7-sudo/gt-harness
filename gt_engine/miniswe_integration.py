@@ -520,6 +520,10 @@ class MiniSweAdapter(GroundtruthController):
         # transaction-boundary amend journals its refusal and defers here by
         # contract, so it never feeds this counter.
         self._amend_failure_streak: dict[str, int] = {}
+        # Consecutive recovery builds that adopted nothing, and the reason
+        # recovery was suspended for the episode once that streak was spent.
+        self._recovery_failure_streak = 0
+        self._recovery_suspended = ""
         # Provider-wait scheduler: whole-graph products (dense contract
         # store today) are launched while the agent is blocked on the
         # network and drained by the owner thread at the next boundary.
@@ -3441,6 +3445,20 @@ class MiniSweAdapter(GroundtruthController):
     #: publishes.
     AMEND_FAILURE_ESCALATION_STREAK = 2
 
+    #: Consecutive recovery builds that adopt nothing before the boundary
+    #: stops buying them for the rest of the episode. A recovery build over
+    #: the same source bytes is deterministic in the same way an amend is:
+    #: a repository the producer cannot index - TB2 run 35545356695 was a
+    #: one-file task in a language it does not parse - fails identically on
+    #: every attempt. That run journaled 194 graph_recovery rows of
+    #: ``adopted: false, elapsed_ms: 0`` on one task while the agent spent
+    #: all 100 of its turns, and the GT-off baseline solved 12 of the same
+    #: 14 tasks GT-on scored 0 on. Three attempts matches the producer's own
+    #: build_attempt_count and leaves room for a transient loss; a typed
+    #: memory refusal does not count, because that outcome is not
+    #: deterministic and already has its own defer window.
+    RECOVERY_FAILURE_SUSPEND_STREAK = 3
+
     def _amend_graph_inline(self, *, phase: str) -> None:
         """Catch the adopted graph up to the overlay, at a serving boundary.
 
@@ -3459,6 +3477,12 @@ class MiniSweAdapter(GroundtruthController):
             if value != "transaction_bytes_unavailable"
         ]
         if unenumerated:
+            if self._recovery_suspended:
+                # Recovery already proved it cannot land on this repository
+                # and said so once by name; journaling the same resync on
+                # every action afterwards is the other half of the noise
+                # that buried the graded result.
+                return
             # The dirty set is unknowable, so no amend can cover it. The one
             # honest resync is a whole-tree build: it publishes on the live
             # tree, not on the dirty set, and clears the omissions on
@@ -3572,6 +3596,8 @@ class MiniSweAdapter(GroundtruthController):
     def _recovery_build_inline(self, *, phase: str) -> None:
         """The only from-scratch build outside task start: the amend chain's
         base can never serve again, so the boundary rebuilds inline."""
+        if self._recovery_suspended:
+            return
         if self._index_memory_defer_until > time.monotonic():
             # A whole-tree build spawns the same bounded producer over far
             # more input than the amend that just died of pressure. Buying
@@ -3610,6 +3636,7 @@ class MiniSweAdapter(GroundtruthController):
                 error_type=type(exc).__name__, error_detail=str(exc)[:200],
             )
             self._record_graph_refresh_failure(type(exc).__name__, phase=phase)
+            self._count_recovery_outcome(adopted=False, transient=False, phase=phase)
             return
         try:
             # The requested revision is the adoption claim, not whatever the
@@ -3620,14 +3647,44 @@ class MiniSweAdapter(GroundtruthController):
             # A test double whose receipt is not a dataclass still carries the
             # requested revision through publish_graph's own argument.
             pass
-        self._adopt_graph_receipt(
+        defer_before = self._index_memory_defer_until
+        adopted = self._adopt_graph_receipt(
             receipt, event="graph_recovery", phase=phase,
             elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+        # A typed memory refusal opened the defer window inside adoption;
+        # that outcome is transient and must not spend the deterministic
+        # streak, exactly as the amend ladder treats it.
+        self._count_recovery_outcome(
+            adopted=adopted,
+            transient=self._index_memory_defer_until > defer_before,
+            phase=phase,
+        )
+
+    def _count_recovery_outcome(
+        self, *, adopted: bool, transient: bool, phase: str
+    ) -> None:
+        """Spend or reset the deterministic recovery streak; suspend on exhaustion."""
+        if adopted:
+            self._recovery_failure_streak = 0
+            return
+        if transient or self._recovery_suspended:
+            return
+        self._recovery_failure_streak += 1
+        if self._recovery_failure_streak < self.RECOVERY_FAILURE_SUSPEND_STREAK:
+            return
+        self._recovery_suspended = "deterministic_failure_streak"
+        self.store.append(
+            "graph_recovery_suspended", phase=phase,
+            reason=self._recovery_suspended,
+            failure_streak=self._recovery_failure_streak,
+            source_revision=str(self.engine_state.source_revision or ""),
+            impact="graph consumers degrade to the no-graph path for the rest of the episode",
         )
 
     def _adopt_graph_receipt(
         self, receipt: Any, *, event: str, phase: str = "", **fields: Any,
-    ) -> None:
+    ) -> bool:
         """Publish, journal, and reclaim a produced graph, on the owner thread.
 
         Reclamation keys on the adoption decision: adopted -> prune siblings
@@ -3675,6 +3732,7 @@ class MiniSweAdapter(GroundtruthController):
                 str(getattr(receipt, "error_type", "") or "build_failed"),
                 phase=phase or event,
             )
+        return adopted
 
     def _reclaim_produced_graph(
         self, graph_db: str, *, success: bool, adopted: bool

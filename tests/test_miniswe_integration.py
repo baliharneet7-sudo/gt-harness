@@ -2422,3 +2422,104 @@ def test_a_headroom_refused_amend_opens_the_cgroup_window_only(monkeypatch, tmp_
     assert sum(1 for r in _journal_rows(adapter)
                if r.get("event") in {
                    "graph_sync_amend_refused", "graph_boundary_amend_refused"}) == 1
+
+
+def _unindexable_receipt(**overrides):
+    """The receipt run 35545356695 produced 194 times: no graph, instantly."""
+    from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
+
+    fields = dict(
+        graph_db="", graph_revision="", analysis_state="unrecorded",
+        error_type="GT_INDEX_PROCESS_FAILED",
+    )
+    fields.update(overrides)
+    return IndexBuildReceipt(IndexBuildStatus.BUILD_FAILED, **fields)
+
+
+def test_a_repository_that_cannot_be_indexed_stops_being_rebuilt(
+    monkeypatch, tmp_path
+):
+    """TB2 run 35545356695, prove-plus-comm: one file, no graph, 194 rebuilds.
+
+    The startup index came up unavailable, so every action afterwards took
+    the unenumerated branch and bought a recovery build that returned in 0 ms
+    having adopted nothing. The agent spent all 100 turns on that, and the
+    GT-off baseline solved 12 of the same 14 tasks that GT-on scored 0 on.
+
+    A recovery build on the same source bytes is deterministic: after it has
+    failed a few times in a row with nothing adopted between, another attempt
+    can only fail the same way. The boundary suspends recovery, once and by
+    name, and stops spending the run on it.
+    """
+    adapter, _repo, _graph = _edited_adapter(tmp_path)
+    spawns: list[int] = []
+    monkeypatch.setattr(
+        "gt_engine.indexer.ensure_index_with_receipt",
+        lambda root, **kwargs: spawns.append(1) or _unindexable_receipt(),
+    )
+
+    for _ in range(10):
+        adapter._recovery_build_inline(phase="native_action")
+
+    limit = adapter.RECOVERY_FAILURE_SUSPEND_STREAK
+    assert len(spawns) == limit, spawns
+    suspended = [
+        row for row in _journal_rows(adapter)
+        if row.get("event") == "graph_recovery_suspended"
+    ]
+    assert len(suspended) == 1
+    assert suspended[0]["reason"] == "deterministic_failure_streak"
+    assert suspended[0]["failure_streak"] == limit
+
+
+def test_recovery_suspension_silences_the_per_action_resync_loop(
+    monkeypatch, tmp_path
+):
+    """Once suspended, the unenumerated branch must not journal a resync per
+    action either: the 194 resync rows were the other half of the noise."""
+    adapter, _repo, _graph = _edited_adapter(tmp_path)
+    monkeypatch.setattr(
+        "gt_engine.indexer.ensure_index_with_receipt",
+        lambda root, **kwargs: _unindexable_receipt(),
+    )
+    for _ in range(adapter.RECOVERY_FAILURE_SUSPEND_STREAK):
+        adapter._recovery_build_inline(phase="native_action")
+    before = len(_journal_rows(adapter))
+
+    for step in range(5):
+        adapter.engine_state.mark_source_unenumerated(
+            revision=f"{step:064x}", reason="source_advance_unenumerated"
+        )
+        adapter._amend_graph_inline(phase="native_action")
+
+    new_rows = _journal_rows(adapter)[before:]
+    assert not [r for r in new_rows if r.get("event") == "graph_resync_incomplete"]
+    assert not [r for r in new_rows if r.get("event") == "graph_recovery"]
+
+
+def test_an_adopted_recovery_resets_the_suspension_streak(monkeypatch, tmp_path):
+    """Two failures then a success is not a dead repository."""
+    from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
+
+    adapter, _repo, _graph = _edited_adapter(tmp_path)
+    rebuilt = tmp_path / "rebuilt.db"
+    rebuilt.write_bytes(b"new")
+    outcomes = [
+        _unindexable_receipt(), _unindexable_receipt(),
+        IndexBuildReceipt(
+            IndexBuildStatus.BUILT, graph_db=str(rebuilt),
+            graph_revision="b" * 64, analysis_state="complete",
+        ),
+    ]
+    monkeypatch.setattr(
+        "gt_engine.indexer.ensure_index_with_receipt",
+        lambda root, **kwargs: outcomes.pop(0),
+    )
+    for _ in range(3):
+        adapter._recovery_build_inline(phase="native_action")
+
+    assert adapter._recovery_failure_streak == 0
+    assert not [
+        r for r in _journal_rows(adapter)
+        if r.get("event") == "graph_recovery_suspended"
+    ]
