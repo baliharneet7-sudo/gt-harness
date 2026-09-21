@@ -2467,9 +2467,7 @@ def test_a_repository_that_cannot_be_indexed_stops_being_rebuilt(
         row for row in _journal_rows(adapter)
         if row.get("event") == "graph_recovery_suspended"
     ]
-    assert len(suspended) == 1
-    assert suspended[0]["reason"] == "deterministic_failure_streak"
-    assert suspended[0]["failure_streak"] == limit
+    assert suspended == []  # same bytes: skipped, not given up on
 
 
 def test_recovery_suspension_silences_the_per_action_resync_loop(
@@ -2482,8 +2480,10 @@ def test_recovery_suspension_silences_the_per_action_resync_loop(
         "gt_engine.indexer.ensure_index_with_receipt",
         lambda root, **kwargs: _unindexable_receipt(),
     )
-    for _ in range(adapter.RECOVERY_FAILURE_SUSPEND_STREAK):
+    for step in range(adapter.RECOVERY_FAILURE_EPISODE_CAP):
+        adapter.engine_state.source_revision = f"{step:064x}"
         adapter._recovery_build_inline(phase="native_action")
+    assert adapter._recovery_suspended == "unindexable_repository"
     before = len(_journal_rows(adapter))
 
     for step in range(5):
@@ -2515,7 +2515,8 @@ def test_an_adopted_recovery_resets_the_suspension_streak(monkeypatch, tmp_path)
         "gt_engine.indexer.ensure_index_with_receipt",
         lambda root, **kwargs: outcomes.pop(0),
     )
-    for _ in range(3):
+    for step in range(3):
+        adapter.engine_state.source_revision = f"{step:064x}"
         adapter._recovery_build_inline(phase="native_action")
 
     assert adapter._recovery_failure_streak == 0
@@ -2523,3 +2524,62 @@ def test_an_adopted_recovery_resets_the_suspension_streak(monkeypatch, tmp_path)
         r for r in _journal_rows(adapter)
         if r.get("event") == "graph_recovery_suspended"
     ]
+
+
+def test_a_workspace_that_becomes_indexable_later_still_gets_its_graph(
+    monkeypatch, tmp_path
+):
+    """An empty root whose first source file arrives later must still build.
+
+    CI run 35552223287 caught this: suspending on the per-revision streak
+    alone blinded `test_native_first_source_creation_bootstraps_installed_graph`,
+    where the early builds fail because the workspace has no source yet and
+    the real build only becomes possible once the agent writes a file. New
+    bytes are not the bytes that failed, so they are owed an attempt.
+    """
+    from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
+
+    adapter, _repo, _graph = _edited_adapter(tmp_path)
+    rebuilt = tmp_path / "rebuilt.db"
+    rebuilt.write_bytes(b"new")
+    built: list[str] = []
+
+    def build(root, **kwargs):
+        revision = adapter.engine_state.source_revision
+        built.append(revision)
+        if revision == "first-source":
+            return IndexBuildReceipt(
+                IndexBuildStatus.BUILT, graph_db=str(rebuilt),
+                graph_revision="b" * 64, analysis_state="complete",
+            )
+        return _unindexable_receipt()
+
+    monkeypatch.setattr("gt_engine.indexer.ensure_index_with_receipt", build)
+
+    adapter.engine_state.source_revision = "empty-root"
+    for _ in range(adapter.RECOVERY_FAILURE_SUSPEND_STREAK + 2):
+        adapter._recovery_build_inline(phase="native_action")
+    adapter.engine_state.source_revision = "first-source"
+    adapter._recovery_build_inline(phase="native_action")
+
+    assert built[-1] == "first-source", built
+    assert adapter.engine_state.graph_path == str(rebuilt)
+    assert adapter._recovery_suspended == ""
+
+
+def test_the_same_bytes_are_never_rebuilt_more_than_the_streak(
+    monkeypatch, tmp_path
+):
+    """The per-revision streak still bounds hammering one unchanged tree."""
+    adapter, _repo, _graph = _edited_adapter(tmp_path)
+    spawns: list[int] = []
+    monkeypatch.setattr(
+        "gt_engine.indexer.ensure_index_with_receipt",
+        lambda root, **kwargs: spawns.append(1) or _unindexable_receipt(),
+    )
+    adapter.engine_state.source_revision = "a" * 64
+
+    for _ in range(12):
+        adapter._recovery_build_inline(phase="native_action")
+
+    assert len(spawns) == adapter.RECOVERY_FAILURE_SUSPEND_STREAK

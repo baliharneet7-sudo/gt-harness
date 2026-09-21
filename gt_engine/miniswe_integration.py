@@ -520,9 +520,12 @@ class MiniSweAdapter(GroundtruthController):
         # transaction-boundary amend journals its refusal and defers here by
         # contract, so it never feeds this counter.
         self._amend_failure_streak: dict[str, int] = {}
-        # Consecutive recovery builds that adopted nothing, and the reason
-        # recovery was suspended for the episode once that streak was spent.
+        # Recovery builds that adopted nothing: consecutively at one source
+        # revision, in total for the episode, and the revision the streak
+        # belongs to. Suspension is the episode-wide give-up reason.
         self._recovery_failure_streak = 0
+        self._recovery_failure_total = 0
+        self._recovery_failure_revision = ""
         self._recovery_suspended = ""
         # Provider-wait scheduler: whole-graph products (dense contract
         # store today) are launched while the agent is blocked on the
@@ -3445,19 +3448,25 @@ class MiniSweAdapter(GroundtruthController):
     #: publishes.
     AMEND_FAILURE_ESCALATION_STREAK = 2
 
-    #: Consecutive recovery builds that adopt nothing before the boundary
-    #: stops buying them for the rest of the episode. A recovery build over
-    #: the same source bytes is deterministic in the same way an amend is:
-    #: a repository the producer cannot index - TB2 run 35545356695 was a
-    #: one-file task in a language it does not parse - fails identically on
-    #: every attempt. That run journaled 194 graph_recovery rows of
-    #: ``adopted: false, elapsed_ms: 0`` on one task while the agent spent
-    #: all 100 of its turns, and the GT-off baseline solved 12 of the same
-    #: 14 tasks GT-on scored 0 on. Three attempts matches the producer's own
-    #: build_attempt_count and leaves room for a transient loss; a typed
-    #: memory refusal does not count, because that outcome is not
-    #: deterministic and already has its own defer window.
+    #: Recovery builds that adopt nothing at ONE source revision before the
+    #: boundary stops retrying that revision. A build over the same bytes is
+    #: deterministic in the same way an amend is, so the third identical
+    #: failure is proof the fourth cannot differ.
     RECOVERY_FAILURE_SUSPEND_STREAK = 3
+
+    #: Non-adopting recovery builds in an episode before recovery is given up
+    #: entirely. The per-revision streak alone is not enough: TB2 run
+    #: 35545356695 advanced through 16 revisions on one task and bought a
+    #: rebuild on nearly every action, journaling 194 ``adopted: false,
+    #: elapsed_ms: 0`` rows while the agent spent all 100 of its turns - the
+    #: GT-off baseline solved 12 of the same 14 tasks GT-on scored 0 on. The
+    #: cap is what a repository the producer simply cannot index runs into.
+    #: It is deliberately well above the streak so that a workspace which
+    #: only becomes indexable later - an empty root whose first source file
+    #: arrives on a later action - still gets its build. A typed memory
+    #: refusal spends neither counter: that outcome is transient and already
+    #: has its own defer window.
+    RECOVERY_FAILURE_EPISODE_CAP = 8
 
     def _amend_graph_inline(self, *, phase: str) -> None:
         """Catch the adopted graph up to the overlay, at a serving boundary.
@@ -3598,6 +3607,13 @@ class MiniSweAdapter(GroundtruthController):
         base can never serve again, so the boundary rebuilds inline."""
         if self._recovery_suspended:
             return
+        if (
+            self._recovery_failure_streak >= self.RECOVERY_FAILURE_SUSPEND_STREAK
+            and self._recovery_failure_revision
+            == str(self.engine_state.source_revision or "")
+        ):
+            # These exact bytes already failed this build three times.
+            return
         if self._index_memory_defer_until > time.monotonic():
             # A whole-tree build spawns the same bounded producer over far
             # more input than the amend that just died of pressure. Buying
@@ -3664,21 +3680,35 @@ class MiniSweAdapter(GroundtruthController):
     def _count_recovery_outcome(
         self, *, adopted: bool, transient: bool, phase: str
     ) -> None:
-        """Spend or reset the deterministic recovery streak; suspend on exhaustion."""
+        """Spend or reset the recovery counters; give up at the episode cap.
+
+        The streak is per source revision, because only identical bytes make
+        the next failure certain. The total is per episode, because a
+        repository the producer cannot index keeps producing new revisions
+        the agent's edits create, and retrying three times per revision is
+        the 194-row loop in slower clothing.
+        """
+        revision = str(self.engine_state.source_revision or "")
         if adopted:
             self._recovery_failure_streak = 0
+            self._recovery_failure_revision = ""
             return
         if transient or self._recovery_suspended:
             return
+        if revision != self._recovery_failure_revision:
+            self._recovery_failure_streak = 0
+            self._recovery_failure_revision = revision
         self._recovery_failure_streak += 1
-        if self._recovery_failure_streak < self.RECOVERY_FAILURE_SUSPEND_STREAK:
+        self._recovery_failure_total += 1
+        if self._recovery_failure_total < self.RECOVERY_FAILURE_EPISODE_CAP:
             return
-        self._recovery_suspended = "deterministic_failure_streak"
+        self._recovery_suspended = "unindexable_repository"
         self.store.append(
             "graph_recovery_suspended", phase=phase,
             reason=self._recovery_suspended,
             failure_streak=self._recovery_failure_streak,
-            source_revision=str(self.engine_state.source_revision or ""),
+            failure_total=self._recovery_failure_total,
+            source_revision=revision,
             impact="graph consumers degrade to the no-graph path for the rest of the episode",
         )
 
