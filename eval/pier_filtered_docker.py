@@ -1,11 +1,23 @@
-"""Docker environment that applies Pier's filtered egress to agent traffic.
+"""Docker environment for Pier trials: the task's declared network, plus a
+route from Pier's egress proxy to the host for the synthetic transport.
 
-DeepSWE task files use the historical ``[agent].network_mode`` field, which
-Pier 0.3.1 does not interpret.  The custom environment maps that immutable
-task declaration to Pier's supported ``allow_internet=False`` environment
-setting.  Pier then wires its egress proxy using the agent's explicit
-``network_allowlist``; the verifier and task commands do not inherit the
-agent process proxy.
+Pier 0.3.1 resolves a task's ``[agent]``/``[verifier]`` ``network_mode`` onto
+``allow_internet`` itself (``TaskConfig.resolve_network_modes``): DeepSWE's
+``no-network`` tasks arrive here with ``allow_internet=False`` and get the
+squid proxy limited to the agent's ``network_allowlist``; a task that
+declares nothing, as every Terminal-Bench 2 task does, arrives with Pier's
+default ``allow_internet=True`` and runs on the open network, which is what
+the GT-off baseline ran on.
+
+This class used to rewrite ``allow_internet`` to ``False`` for every task, on
+the premise that Pier ignored ``network_mode`` and the DeepSWE declaration
+needed carrying across by hand.  On DeepSWE the rewrite was a no-op.  On TB2
+it put the verifier, which shares the agent's container, behind a proxy that
+refuses ``deb.debian.org`` and PyPI, so ``/tests/test.sh`` could not install
+``curl``, ``pytest`` or ``uv`` and graded every task 0 regardless of the
+agent's work: runs 35545356695 and 35557511581 (``Temporary failure
+resolving 'deb.debian.org'``, ``pytest: command not found``).  The task's
+own declaration is now passed through untouched.
 """
 
 from __future__ import annotations
@@ -21,13 +33,10 @@ from pier.models.task.config import EnvironmentConfig
 
 
 class PierFilteredDockerEnvironment(DockerEnvironment):
-    """Docker runtime with allowlisted agent egress only."""
+    """Docker runtime on the task's declared network."""
 
     def __init__(self, *, task_env_config: EnvironmentConfig, **kwargs):
-        # Do not mutate the task model shared with the verifier.  The model
-        # runner gets filtered egress; task/verifier commands remain isolated.
-        if task_env_config.allow_internet:
-            task_env_config = task_env_config.model_copy(update={"allow_internet": False})
+        # Passed through as declared: Pier has already resolved network_mode.
         super().__init__(task_env_config=task_env_config, **kwargs)
 
     # Pier puts `main` on an `internal` network and routes every byte of its
