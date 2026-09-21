@@ -762,3 +762,110 @@ receipts: `regex-chess` not ended by `RepeatedFormatError`; `write-compressor`
 graded with `benchmark_graph_unavailable` journaled rather than
 `infrastructure_failed`; every verifier stdout showing `Hit:1
 http://deb.debian.org` and a pytest summary line.
+
+## 17. Proof run 4: the fixes hold, and the clock was being enforced by the wrong process (2026-09-21)
+
+Run 35560215706 on `7531df03`, five tasks the GT-off baseline solved 5 of 5.
+
+| task | GT-on | baseline | verifier | job |
+|---|---|---|---|---|
+| extract-elf | 1 | 1.0 | `2 passed` | green |
+| mcmc-sampling-stan | 1 | 1.0 | `6 passed in 188s` | green |
+| winning-avg-corewars | 1 | 1.0 | `3 passed` | green |
+| write-compressor | 1 | 1.0 | `3 passed` | red (see below) |
+| regex-chess | running | 1.0 | — | — |
+
+Every verifier reached the network (`Hit:1 deb.debian.org`, 0 resolution
+failures) and no trial directory contains `docker-compose-egress-proxy.json`.
+`write-compressor` — filed `infrastructure_failed` and never scored in run
+35545356695 — is graded and solved, which is what retiring the admission abort
+was for. `winning-avg-corewars` carries one `submit_refused`, and it is the
+gate working rather than the §15 defect: two rows had *failed a proposed
+check* (`check_failed_rows`), the agent repaired the warrior, and the
+resubmission was accepted with `unverifiable_rows_waived`.
+
+### Token and step comparison against the harness
+
+| task | calls (off → on) | input (off → on) | cached (off → on) | output (off → on) |
+|---|---|---|---|---|
+| extract-elf | 42 → 30 | 5,561,759 → 2,383,149 | 87.1% → 92.7% | 69,597 → 62,304 |
+| mcmc-sampling-stan | 93 → 60 | 3,469,434 → 1,628,247 | 99.0% → 88.5% | 39,061 → 35,585 |
+| winning-avg-corewars | 76 → 68 | 4,550,218 → 3,356,035 | 98.9% → 93.7% | 65,411 → 81,964 |
+| write-compressor | 16 → 47 | 953,933 → 4,713,712 | 99.3% → 87.5% | 86,286 → 118,790 |
+| **total** | **227 → 205 (−10%)** | **14.5M → 12.1M (−17%)** | | **260K → 299K (+15%)** |
+
+On the three tasks GT could index it is cheaper than the stock scaffold in
+both calls and input: fewer, better-aimed turns. On the one repository the
+producer cannot parse it is the opposite — three times the calls and five
+times the input on a task the baseline finished in 16 calls — and that is the
+cost of working without the graph, bounded now by the recovery suspension but
+not removed by it. Measured cost is ~$0.025/task at ~92% cache; the projected
+full 89 is single-digit dollars.
+
+### The defect proof run 4 exposed: Pier held the knife, GT held the budget
+
+`write-compressor`'s journal stops mid-turn at event 707 after 4,513s with no
+terminal record, and the trial sealed no `gt-run.json`, so the cross-receipt
+check could not resolve it and the job went red on a task it had solved.
+
+Pier's agent deadline is `task.[agent].timeout_sec * agent_timeout_multiplier`
+(`pier/trial/execution.py::_resolve_agent_timeout`). The workflow passed the
+benchmark multiplier, 5.0, so the deadline was 900 × 5 = **4500s** while the
+plan had granted an execution budget of **6000s** — benchmark 4500 plus
+`GT_OVERHEAD_EXTENSION_SECONDS` 1500 — and GT's own limit sat at 5760s, which
+it could never reach. The extension the plan grants, reports as a deviation
+and defends in the attestation was never reaching the process that enforces
+the deadline. Every task that runs long was being cut 1,260s early, mid-turn,
+with no receipt.
+
+Fixed in `1cf3f23e`: the plan publishes a per-task
+`agent_timeout_multiplier = execution_budget_sec / base_timeout_sec` and the
+paid invocation passes it, so Pier's deadline is exactly the granted budget
+and GT's own limit fires one `SUPERVISOR_GRACE_SECONDS` earlier — which is
+what that reserve was measured for — closing the session and writing the
+receipts, with Pier's deadline as the outer backstop. Tests execute the
+budget loop with the real resolver at three task timeouts and assert
+`gt_deadline < pier_deadline`.
+
+### Visibility for the full run
+
+An 89-task run is 89 job pages and one artifact at the end, and counts cannot
+answer the only question worth asking while it runs: a run that scores 66 by
+solving a *different* 66 is not the baseline's result. `scripts/tb2_run_summary.py`
+renders two views into `GITHUB_STEP_SUMMARY`:
+
+- **per task**, as its job finishes: reward, the baseline's reward beside it,
+  the verdict (`same` / `gain` / `REGRESSION` / `not graded`), the failure
+  class, tokens, cache share, cost, and what GT did — recoveries, suspensions,
+  graph unavailability, refusals;
+- **per run**, from the aggregate: graded/remaining, solved against the
+  baseline over *the tasks this run actually reported*, regressions and gains
+  counted, then the full table with regressions at the top.
+
+`config/tb2_full89_cohort.v1.json` carries the frozen per-task rewards (66
+solved) and their own digest, so nothing reaches outside the repository. Both
+steps are `continue-on-error`: reporting must never be able to fail a paid
+trial. Twelve tests cover the renderer, including that an ungraded task reads
+as `not graded` and never as a loss, and that the baseline count is drawn over
+reported tasks only so an excluded task cannot inflate us.
+
+### The full-89 cohort
+
+`tb2_miniswe_central.yml` gains a `full-89` stage drawing the frozen
+baseline's own 89 task ids, sha-pinned `3778b860…`, with the planner requiring
+`repair20` to be a subset so earlier cohort results stay comparable. The
+cohort selection is executed by tests rather than asserted about as text.
+
+`qemu-alpine-ssh` is excluded for musl — the GT wheel depends on
+`cryptography`, which publishes no musl wheel — and **the baseline solved it**.
+A surviving cohort of 88 must therefore be read against a comparable baseline
+of 65, not 66. That is a GT capability gap, recorded in the config's
+`known_exclusion` and pinned by a test so the denominator cannot drift in
+GT's favour without someone deciding to let it.
+
+### Residual, not fixed
+
+A run killed outside GT's own limit still seals no `gt-run.json`. The timeout
+ordering above removes the case that was reaching it; an OOM or an external
+kill would still land there, and the summary now says
+"did not seal a product receipt" rather than leaving a reader to infer it.
