@@ -666,3 +666,99 @@ Run 35557511581 on `22693273`, the same five tasks, is the test of this fix:
 the receipts must show `plan_gate_decision` accepted with reason
 `unverifiable_rows_waived`, no `submit_refused`, and grades to compare with
 the baseline's 5 of 5.
+
+## 16. Proof run 3 read, and the layer under it: the TB2 verifier had no network (2026-09-21)
+
+### What proof run 3 (35557511581, head `22693273`) showed
+
+The gate fix worked as specified. `headless-terminal`: one
+`plan_gate_decision` accepted, reason `unverifiable_rows_waived`, ten rows
+named; zero `action_suppressed(submit_refused)`; zero `graph_resync_incomplete`;
+zero `graph_recovery`; the agent submitted at turn 23 after an explicit
+verification pass. `cobol-modernization`: submitted, zero refusals. Both were
+graded 0. The baseline solved both.
+
+### Why: `/tests/test.sh` could not install anything
+
+The verifier stdout is unambiguous and identical across every task in runs
+35545356695 and 35557511581:
+
+```
+Err:1 http://deb.debian.org/debian bookworm InRelease
+  Temporary failure resolving 'deb.debian.org'
+/tests/test.sh: line 8: curl: command not found
+/tests/test.sh: line 19: uvx: command not found
+```
+
+and for `headless-terminal`:
+
+```
+ERROR: No matching distribution found for pytest==8.4.1
+/tests/test.sh: line 14: pytest: command not found
+```
+
+The baseline's verifier for the same task and image reads `Hit:1
+http://deb.debian.org/debian bookworm InRelease ... 3 passed`. Terminal-Bench
+2 verifiers install `curl`, `pytest` and `uv` at grade time; without DNS the
+test file is never executed and the reward is 0 whatever the agent did. No
+TB2 task in either GT-on run was ever tested. The earlier per-layer analysis
+in §14–15 (graph rebuild storm, gate refusals, scaffold early exit, admission
+abort) was real, and each fix is pinned by its receipts, but none of it could
+have moved the score while grading was dead.
+
+### Cause: `PierFilteredDockerEnvironment` rewrote every task to no-network
+
+`eval/pier_filtered_docker.py` (from `c47e917d`, 2026-09-01) forced
+`allow_internet=False` on every task's environment config, on the premise that
+Pier 0.3.1 ignored `[agent].network_mode` and DeepSWE's `no-network`
+declaration had to be carried across by hand. Pier 0.3.1 resolves
+`network_mode` itself (`TaskConfig.resolve_network_modes`, precedence
+`[agent]`/`[verifier]` > `[environment]` > legacy `allow_internet`). So:
+
+| Lane | Task declares | Pier resolves | Override did |
+|---|---|---|---|
+| DeepSWE | `[agent] network_mode = "no-network"`, `[verifier] no-network` | `allow_internet=False`, proxy with the agent allowlist | nothing |
+| SWE-Live smoke | `[agent] no-network`, `[verifier] public, separate` | agent False, verifier True in its own env | nothing |
+| TB2 | nothing (`[verifier]`/`[agent]` timeouts only) | Pier default `allow_internet=True` | **flipped to False** |
+
+On TB2 the verifier runs in the agent's container, so the flip put grading
+behind a squid proxy whose allowlist is `openrouter.ai`. The GT-off baseline
+(`eval.miniswe_agent:MiniSweAgent` under Harbor, same task package) ran on the
+open network, so the two arms were never graded the same way.
+
+### Fix (`466c10c9`, pin `7531df03`)
+
+The override is gone: the task's own `EnvironmentConfig` is handed to Pier
+untouched. DeepSWE and the SWE-Live agent phase stay no-network with the
+allowlisted proxy (Pier's resolution, not ours); TB2 runs on the open network
+as its baseline did. The host-gateway alias for the synthetic transport is
+unchanged. `tests/test_pier_filtered_docker_internet.py` pins both directions
+and identity of the passed model (RED under the old code: `allow_internet`
+True became False). 170 tests across the environment and workflow suites pass.
+
+### Also landed on this head
+
+- `5abd5efb` format-error parity: both arms pass
+  `max_consecutive_format_errors=0`, so mini-swe-agent 2.4.6 re-prompts as
+  2.2.8 did instead of ending `regex-chess` after three tool-less responses
+  (run 35545356695: five FormatError rows, exit 5, filed as infrastructure).
+- `5abd5efb` admission abort retired: `ensure_index` no longer raises
+  `BenchmarkGraphRequired` when the producer cannot build the graph under
+  `benchmark_bound`; it journals `benchmark_graph_unavailable` with the
+  producer's diagnostics and the run is graded degraded (`write-compressor`,
+  a one-file repository the producer could not parse, was filed as
+  infrastructure and never scored; the baseline solved it). The refusal class
+  and its propagation stay for harness faults.
+- Pins: `gt_engine` `9f096a41`, `eval` `28a66cf5` (`3473521c`, `7531df03`).
+
+### Proof run 4
+
+Run 35559819960 was dispatched on `3473521c` before the network cause was
+found and cancelled after five minutes; its verifier could not have graded.
+Run 35560215706 on `7531df03` runs `regex-chess`, `write-compressor`,
+`extract-elf`, `mcmc-sampling-stan`, `winning-avg-corewars` (baseline 5 of 5).
+It is the first GT-on TB2 run whose verifier can execute a test. Expected
+receipts: `regex-chess` not ended by `RepeatedFormatError`; `write-compressor`
+graded with `benchmark_graph_unavailable` journaled rather than
+`infrastructure_failed`; every verifier stdout showing `Hit:1
+http://deb.debian.org` and a pytest summary line.
