@@ -975,3 +975,90 @@ of parity.
    no repeat.
 4. `qemu-alpine-ssh`: a musl-capable wheel would return one task the baseline
    solves and GT cannot attempt.
+
+## 19. TB2 was the wrong benchmark, and DeepSWE proves GT runs (2026-09-21)
+
+### What the 89 actually measured
+
+§18 reported GT-on 56/88 against the baseline's 65/88 and called it a GT
+result. A census of every task's artifacts says otherwise.
+
+| | n | GT-on | baseline | delta |
+|---|---|---|---|---|
+| producer never abstained for a missing graph | 21 | **17** | **17** | **±0** |
+| producer abstained at least once | 67 | 39 | 48 | −9 |
+
+**Every point of the −9 is in the degraded half.** Where GT ran as designed it
+is exactly level. 32 of 88 tasks had no graph database at all, and the
+producer abstained with `graph_unavailable` on 67 of 88.
+
+Split by workspace size, the picture is worse than "no benefit":
+
+| workspace | n | GT-on | baseline | delta |
+|---|---|---|---|---|
+| empty (0 files) | 24 | 12 | 15 | −3 |
+| tiny (1–3) | 43 | 31 | 31 | ±0 |
+| small (4–50) | 10 | 10 | 10 | ±0 |
+| **real codebase (51+)** | 10 | **3** | **8** | **−5** |
+
+GT is level on small workspaces and collapses on the only ten tasks with a
+codebase worth graphing — and every one of the largest that failed, failed on
+memory: `crack-7z-hash` (2,642 files) and `reshard-c4-data` (9,898) on
+`HEADROOM_INSUFFICIENT`, `fix-ocaml-gc` (4,623) and `make-mips-interpreter`
+on `MEMORY_GUARD_TRIGGERED`. A TB2 container is **2 GB and 1 CPU**, and one
+measurement says why: on `fix-ocaml-gc` the cgroup held **1.79 GB of its 2 GB
+before the indexer started**, leaving GT 264 MB to build a graph in.
+
+TB2's median workspace is **one file**. Sixty-seven of 88 tasks have three or
+fewer. It is a terminal benchmark — nginx configs, certificates, password
+recovery — and for most of it there is nothing to graph. Measuring a code
+graph there answers a question nobody asked.
+
+### The diagnosability failure underneath
+
+Of the 32 tasks with no graph, **25 recorded no reason at all**: `parse_cache`
+0, and a journal line reading `error_type="unsuccessful", error=""`. A quarter
+of the cohort skipped GT's core capability and left nothing to say why. The
+cause was `is_code_repo` returning False — an ordinary answer for a workspace
+holding one data file, and still the single most expensive missing sentence in
+the campaign. Fixed in `ef12e18a`.
+
+### DeepSWE: the conditions GT needs
+
+| | DeepSWE | TB2 |
+|---|---|---|
+| container memory | **8 GB** | 2 GB |
+| cpus | 2 | 1 |
+| workspace | real repository, every task | median 1 file |
+
+Gate run `35620915469`, one task, `abs-module-cache-flags`, head `f51a8b81`,
+producer `0becde10`:
+
+```
+reward 1.0   f2p 20/20   p2p 3/3   n_errored_trials 0
+workspace files at start   326
+index_unavailable            0        graph databases        42
+parse-cache entries         85        index failure evidence  0
+producer_invocation        353        dense_index_ready      74
+recovery suspended           0        abstained 19/353 (5%)
+```
+
+The graph built on the first attempt and stayed. No headroom refusal, no
+memory guard, no suspension. Cost $0.120 for 15.3M input tokens (90.5%
+cached) and 125K output; 65 minutes wall.
+
+This proves the machinery works. It does not prove GT helps: the frozen
+control solved this task too, so the gate matched rather than gained. The
+matched 10-task control (4/10, sha256 `707d7eb7…`) is the smallest comparison
+that can say anything about effect, and it is still small.
+
+### Standing decisions
+
+- TB2 memory work is **not** being done. It would be days of footprint surgery
+  to reclaim tasks in a container GT is not suited to.
+- `_workspace_holds_work` keeps treating an unobserved patch state as pristine.
+  Its docstring argues the case and it is right where a git baseline exists;
+  TB2 workspaces often are not git repositories, which is benchmark fit rather
+  than a reason to flip a documented fail-closed contract.
+- The musl gap (`qemu-alpine-ssh`) stays documented and unfixed: one task, and
+  the wheel's `cryptography` dependency is a packaging project.
