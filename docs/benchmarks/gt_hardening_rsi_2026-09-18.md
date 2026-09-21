@@ -548,3 +548,58 @@ The benchmark lanes now measure producer `5681eeae` at schema
 `v15.4-callsite-actuals`. What remains before a paid run is unchanged and
 listed in section 7b: re-read StreamLake's promotional price, decide DeepSWE
 reasoning effort, route SWE-Live to its 0423 baseline.
+
+## 14. First real smokes on the fixed producer (2026-09-20/21): GT was a net negative on TB2, and why
+
+Both 20-task smokes ran twice. The first pair (runs 35539578563 and
+35539593546) measured a producer that could not build a graph (section 13,
+defects 3 and 5 as fixed in producer 032014ef) and is void as a measurement.
+The second pair ran on 032014ef with both fixes proven live: TB2 receipts show
+`headroom_basis = max_and_current_less_reclaimable` and the build proceeds;
+the first DeepSWE task has no graph.failure.json and a clean event trace.
+
+### TB2, run 35545356695: 0 solved of 14 graded. GT-off solved 12 of the same 14.
+
+| Same 14 tasks | Solved |
+|---|---|
+| GT-off frozen baseline (66/89 overall) | 12 |
+| GT-on, this run | 0 |
+
+Only count-dataset-tokens and torch-pipeline-parallelism were failures for
+both. Everything else the baseline solved, GT-on scored 0.
+
+**Cause, from the receipts.** TB2 tasks are terminal exercises, one to three
+files, often in languages the indexer does not parse. The startup index came
+up unavailable (`index_unavailable`). From then on every action took the
+`source_advance_unenumerated` branch in `miniswe_integration._amend_graph_inline`,
+journaled `graph_resync_incomplete`, and bought a recovery build that returned
+in 0 ms having adopted nothing: 194 cycles on prove-plus-comm, 291 producer
+invocations, 13.7M input tokens, all 100 of the agent's turns. The baseline
+solved these tasks in a median of 39 turns with no GT at all.
+
+DeepSWE (run 35545394813, cancelled at the user's instruction after 15 tasks)
+is the control: 141-file repositories, graph adopted, zero resync events, and
+anko-default-function-arguments solved with reward 1 (f2p 2/2, p2p 119/119).
+
+**Fix (`eb72291b`, pin `18c28c8f`).** A recovery build over the same bytes is
+deterministic, as the amend ladder already assumes. After
+`RECOVERY_FAILURE_SUSPEND_STREAK = 3` consecutive recoveries that adopt
+nothing, the boundary journals `graph_recovery_suspended` once, by name, and
+stops: no further recovery spawns and no per-action resync rows for the
+episode; graph consumers take the documented no-graph path. A typed memory
+refusal does not spend the streak; an adopted recovery resets it. Three tests
+reproduce the run's receipt shape.
+
+**Also measured.** StreamLake caching held on a real task: 13.09M of 13.7M
+input tokens cached (95.5%), about $0.055 per task, about $1 for the 19-task
+lane. The provider gate receipt confirmed the exact pinned route with fp8
+enforced.
+
+**Residuals from this round, not yet fixed:** write-compressor fails the
+index because its one C file does not parse (`parser-incomplete syntax tree`),
+so a one-file repository with no parseable file fails the build instead of
+publishing an empty graph; regex-chess is an unread infrastructure failure.
+
+**Not proven yet:** that the suspension recovers the 12 tasks. That needs the
+same 14 tasks re-run on `18c28c8f` and compared to this table.
+
