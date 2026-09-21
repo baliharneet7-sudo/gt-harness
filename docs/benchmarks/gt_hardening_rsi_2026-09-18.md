@@ -603,3 +603,66 @@ publishing an empty graph; regex-chess is an unread infrastructure failure.
 **Not proven yet:** that the suspension recovers the 12 tasks. That needs the
 same 14 tasks re-run on `18c28c8f` and compared to this table.
 
+## 15. The deeper problem: the completion gate blocked every TB2 submission (2026-09-21)
+
+Proof run 35553824646 ran five TB2 tasks the GT-off baseline solved 5 of 5,
+on producer 032014ef with the recovery suspension (section 14) live. The
+suspension worked: headless-terminal had 0 resync and 0 recovery rows where
+the previous run had 194, and finished at 75 turns instead of exhausting 100;
+cobol-modernization stopped after 8 recoveries. The grades were still 0 of 4.
+
+### What the receipts say
+
+Every graded task was refused at submit by the plan gate:
+
+| Task | Gate refusals | Turns | `baseline_status` | `completion_assessment` | `check_failed_rows` |
+|---|---|---|---|---|---|
+| headless-terminal | 2 | 75 | `no_test_command` | `rows_unverified` | empty |
+| mcmc-sampling-stan | 2 | 100 | `no_test_command` | `rows_unverified` | empty |
+| cobol-modernization | 2 | 100 | `no_test_command` | `rows_unverified` | empty |
+| extract-elf | 1 | 100 | `no_test_command` | `rows_unverified` | empty |
+
+TB2 graders are hidden, so `discover_command` finds no suite and the baseline
+records `no_test_command`. No plan row can then ever reach `CHECK_PASSED`, so
+every row stays `UNVERIFIED`, and `decide()` refused on them as unmet: proof
+the gate itself had defined as impossible. Nothing had failed.
+
+The refusal directive ("GT PLAN GATE: submission was not executed ... will not
+be executed while these requirements stay unproven") then redirected the
+agent. headless-terminal's next turn: "run targeted evidence commands for each
+remaining requirement so the plan gate can associate them"; 34 of its
+remaining 47 turns were gate-directed. At turn 164 it read lines 1600 to 1680
+of `/root/.local/share/uv/tools/nano-harness/lib/python3.12/site-packages/gt_engine/gt_session.py`
+and a block of `miniswe_integration.py` to learn the gate's implementation.
+The baseline solved the same task in 86 turns with reward 1.
+
+### Fix (`640cfb42`, pin `22693273`)
+
+`decide()` now waives rows no check has ever judged when `baseline_status ==
+"no_test_command"`, journals them by id as `unverifiable_rows_waived`, accepts
+with that reason, and leaves `completion_proven` false. A row a proposed check
+actually failed still blocks, as do regressions and RED predicates; where a
+suite exists, nothing changes. This is the gate's own docstring applied: "It
+never blocks on its own ignorance." Four tests pin the edges; the 12 suites
+that reference gate reasons and the acceptance suites all exit 0.
+
+### Residual found, not fixed: the harness is readable inside the task container
+
+`eval/tb_agent.py` uploads nano-harness into each task container and installs
+it as a uv tool, so `gt_engine` sits in the agent's own filesystem under
+`/root/.local/share/uv/tools/nano-harness/lib/python3.12/site-packages/`. The
+agent read it under pressure from the gate. Removing the pressure removes the
+motive, not the access; the install layout should hide the harness from the
+task shell.
+
+### Cost, measured
+
+StreamLake caching held across the run: the first task cached 13.09M of 13.7M
+input tokens (95.5%), about $0.055 per task.
+
+### Proof run 3
+
+Run 35557511581 on `22693273`, the same five tasks, is the test of this fix:
+the receipts must show `plan_gate_decision` accepted with reason
+`unverifiable_rows_waived`, no `submit_refused`, and grades to compare with
+the baseline's 5 of 5.
