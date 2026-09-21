@@ -560,9 +560,27 @@ jobs:
                   multiplier=5.0,
                   overhead_extension_sec=GT_OVERHEAD_EXTENSION_SECONDS,
               )
+              # Pier's agent deadline is `task.[agent].timeout_sec * multiplier`
+              # (pier/trial/execution.py::_resolve_agent_timeout).  Passing the
+              # benchmark multiplier gave it 4500s on a task whose GT execution
+              # budget is 6000s, so Pier SIGKILLed the agent 1260s early, mid
+              # turn, and the run sealed no gt-run.json: write-compressor in run
+              # 35560215706 stopped at 4513s with its journal ending inside a
+              # turn, and the cross-receipt check could not resolve the trial.
+              # The GT_OVERHEAD_EXTENSION_SECONDS the plan grants was never
+              # reaching the process that enforces the deadline.
+              #
+              # Scaling the multiplier per task makes Pier's deadline exactly
+              # the execution budget, so GT's own limit - one SUPERVISOR_GRACE
+              # earlier, which is what that reserve is for - fires first and
+              # closes the session, leaving Pier's as the outer backstop.
+              agent_timeout_multiplier = (
+                  float(budget["execution_budget_sec"]) / float(budget["base_timeout_sec"])
+              )
               rows.append({
                   "ordinal": ordinal,
                   "task": task,
+                  "agent_timeout_multiplier": agent_timeout_multiplier,
                   "time_budget_seconds": max(
                       30,
                       int(float(budget["execution_budget_sec"]) - float(SUPERVISOR_GRACE_SECONDS)),
@@ -1104,7 +1122,7 @@ jobs:
             -m "$MODEL" \
             -o results/terminal-bench \
             --job-name "$JOB_NAME" \
-            --agent-timeout-multiplier "$TIMEOUT_MULTIPLIER" \
+            --agent-timeout-multiplier "${{ matrix.agent_timeout_multiplier }}" \
             -n 1 -l 1 --delete -y \
             --ak task_id="$TASK" \
             --ak product_source_sha="$TREATMENT_SHA" \
@@ -1139,6 +1157,25 @@ jobs:
           name: benchmark-progress-tb2-gt-${{ github.run_id }}-${{ matrix.task }}
           path: benchmark-progress.json
           if-no-files-found: error
+
+      - name: Show this task's result on the job summary
+        # A run of 89 tasks is 89 job pages and one artifact at the end.  This
+        # puts the answer on the page a reader already has open: what it
+        # scored, what the baseline scored on the same task, and what GT did
+        # to get there.  continue-on-error because visibility must never be
+        # able to fail a paid trial - the receipts above are the record.
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          receipt="$(find results/terminal-bench -name gt-run.json | head -1)"
+          events="$(find results/terminal-bench -path '*gt-state*' -name events.jsonl | head -1)"
+          python -m scripts.tb2_run_summary task \
+            --progress benchmark-progress.json \
+            --cohort config/tb2_full89_cohort.v1.json \
+            --receipt "${receipt:-/nonexistent}" \
+            --events "${events:-/nonexistent}" \
+            --output "$GITHUB_STEP_SUMMARY"
 
       - name: Read this task's receipts against each other
         # Harbor exits 0 on an errored trial, so a green job is not
@@ -1272,6 +1309,18 @@ jobs:
           path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           print(json.dumps(out, sort_keys=True))
           PY
+
+      - name: Show the cohort result on the run summary
+        # Counts cannot answer "better or worse": a run that scores 66 by
+        # solving a different 66 is not the baseline's result.  This is per
+        # task, and it puts regressions at the top.
+        if: always()
+        continue-on-error: true
+        run: |
+          python -m scripts.tb2_run_summary run \
+            --summary tb2-gt-smoke20-summary.json \
+            --cohort config/tb2_full89_cohort.v1.json \
+            --output "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:

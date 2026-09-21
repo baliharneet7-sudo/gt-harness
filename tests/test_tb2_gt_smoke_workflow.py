@@ -108,6 +108,93 @@ def test_gt_smoke_uses_official_harbor_grades_and_retains_evidence() -> None:
     assert "tb2-gt-smoke20-921bec20-${{ github.run_id }}-task-${{ matrix.task }}" in text
 
 
+def test_every_task_job_reports_its_result_on_its_own_page() -> None:
+    """Visibility that is not wired is not visibility."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "python -m scripts.tb2_run_summary task" in text
+    assert "python -m scripts.tb2_run_summary run" in text
+    # Both read the pinned cohort, which is what carries the baseline rewards.
+    assert text.count("--cohort config/tb2_full89_cohort.v1.json") == 2
+    assert text.count('--output "$GITHUB_STEP_SUMMARY"') == 2
+
+
+def test_reporting_cannot_fail_a_paid_trial() -> None:
+    """A summary step that can go red would cost a task for a cosmetic reason."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    start = text.index("      - name: Show this task's result on the job summary")
+    end = text.index("      - name: Read this task's receipts against each other")
+
+    assert "continue-on-error: true" in text[start:end]
+
+
+def _planner_budget_rows(tmp_path: Path, agent_timeout_sec: float) -> list[dict]:
+    """Run the planner's own budget loop with the real resolver.
+
+    The loop is executed rather than described because the number it produces
+    is a deadline on a paid run: if it is wrong the agent is killed and the
+    trial seals no receipt, which is how write-compressor ended in run
+    35560215706.
+    """
+    from scripts.resolve_harbor_budget import (
+        GT_OVERHEAD_EXTENSION_SECONDS,
+        SUPERVISOR_GRACE_SECONDS,
+        resolve_budget,
+    )
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+    start = text.index("          rows = []\n")
+    end = text.index("          receipt = {\n")
+    task = tmp_path / "some-task"
+    task.mkdir()
+    (task / "task.toml").write_text(
+        f'[agent]\ntimeout_sec = {agent_timeout_sec}\n', encoding="utf-8", newline="\n"
+    )
+    namespace: dict = {
+        "selected": ["some-task"],
+        "dataset": tmp_path,
+        "resolve_budget": resolve_budget,
+        "GT_OVERHEAD_EXTENSION_SECONDS": GT_OVERHEAD_EXTENSION_SECONDS,
+        "SUPERVISOR_GRACE_SECONDS": SUPERVISOR_GRACE_SECONDS,
+    }
+    exec(compile(textwrap.dedent(text[start:end]), str(WORKFLOW), "exec"), namespace)
+    return namespace["rows"]
+
+
+@pytest.mark.parametrize("agent_timeout_sec", [900.0, 300.0, 3600.0])
+def test_gt_stops_the_run_before_pier_kills_it(tmp_path, agent_timeout_sec) -> None:
+    """The deadline GT plans for must be inside the deadline Pier enforces.
+
+    Pier's agent deadline is `task.[agent].timeout_sec * agent_timeout_multiplier`
+    (pier/trial/execution.py::_resolve_agent_timeout).  Handing it the benchmark
+    multiplier gave write-compressor 4500s while its GT execution budget was
+    6000s, so Pier SIGKILLed the agent mid-turn at 4513s and the trial sealed no
+    gt-run.json - the task was solved (reward 1) but its receipts could not be
+    resolved against each other.  GT_OVERHEAD_EXTENSION_SECONDS is only real if
+    the process holding the knife knows about it.
+    """
+    row = _planner_budget_rows(tmp_path, agent_timeout_sec)[0]
+
+    pier_deadline = agent_timeout_sec * row["agent_timeout_multiplier"]
+    gt_deadline = row["time_budget_seconds"]
+
+    # Pier's deadline is exactly the budget the plan granted, extension included.
+    assert pier_deadline == pytest.approx(
+        row["benchmark_budget_seconds"] + row["gt_overhead_extension_seconds"]
+    )
+    # ... and GT stops one supervisor grace earlier, which is what leaves time
+    # to close the session and write the receipts.
+    assert gt_deadline < pier_deadline
+
+
+def test_the_paid_invocation_uses_the_per_task_agent_deadline() -> None:
+    """A per-task multiplier in the receipt is worth nothing unpassed."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    assert '--agent-timeout-multiplier "${{ matrix.agent_timeout_multiplier }}"' in text
+    assert '--agent-timeout-multiplier "$TIMEOUT_MULTIPLIER"' not in text
+
+
 def _planner_cohort_selection(stage: str, subset_tasks: str = "") -> dict:
     """Run the planner's own cohort selection out of the workflow heredoc.
 
@@ -1381,6 +1468,8 @@ def _planner_receipt(tmp_path: Path, monkeypatch, *, unresolved_reason: str) -> 
         "resolve_budget": lambda path, multiplier, overhead_extension_sec=0.0: {
             "execution_budget_sec": 600 + overhead_extension_sec,
             "benchmark_budget_sec": 600,
+            # The task's own [agent].timeout_sec: the base Pier multiplies.
+            "base_timeout_sec": 120,
             "gt_overhead_extension_sec": overhead_extension_sec,
             "deviates_from_benchmark_budget": bool(overhead_extension_sec),
             "task_config_sha256": "c" * 64,
