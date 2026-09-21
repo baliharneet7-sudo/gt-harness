@@ -1311,6 +1311,12 @@ TERMINAL_EXIT_CODES = {
     # workspace is gradable and the official verifier must run. Exit 5 here is
     # what cost run 35256147148 its 4,660 committed bytes.
     "containment_lost": 0,
+    # The OS killed the supervised child (SIGKILL from the container's memory
+    # controller in every observed case). Exit 0 for the same reason
+    # containment_lost does: the workspace is gradable and the official
+    # verifier must run. It is a NON-SUBMITTED terminal below, so it can never
+    # be read as a clean pass.
+    "child_killed": 0,
     "timeout": 3,             # provider/command timeout
     "provider_failed": 4,     # provider refused/substituted the model
     "provider_model_mismatch": 4,
@@ -1323,7 +1329,7 @@ TERMINAL_EXIT_CODES = {
 _NON_SUBMITTED_TERMINALS = {"stuck", "budget_exhausted", "timeout",
                             "provider_failed", "provider_model_mismatch",
                             "internal_error", "setup_error", "task_failed",
-                            "containment_lost"}
+                            "containment_lost", "child_killed"}
 
 # Exception class name -> terminal outcome (mini-swe raises these through
 # handle_uncaught_exception, which also writes an exit message).

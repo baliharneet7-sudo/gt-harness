@@ -441,7 +441,24 @@ def conserve_failure(args: argparse.Namespace, result: SupervisedResult, baselin
     if result.reason and result.reason.startswith("initial_index_failed"):
         terminal = "setup_error"
         exit_code = 6
-    if result.reason == "exited" and result.returncode in {3, 4, 5, 6, 7}:
+    if (
+        result.reason == "exited"
+        and isinstance(result.returncode, int)
+        and result.returncode < 0
+    ):
+        # The OS killed the child - SIGKILL from the container's memory
+        # controller in every observed case. The workspace still holds whatever
+        # the agent did up to that instant, and the official verifier is the
+        # only thing that can say what it is worth, so this exits 0 for the
+        # same reason `containment_lost` does: exit 5 makes Pier error the
+        # trial, `[[verifier.collect]]` never runs and the task grades nothing.
+        # TB2 run 35571048690 lost caffe-cifar-10, fix-ocaml-gc,
+        # reshard-c4-data and write-compressor this way, the last of which the
+        # agent had already solved. `child_killed` is a NON-SUBMITTED terminal,
+        # so conserving the run cannot report it as a clean pass.
+        terminal = "child_killed"
+        exit_code = 0
+    elif result.reason == "exited" and result.returncode in {3, 4, 5, 6, 7}:
         terminal = {3: "timeout", 4: "provider_failed", 5: "internal_error", 6: "setup_error", 7: "churn_abort"}[result.returncode]
         exit_code = result.returncode
     report.update(terminal=terminal, exit_code=exit_code, research_valid=False,
@@ -464,7 +481,14 @@ def conserve_failure(args: argparse.Namespace, result: SupervisedResult, baselin
                 excluded_roots=RuntimeLayout.from_run_args(args).excluded_roots,
             )
         except Exception as exc:
-            report["patch_export_error"] = {"type": type(exc).__name__}
+            # The message, not only the class. Four tasks in TB2 run
+            # 35571048690 reported an anonymous `{"type": "ValueError"}` and
+            # the reason - "baseline_unavailable" - was only recoverable by
+            # downloading the trial directories.
+            report["patch_export_error"] = {
+                "type": type(exc).__name__,
+                "message": str(exc)[:200],
+            }
             try:
                 from scripts.miniswe_checkpoint import read_checkpoint
 

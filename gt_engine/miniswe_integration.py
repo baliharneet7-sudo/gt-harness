@@ -3299,7 +3299,14 @@ class MiniSweAdapter(GroundtruthController):
             if not getattr(receipt, "success", False):
                 self.store.append(
                     "index_unavailable",
-                    error_type=getattr(receipt, "error_type", "") or "unsuccessful",
+                    # The STATUS before the bare word: "unsuccessful" is not a
+                    # diagnosis, and it was all 25 unindexed tasks of TB2 run
+                    # 35571048690 ever said about themselves.
+                    error_type=(
+                        getattr(receipt, "error_type", "")
+                        or str(getattr(getattr(receipt, "status", ""), "value", "") or "")
+                        or "unsuccessful"
+                    ),
                     error=str(getattr(receipt, "error_diagnostic", "") or "")[:300],
                     phase="initial_index",
                 )

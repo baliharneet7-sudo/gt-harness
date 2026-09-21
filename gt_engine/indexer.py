@@ -3683,7 +3683,19 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
         return IndexBuildReceipt(IndexBuildStatus.BUILD_FAILED, source_revision=source_revision,
                                  error_type="source_discovery_incomplete", error_diagnostic=str(exc))
     if not indexable:
-        return IndexBuildReceipt(IndexBuildStatus.NOT_APPLICABLE, source_revision=source_revision)
+        # Say so. In TB2 run 35571048690 this branch was taken on 25 tasks and
+        # journaled `index_unavailable(error_type="unsuccessful", error="")`,
+        # so a quarter of the cohort ran without a graph and nothing recorded
+        # why. The workspace holding no file with a source extension is an
+        # ordinary answer, not an error, but it is still the answer.
+        return IndexBuildReceipt(
+            IndexBuildStatus.NOT_APPLICABLE,
+            source_revision=source_revision,
+            error_diagnostic=(
+                "no file with an indexable source extension under the workspace "
+                "root; nothing to build a graph from"
+            ),
+        )
     try:
         graph = ensure_index(str(root_path), state_dir=str(state_dir) if state_dir else None,
                              reclaim=reclaim,
