@@ -2,5 +2,5 @@ artifact=groundtruth_mcp-1.0.0-py3-none-any.whl
 source_repository=https://github.com/harneet2512/groundtruth
 source_commit=5681eeae99fb272e7e12b68e624e6f293878be97
 source_tree=06abc3818704ceefc5fc3b7944ee78f741db09e1
-worktree_delta=none (wheel built from committed tree 5681eeae; producer binary is the CI artifact from run 35543773645, built from 032014ef = 5681eeae + the nodes_fts rebuild and labeled-statement fixes)
+worktree_delta=none (wheel built from committed tree 5681eeae; producer binary is the CI artifact from run 35569792894, built from 0becde10 = 032014ef + the empty-graph guard fix)
 sha256=0a4eaf2e73581955ac043fb5bab7d1eaee7739b63459972d59194ac21677cd99
