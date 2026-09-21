@@ -1,0 +1,51 @@
+## Code Intelligence
+
+You have **GT** — a graph over this entire codebase. It knows call chains,
+class hierarchies, execution flows and symbol relationships. These are fast
+bash commands. Use them when they help; a plain `grep` is often enough.
+
+Your search results are also annotated with `[GT]` blocks showing callers,
+callees and flows for the symbols you matched. Read them — they frequently
+answer the next question without another command.
+
+### Commands
+
+**gt-find "<what you are looking for>"** — rank the code most relevant to a
+description of the problem.
+```bash
+gt-find "form field validation rejects empty choice"
+```
+
+**gt-context "<symbol>" ["<file>"]** — every caller, callee and flow for a
+symbol. Graph-complete: finds callers `grep` misses.
+```bash
+gt-context "BoundField" "django/forms/boundfield.py"
+```
+
+**gt-impact "<symbol>" [upstream|downstream]** — what breaks if you change it.
+```bash
+gt-impact "BoundField" upstream
+```
+
+**gt-trace "<symbol>"** — execution paths through a symbol.
+
+**gt-validate "<file>"** — check an edit against the contracts its callers
+rely on. Worth running before you submit.
+
+Also available: `gt-explain`, `gt-symbols`, `gt-brief`, `gt-orient`,
+`gt-hotspots`, `gt-dead-code`, `gt-unused-packages`, `gt-status`,
+`gt-checkpoint`.
+
+### When to use what
+
+| I need to... | Use |
+|---|---|
+| Understand how a feature works end to end | `gt-find` |
+| Find ALL callers of a function | `gt-context` |
+| Know what my change will break | `gt-impact` upstream |
+| Check an edit before submitting | `gt-validate` |
+| Find a string literal or error message | `grep` |
+| Read source | `cat` / `nl -ba` |
+
+A tool that has nothing to say exits quietly. That is an answer: the graph
+does not know, so trust your own reading instead of running it again.

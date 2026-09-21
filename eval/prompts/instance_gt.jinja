@@ -1,0 +1,18 @@
+{{task}}
+
+## Suggested approach
+
+1. **Orient.** `gt-find` with a description of the problem, or `grep` for a
+   literal you can see in the task. Read the `[GT]` annotations on the result.
+2. **Understand the site.** `gt-context` on the symbol you intend to change —
+   it lists callers `grep` will not find, and those callers are usually where
+   the real constraint lives.
+3. **Check the blast radius.** `gt-impact <symbol> upstream` before a change
+   that alters a signature, a return shape or an exception.
+4. **Edit**, reading the surrounding source first.
+5. **Validate.** `gt-validate <file>` on what you changed, then run the tests
+   the repository already has.
+
+Use the tools where they earn their turn. A command that returns nothing
+useful has cost you a step out of your budget — if the graph has not helped
+twice in a row, work from the source directly.
