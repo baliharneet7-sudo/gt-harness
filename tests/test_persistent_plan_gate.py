@@ -394,3 +394,57 @@ def test_row_unmet_reason_still_wins_over_unresolved_predicates():
 def test_the_directive_falls_back_to_the_predicate_id_without_a_label():
     text = render_directive(_plan(), (), (), ("pred-obl-orphan",))
     assert "pred-obl-orphan" in text
+
+
+def test_rows_nothing_can_check_do_not_block_when_there_is_no_test_command():
+    """TB2 run 35553824646, headless-terminal: refused twice on rows no check
+    had judged, under `no_test_command`, on a task whose grader is hidden.
+
+    The gate's directive then sent the agent to manufacture evidence: 34 of
+    its remaining 47 turns went to "evidence commands" and, at turn 164, to
+    reading the gate's own source out of the container's site-packages. The
+    GT-off baseline solved the task in 86 turns. An UNVERIFIED row with no
+    discoverable check is the gate's ignorance, and the gate's own contract
+    says ignorance never blocks.
+    """
+    decision = decide(
+        plan=_plan(), unmet_rows=("req-a", "req-b"), regressions=(), refusals=0,
+        baseline_status="no_test_command",
+        row_states={"req-a": "UNVERIFIED", "req-b": "UNVERIFIED"}, **AMPLE)
+    assert decision.accepted
+    assert decision.reason == "unverifiable_rows_waived"
+    row = decision.as_row()
+    assert row["completion_proven"] is False
+    assert row["evidence"]["unverifiable_rows_waived"] == ["req-a", "req-b"]
+    assert row["evidence"]["completion_assessment"] == "rows_unverified"
+
+
+def test_a_check_that_actually_failed_still_blocks_without_a_test_command():
+    """A proposed check the drain ran and failed is evidence, not ignorance."""
+    decision = decide(
+        plan=_plan(), unmet_rows=("req-a", "req-b"), regressions=(), refusals=0,
+        baseline_status="no_test_command",
+        row_states={"req-a": "CHECK_FAILED", "req-b": "UNVERIFIED"}, **AMPLE)
+    assert not decision.accepted
+    assert decision.reason == "unmet_plan_rows"
+    assert decision.unmet_rows == ("req-a",)
+    assert decision.as_row()["evidence"]["unverifiable_rows_waived"] == ["req-b"]
+
+
+def test_unverified_rows_still_block_when_a_suite_exists_to_run():
+    """With a discoverable suite the agent can prove the row; the policy holds."""
+    decision = decide(
+        plan=_plan(), unmet_rows=("req-a",), regressions=(), refusals=0,
+        baseline_status="intact",
+        row_states={"req-a": "UNVERIFIED", "req-b": "CHECK_PASSED"}, **AMPLE)
+    assert not decision.accepted
+    assert decision.reason == "unmet_plan_rows"
+
+
+def test_no_row_ledger_waives_nothing():
+    """Without row states the gate cannot tell ignorance from failure."""
+    decision = decide(
+        plan=_plan(), unmet_rows=("req-a",), regressions=(), refusals=0,
+        baseline_status="no_test_command", **AMPLE)
+    assert not decision.accepted
+    assert "unverifiable_rows_waived" not in decision.as_row()["evidence"]

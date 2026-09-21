@@ -161,6 +161,28 @@ def decide(
         and not unresolved_predicates
         and not _baseline_blind
     )
+    # A row no check has ever judged is the gate's ignorance, and this gate's
+    # contract is that ignorance never blocks. With a discoverable suite the
+    # agent can still run it, so an UNVERIFIED row stays unmet there. With no
+    # test command at all nothing can ever prove the row: refusing on it asks
+    # for evidence the gate itself defines as impossible. TB2 run
+    # 35553824646, headless-terminal: refused twice on ten such rows, the
+    # directive sent the agent to manufacture evidence for 34 of its last 47
+    # turns - it read the gate's own source out of the container's
+    # site-packages to work out what would satisfy it - and it scored 0 where
+    # the GT-off baseline solved the task in 86 turns. A row a proposed check
+    # actually failed is evidence, not ignorance, and still blocks; so do
+    # regressions and RED predicates. The waiver is journaled by row id and
+    # completion_proven stays false: waived is not verified.
+    waived: tuple[str, ...] = ()
+    if baseline_status == "no_test_command" and row_states is not None:
+        waived = tuple(
+            key for key in unmet_rows
+            if states.get(key, "UNVERIFIED") == "UNVERIFIED"
+        )
+        if waived:
+            unmet_rows = tuple(key for key in unmet_rows if key not in waived)
+            details["unverifiable_rows_waived"] = sorted(waived)
     common = {
         "remaining_seconds": remaining_seconds,
         "remaining_steps": remaining_steps,
@@ -186,7 +208,11 @@ def decide(
         # binds a failing contract obligation to a row it was never linked to.
         blocking = tuple(unmet_rows) + tuple(regressions) + tuple(unresolved_predicates)
         if not blocking:
-            return GateDecision(accepted=True, reason="no_blocking_evidence", **common)
+            return GateDecision(
+                accepted=True,
+                reason="unverifiable_rows_waived" if waived else "no_blocking_evidence",
+                **common,
+            )
     # A submission over blocking evidence is refused, unconditionally. The
     # escapes that used to ship it anyway (stalled refusals, near-deadline
     # budget) are journaled below as evidence of the pressure the run was
