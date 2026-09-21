@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       cohort_stage:
-        description: "Run gate-one first; release remaining-19 only after an official grade"
+        description: "Run gate-one first; release remaining-19 only after an official grade. full-89 is the frozen GT-off baseline cohort - authorized full runs only"
         required: true
         type: choice
-        options: [gate-one, remaining-19, all-20, subset]
+        options: [gate-one, remaining-19, all-20, full-89, subset]
         default: gate-one
       subset_tasks:
         description: "subset only: comma-separated task ids, each drawn from the frozen repair20 set"
@@ -94,12 +94,40 @@ jobs:
           digest = hashlib.sha256(("\n".join(sorted(tasks)) + "\n").encode()).hexdigest()
           if digest != expected_hash or len(tasks) != 20 or len(set(tasks)) != 20:
               raise SystemExit("repair20 task identity mismatch")
+          # The full cohort is the frozen GT-off baseline's own 89 tasks, so a
+          # GT-on run is compared task-for-task with 66/89 instead of against a
+          # differently-drawn set.  Pinned the same way repair20 is, and
+          # required to contain it, so every earlier cohort result stays
+          # comparable.  qemu-alpine-ssh is in both and is excluded below for
+          # musl: the baseline SOLVED it, so the comparable baseline over the
+          # surviving 88 is 65, not 66 - the summarize receipt carries the
+          # exclusion so the denominator cannot drift silently.
+          cohort89 = json.loads(
+              Path("config/tb2_full89_cohort.v1.json").read_text(encoding="utf-8")
+          )
+          full89 = list(cohort89["tasks"])
+          full89_digest = hashlib.sha256(
+              ("\n".join(sorted(full89)) + "\n").encode()
+          ).hexdigest()
+          if (
+              full89_digest != cohort89["task_set_sha256"]
+              or full89_digest != "3778b86071c74c8a342222cfff41089916adb5c7338d1afa69f42c9cae21fe3e"
+              or len(full89) != 89
+              or len(set(full89)) != 89
+              or not set(tasks) <= set(full89)
+          ):
+              raise SystemExit("full-89 task identity mismatch")
           stage = os.environ["COHORT_STAGE"]
           selected = {
               "gate-one": tasks[:1],
               "remaining-19": tasks[1:],
               "all-20": tasks,
+              "full-89": full89,
           }.get(stage)
+          # The pool this stage draws from, and the identity that binds it.
+          pool, pool_digest = (
+              (full89, full89_digest) if stage == "full-89" else (tasks, digest)
+          )
           if stage == "subset":
               # A controlled experiment draws from the frozen repair20 set only,
               # so the task_set_sha256 identity check above still binds every
@@ -113,7 +141,7 @@ jobs:
               raise SystemExit(f"unsupported cohort stage: {stage}")
           dataset = Path(os.environ["RUNNER_TEMP"]) / "tb2-plan" / "terminal-bench"
           available = {p.name for p in dataset.iterdir() if p.is_dir()}
-          missing = sorted(set(tasks) - available)
+          missing = sorted(set(pool) - available)
           if missing:
               raise SystemExit(f"tasks absent from terminal-bench@2.0: {missing}")
           # Alpine/musl exclusion.  In cohort 35298094010 qemu-alpine-ssh could
@@ -554,9 +582,10 @@ jobs:
               "cohort_stage": stage,
               "task_count": len(selected),
               "task_ids": selected,
-              "full_task_count": 20,
-              "full_task_ids": tasks,
-              "task_set_sha256": digest,
+              "full_task_count": len(pool),
+              "full_task_ids": pool,
+              "task_set_sha256": pool_digest,
+              "repair20_task_set_sha256": digest,
               "parallel": min(20, len(selected)),
               "attempts_per_task": 1,
               "agent": "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent",
@@ -581,7 +610,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"matrix={matrix}\n")
               out.write(f"tasks={tasks_json}\n")
-              out.write(f"task_set_sha256={digest}\n")
+              out.write(f"task_set_sha256={pool_digest}\n")
               out.write(f"task_count={len(selected)}\n")
               excluded_json = json.dumps(excluded, separators=(",", ":"))
               out.write(f"excluded={excluded_json}\n")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -48,15 +49,19 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
     assert "max-parallel: 20" in text
-    assert "options: [gate-one, remaining-19, all-20, subset]" in text
+    assert "options: [gate-one, remaining-19, all-20, full-89, subset]" in text
     assert '"gate-one": tasks[:1]' in text
     assert '"remaining-19": tasks[1:]' in text
     assert 'TIMEOUT_MULTIPLIER: "5.0"' in text
     assert 'STEP_LIMIT: "100"' in text
     assert "attempts_per_task" in text
     assert '"parallel": min(20, len(selected))' in text
-    assert '"full_task_count": 20' in text
+    assert '"full_task_count": len(pool)' in text
+    # Both cohort pins, side by side: repair20's identity is unchanged by the
+    # addition of the baseline's own 89-task cohort, which must contain it.
     assert "36d5c8945f6f8d9ae23fe2cea759f16da0c0cea424a98f710cfaa0d9d6fd0303" in text
+    assert "3778b86071c74c8a342222cfff41089916adb5c7338d1afa69f42c9cae21fe3e" in text
+    assert '"full-89": full89' in text
     assert "actions/cache/restore@v4" in text
     assert "tb2-img-${{ matrix.task }}-${{ env.IMAGE_TAG }}" in text
     assert "Pull the existing GHCR mirror only on cache miss" in text
@@ -101,6 +106,91 @@ def test_gt_smoke_uses_official_harbor_grades_and_retains_evidence() -> None:
     assert "results/terminal-bench/" in text
     assert "benchmark-progress-tb2-gt-${{ github.run_id }}-${{ matrix.task }}" in text
     assert "tb2-gt-smoke20-921bec20-${{ github.run_id }}-task-${{ matrix.task }}" in text
+
+
+def _planner_cohort_selection(stage: str, subset_tasks: str = "") -> dict:
+    """Run the planner's own cohort selection out of the workflow heredoc.
+
+    Which tasks a paid run draws is the one decision no later receipt can
+    correct, so it is executed rather than asserted about as text. The slice
+    ends where the dataset is read, so no fixture directory is needed.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    start = text.index("          tasks = [\n")
+    end = text.index("          dataset = Path(os.environ[\"RUNNER_TEMP\"])")
+    namespace: dict = {
+        "hashlib": hashlib,
+        "json": json,
+        "os": os,
+        "Path": Path,
+    }
+    environ = dict(os.environ, COHORT_STAGE=stage, SUBSET_TASKS=subset_tasks)
+    saved = os.environ.copy()
+    cwd = os.getcwd()
+    try:
+        os.environ.clear()
+        os.environ.update(environ)
+        os.chdir(ROOT)
+        exec(compile(textwrap.dedent(text[start:end]), str(WORKFLOW), "exec"), namespace)
+    finally:
+        os.chdir(cwd)
+        os.environ.clear()
+        os.environ.update(saved)
+    return namespace
+
+
+def test_the_full_cohort_is_the_frozen_baseline_cohort() -> None:
+    """A GT-on full run must draw the GT-off baseline's own 89 tasks.
+
+    Drawn from anywhere else, the comparison against 66/89 is not paired and
+    the headline number means nothing.
+    """
+    namespace = _planner_cohort_selection("full-89")
+
+    assert len(namespace["selected"]) == 89
+    assert namespace["pool"] == namespace["selected"]
+    assert namespace["pool_digest"] == (
+        "3778b86071c74c8a342222cfff41089916adb5c7338d1afa69f42c9cae21fe3e"
+    )
+    # The frozen repair20 set stays inside it, so earlier cohort results remain
+    # comparable rather than becoming a differently-drawn sample.
+    assert set(namespace["tasks"]) <= set(namespace["selected"])
+
+
+def test_the_cohort_config_on_disk_matches_the_pin() -> None:
+    config = json.loads(
+        (ROOT / "config" / "tb2_full89_cohort.v1.json").read_text(encoding="utf-8")
+    )
+    digest = hashlib.sha256(
+        ("\n".join(sorted(config["tasks"])) + "\n").encode()
+    ).hexdigest()
+
+    assert digest == config["task_set_sha256"]
+    assert config["task_count"] == len(config["tasks"]) == 89
+    # The baseline solved the task GT cannot enter; the config has to say so,
+    # or a cohort of 88 gets compared against the baseline's 66/89.
+    assert config["known_exclusion"]["task"] == "qemu-alpine-ssh"
+    assert config["known_exclusion"]["baseline_reward"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "stage,count",
+    [("gate-one", 1), ("remaining-19", 19), ("all-20", 20)],
+)
+def test_the_repair20_stages_are_unchanged_by_the_full_cohort(stage, count) -> None:
+    namespace = _planner_cohort_selection(stage)
+
+    assert len(namespace["selected"]) == count
+    assert namespace["pool"] == namespace["tasks"]
+    assert namespace["pool_digest"] == (
+        "36d5c8945f6f8d9ae23fe2cea759f16da0c0cea424a98f710cfaa0d9d6fd0303"
+    )
+
+
+def test_a_subset_still_cannot_reach_outside_repair20() -> None:
+    """The 89 being available must not widen what `subset` can draw."""
+    with pytest.raises(SystemExit):
+        _planner_cohort_selection("subset", subset_tasks="adaptive-rejection-sampler")
 
 
 def _planner_namespace() -> dict:
@@ -1278,6 +1368,9 @@ def _planner_receipt(tmp_path: Path, monkeypatch, *, unresolved_reason: str) -> 
         "tasks": ["gap"],
         "stage": "subset",
         "digest": "d" * 64,
+        # The pool the stage drew from, resolved above this slice.
+        "pool": ["gap"],
+        "pool_digest": "d" * 64,
         "dataset": tmp_path,
         "static_unsupported": {},
         "SUPERVISOR_GRACE_SECONDS": 120,
