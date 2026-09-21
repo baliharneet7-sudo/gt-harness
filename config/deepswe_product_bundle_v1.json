@@ -49,11 +49,11 @@
       "schema": "gt.producer_build_binding.v1",
       "status": "VERIFIED",
       "source_commit": "0becde100410d4a1d61022e83306ec479590f5c8",
-      "source_tree": "0aae7c0c6347093a917f3c5563d7fd882453f85e",
+      "source_tree": "4d0a10302603377d3db2a4a66529b2beb1304114",
       "binary_sha256": "b6aed45d24c6f034979095125930bb3e3d304cfc7d5d4bab8760038e307d9bdf",
       "build_info_path": "vendor/gt-index-linux-amd64.build-info.json",
       "build_info_sha256": "0984acb9617e07d1373b6dd7a6a98bfab9846888217d6abce091c88e95a62cac",
-      "builder_image_digest": "af9b40f2b1851be993763b85288f8434af87b5678af04355b1e33ff530b5765f",
+      "builder_image_digest": "3600cb0c805e6a3bd8bb595012d6f20d4f7022b745e8bef133715552928b829a",
       "build_tags": "netgo,osusergo,sqlite_fts5",
       "static_linking": true
     },
