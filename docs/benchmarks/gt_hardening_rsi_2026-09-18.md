@@ -869,3 +869,109 @@ A run killed outside GT's own limit still seals no `gt-run.json`. The timeout
 ordering above removes the case that was reaching it; an OOM or an external
 kill would still land there, and the summary now says
 "did not seal a product receipt" rather than leaving a reader to infer it.
+
+## 18. The full 89: GT-on loses to GT-off by 9 tasks, and 5 of them are ours (2026-09-21)
+
+Run `35571048690`, head `aa86fc06`, producer `0becde10`, cohort
+`tb2_full89_cohort.v1` (sha `3778b860…`). Official aggregate:
+
+```
+total 88   completed 88   graded 82   passed 56   verifier_failed 26
+infrastructure_failed 6   excluded 1 (qemu-alpine-ssh, musl)
+```
+
+| | GT-on | GT-off baseline |
+|---|---|---|
+| solved, comparable cohort (88) | **56** | **65** |
+| solved, full cohort (89) | 56 | 66 |
+
+**Delta −9** over the 88 tasks both arms could attempt: 19 regressions against
+10 gains. Counting `qemu-alpine-ssh` — which GT cannot enter at all, because
+the wheel depends on `cryptography` and there is no musl build — the honest
+full-cohort figure is 56 against 66.
+
+### Where the −9 comes from
+
+| source | delta |
+|---|---|
+| graded outcomes (14 losses vs 10 gains) | −4 |
+| tasks GT discarded before grading | −5 |
+| **total** | **−9** |
+
+On tasks that reached a verifier GT-on is **−4 at n=82**. That is close to
+noise and it is not parity; it is a small, consistently negative signal. The
+rest is GT losing tasks to its own machinery:
+
+| task | mechanism |
+|---|---|
+| `fix-ocaml-gc` | patch export `ValueError` |
+| `reshard-c4-data` | patch export `ValueError` |
+| `write-compressor` | patch export `ValueError` |
+| `crack-7z-hash` | `command_descendant_receipt_missing:containment_unwitnessed` |
+| `qemu-startup` | agent install failed (uv tarball, exit 1) |
+
+`caffe-cifar-10` failed the same way as the first three and cost nothing, the
+baseline having scored 0 on it.
+
+### The patch-export defect: three tasks, one line
+
+`scripts/miniswe_supervisor.py`:
+
+```python
+if not baseline:
+    raise ValueError("baseline_unavailable")
+...
+except Exception as exc:
+    report["patch_export_error"] = {"type": type(exc).__name__}   # message discarded
+```
+
+A task workspace with no usable git baseline cannot yield a submission patch,
+so the run seals `internal_error`/exit 5 and is never graded. Terminal-Bench
+tasks routinely are not git repositories — `crack-7z-hash` shows the same
+root through a different door (`git ls-files` exit 128). **The GT-off arm
+never meets this**: it exports no patch, and Pier's verifier simply runs the
+tests in the container. This is a requirement GT imposes on itself, and when
+it fails GT throws away work the agent had already done.
+
+It is also the third blind receipt of this campaign: the exception *type* is
+recorded and its message discarded, so four tasks read as an anonymous
+`ValueError` until someone downloaded the trial directories. §17 fixed the
+same disease in the graph-build path; §15 in the amend path.
+
+### What the producer fix bought, measured
+
+`write-compressor`, the task the empty-graph guard fix was written for:
+
+| | proof run 4 (producer 032014ef) | this run (0becde10) |
+|---|---|---|
+| `index_unavailable` | 1 | 0 |
+| graph recovery attempts | 8 | 0 |
+| recovery suspended | 1 | 0 |
+| input tokens | 4,713,712 | 264,703 |
+| output tokens | 118,790 | 43,520 |
+
+The graph builds on the first attempt and input falls 18×, to well below the
+GT-off baseline's 953,933 on the same task. The fix did exactly what it was
+for. The task was then discarded at patch export and scored nothing, which is
+the whole campaign in one row: the capability work landed, and the harness
+around it lost the result.
+
+### Variance, stated so the numbers are not over-read
+
+`write-compressor`, `winning-avg-corewars` and `regex-chess` all passed in
+proof run 4 and all count against us here. Temperature is 1.0 and this is
+n=1 per task, so a ±3 swing is ordinary. That cuts both ways: the −4 graded
+delta should not be read as a settled deficit, and neither should any claim
+of parity.
+
+### Next, in order
+
+1. Decide what GT does when a task workspace has no git baseline, rather than
+   sealing `internal_error`. Three tasks, and the one mechanism most likely
+   to keep costing whole tasks.
+2. Record the exception message beside its type at the remaining
+   `{"type": ...}` sites.
+3. Re-run only the 6 infrastructure tasks. The other 82 were graded and need
+   no repeat.
+4. `qemu-alpine-ssh`: a musl-capable wheel would return one task the baseline
+   solves and GT cannot attempt.
