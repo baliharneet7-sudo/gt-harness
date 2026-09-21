@@ -18,22 +18,27 @@ def benchmark_run(monkeypatch):
     monkeypatch.setenv("GT_PRODUCT_SOURCE_SHA", "2" * 40)
 
 
-def test_create_bridge_propagates_instead_of_going_dormant(
+def test_create_bridge_runs_degraded_on_a_benchmark_without_its_graph(
     benchmark_run, monkeypatch, tmp_path: Path
 ):
-    """The gap REV-245 found: a broad handler swallowed the refusal.
+    """A benchmark run with no graph is graded degraded, not aborted.
 
-    `create_bridge` promises GT never breaks the harness, which is right for
-    local work. On a benchmark run it turned a refusal back into a dormant
-    bridge and the run continued to provider calls.
+    This test used to require BenchmarkGraphRequired to propagate out of
+    `create_bridge` (REV-245: a broad handler had swallowed it). The abort
+    itself was retired after TB2 run 35545356695: write-compressor, a
+    one-file repository the producer could not parse, was filed as
+    infrastructure_failed and never scored, where the GT-off baseline solved
+    it - the abort removed exactly the cases that separate the arms. The
+    propagation plumbing stays (the tests below still pin it) for the
+    harness faults that do raise; a producer that cannot build this
+    repository yields a live bridge and a journaled reason.
     """
 
     (tmp_path / "main.go").write_text("package main\n", encoding="utf-8")
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
     monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None, **_: None)
 
-    with pytest.raises(BenchmarkGraphRequired):
-        gt_engine.create_bridge(str(tmp_path))
+    assert gt_engine.create_bridge(str(tmp_path)) is not None
 
 
 def test_create_bridge_still_goes_dormant_for_local_work(monkeypatch, tmp_path: Path):

@@ -189,6 +189,17 @@ def _compact_miniswe_history(messages: list[dict]) -> None:
         }
         row["content"] = marker
 
+# mini-swe-agent 2.4.6 exits the run after three consecutive responses with
+# no tool call ("RepeatedFormatError"). The frozen GT-off baseline ran 2.2.8,
+# which had no such exit: a response without a tool call was re-prompted and
+# the run went on. TB2 run 35545356695, regex-chess: five FormatError rows,
+# the run ended at 7 turns, the supervisor exited 5 and Harbor filed the task
+# as an infrastructure failure - on a task the baseline was graded on. Zero
+# restores the baseline's behaviour; the step limit and wall clock still bound
+# the run, exactly as they bounded the baseline.
+_FORMAT_ERROR_EXIT_DISABLED = 0
+
+
 class BoundedHistoryAgent(DefaultAgent):
     """Mini-SWE 2.4.6 with lossless repeated-output references and unchanged tools."""
 
@@ -889,6 +900,7 @@ def build_agent(
             instance_template=instance_template,
             step_limit=step_limit,
             wall_time_limit_seconds=wall_time_limit_seconds,
+            max_consecutive_format_errors=_FORMAT_ERROR_EXIT_DISABLED,
             output_path=Path(output) if output else None,
         )
         observer = RunReceiptObserver(
@@ -1269,6 +1281,7 @@ def build_agent(
         instance_template=instance_template,
         step_limit=step_limit,
         wall_time_limit_seconds=wall_time_limit_seconds,
+        max_consecutive_format_errors=_FORMAT_ERROR_EXIT_DISABLED,
         output_path=Path(output) if output else None,
     )
     install_runtime_hooks(agent, session)

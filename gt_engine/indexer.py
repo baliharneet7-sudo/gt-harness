@@ -2531,7 +2531,8 @@ def _ensure_index_incremental_unlocked(
 def ensure_index(root: str, *, state_dir: str | None = None,
                  excluded_roots: tuple[Path, ...] = (),
                  layout: RuntimeLayout | None = None,
-                 reclaim: bool = True) -> str | None:
+                 reclaim: bool = True,
+                 diagnostics: list[str] | None = None) -> str | None:
     """Build/reuse one graph under an inter-process publication lock.
 
     Correct-or-quiet for local work; fail-closed for a benchmark-bound run,
@@ -2545,8 +2546,9 @@ def ensure_index(root: str, *, state_dir: str | None = None,
 
     graph: str | None = None
     # A refusal that cannot name its cause is how one poisoned revision
-    # directory cost a run and read as an environment problem.
-    diagnostics: list[str] = []
+    # directory cost a run and read as an environment problem. A caller may
+    # pass its own list to read the reasons back; the default is private.
+    diagnostics = diagnostics if diagnostics is not None else []
     if layout is not None:
         excluded_roots = tuple(dict.fromkeys((*excluded_roots, *layout.excluded_roots)))
     # Whether there was source to index at all. A task that starts empty has
@@ -2574,10 +2576,22 @@ def ensure_index(root: str, *, state_dir: str | None = None,
         and indexable
         and _execution_identity()["identity_scope"] == "benchmark_bound"
     ):
-        raise BenchmarkGraphRequired(
-            "benchmark run has no graph; refusing to measure a treatment that "
-            "cannot use the mechanism under test"
-            + (f" ({'; '.join(diagnostics)})" if diagnostics else "")
+        # This used to raise BenchmarkGraphRequired and abort the trial: a run
+        # without its graph "measures nothing, at full cost". Two things
+        # changed the arithmetic. The cost half is now bounded - the boundary
+        # suspends recovery after RECOVERY_FAILURE_EPISODE_CAP failed builds
+        # instead of rebuilding on every action - and the measurement half was
+        # backwards: aborting removed the task from the graded set, while the
+        # GT-off baseline graded it. TB2 run 35545356695, write-compressor: a
+        # one-file repository whose only file the producer could not parse,
+        # filed as infrastructure_failed, never scored, where the baseline
+        # solved it. A comparison that drops GT-on's hardest cases is not a
+        # comparison. The task now runs degraded and is graded; the journal
+        # carries index_unavailable with the producer's own diagnostics, and
+        # the audit's graph capability reads DEGRADED, so the score is
+        # attributable to a GT that had no graph rather than hidden.
+        diagnostics.append(
+            "benchmark_graph_unavailable: proceeding degraded and graded"
         )
     return graph
 

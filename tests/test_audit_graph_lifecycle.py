@@ -384,10 +384,15 @@ def test_ensure_index_benchmark_identity_survives_a_prune_fault(
     assert graph == str(produced / "graph.db")
 
 
-def test_ensure_index_still_raises_when_the_BUILD_failed(
+def test_ensure_index_reports_no_graph_when_the_BUILD_failed(
     tmp_path, monkeypatch
 ):
-    """Control: containment is for reclamation, not for build failure."""
+    """Control: containment is for reclamation, not for build failure.
+
+    A failed build on a benchmark run returns no graph and names why; it no
+    longer raises BenchmarkGraphRequired (see test_benchmark_graph_required
+    for the run-35545356695 write-compressor case that retired the abort).
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "x.py").write_text("x = 1\n", encoding="utf-8")
@@ -396,8 +401,11 @@ def test_ensure_index_still_raises_when_the_BUILD_failed(
     monkeypatch.setattr(
         indexer, "_ensure_index_unlocked", lambda *args, **kwargs: None
     )
-    with pytest.raises(indexer.BenchmarkGraphRequired):
-        indexer.ensure_index(str(repo), state_dir=str(tmp_path / "state"))
+    diagnostics: list[str] = []
+    assert indexer.ensure_index(
+        str(repo), state_dir=str(tmp_path / "state"), diagnostics=diagnostics
+    ) is None
+    assert any("benchmark_graph_unavailable" in row for row in diagnostics)
 
 
 def test_refresh_index_files_reports_the_amend_pruning_could_not_reclaim(

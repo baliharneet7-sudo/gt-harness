@@ -25,29 +25,45 @@ def _repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_a_benchmark_run_refuses_to_proceed_without_its_graph(
+def test_a_benchmark_run_without_its_graph_is_graded_degraded_not_aborted(
     benchmark_run, monkeypatch, tmp_path: Path
 ):
-    """The product is the graph: a run without one measures nothing, at full cost."""
+    """This used to raise BenchmarkGraphRequired and abort the trial.
 
+    TB2 run 35545356695, write-compressor: a one-file repository whose only
+    file the producer could not parse was filed as infrastructure_failed and
+    never scored, where the GT-off baseline solved it. Aborting removed the
+    task from the graded set on exactly the cases that separate the arms.
+    The run now proceeds degraded, journals why, and is graded; the cost of
+    a graphless run is bounded by the recovery suspension, not by the abort.
+    """
+    diagnostics: list[str] = []
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
     monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None, **_: None)
 
-    with pytest.raises(BenchmarkGraphRequired):
-        ensure_index(str(_repo(tmp_path)))
+    assert ensure_index(str(_repo(tmp_path)), diagnostics=diagnostics) is None
+    assert any("benchmark_graph_unavailable" in row for row in diagnostics)
 
 
-def test_an_index_that_raises_is_still_a_refusal_not_a_silent_none(
+def test_an_index_that_raises_is_degraded_with_the_fault_named(
     benchmark_run, monkeypatch, tmp_path: Path
 ):
     def explode(root, state_dir=None, **_):
         raise RuntimeError("gt-index exited 1")
 
+    diagnostics: list[str] = []
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
     monkeypatch.setattr(indexer, "_ensure_index_unlocked", explode)
 
-    with pytest.raises(BenchmarkGraphRequired):
-        ensure_index(str(_repo(tmp_path)))
+    assert ensure_index(str(_repo(tmp_path)), diagnostics=diagnostics) is None
+    assert any("gt-index exited 1" in row for row in diagnostics)
+    assert any("benchmark_graph_unavailable" in row for row in diagnostics)
+
+
+def test_the_refusal_class_still_exists_for_harness_faults():
+    """Source discovery that cannot complete is a harness fault, not a
+    repository the producer could not parse; that path still refuses."""
+    assert issubclass(BenchmarkGraphRequired, RuntimeError)
 
 
 def test_a_benchmark_run_with_a_graph_proceeds(benchmark_run, monkeypatch, tmp_path: Path):

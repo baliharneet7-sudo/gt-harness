@@ -3537,3 +3537,29 @@ def test_failed_wire_attempt_journals_a_terminal_row_for_its_admission(
     assert len(failures) == 1
     assert failures[0]["admission_sequence"] == admissions[0]["sequence"]
     assert failures[0]["error_type"] == "RuntimeError"
+
+
+@pytest.mark.parametrize("gt_off", [False, True])
+def test_no_tool_call_responses_are_reprompted_not_fatal(tmp_path, gt_off):
+    """Parity with the frozen baseline's scaffold.
+
+    mini-swe-agent 2.4.6 ends the run after three consecutive responses that
+    carry no tool call; the baseline's 2.2.8 re-prompted and carried on. TB2
+    run 35545356695, regex-chess: five such responses, seven turns, supervisor
+    exit 5, filed as infrastructure on a task the baseline was graded on. Both
+    arms disable the exit so the step limit is the only turn bound, as it was
+    for the baseline.
+    """
+    from scripts.miniswe_gt_run import build_agent
+
+    agent, _adapter, _session = build_agent(
+        task="Create output.py and run pytest.",
+        model="deepseek-v4-flash",
+        cwd=str(tmp_path),
+        state_dir=str(tmp_path / "state"),
+        output=None,
+        temperature=1.0,
+        gt_off=gt_off,
+    )
+    assert agent.config.max_consecutive_format_errors == 0
+    assert agent.config.step_limit == 100
