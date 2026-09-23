@@ -13,10 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "DeepSeek V4 Flash model id passed to litellm"
+        description: "OpenRouter model id passed to litellm (e.g. deepseek/deepseek-v4-flash). No default - must be set explicitly per run."
         type: string
         required: true
-        default: "deepseek-v4-flash"
       parallel:
         description: "Maximum concurrent DeepSWE tasks"
         type: string
@@ -46,12 +45,13 @@ on:
         description: "Frozen provider route for this final comparison"
         type: choice
         required: true
-        options: [deepseek, openrouter, tokenrouter]
-        default: "deepseek"
+        options: [openrouter]
+        default: "openrouter"
       provider_base_url:
-        description: "OpenAI-compatible provider base URL supplied by the run configuration"
+        description: "OpenAI-compatible provider base URL (OpenRouter)"
         type: string
         required: true
+        default: "https://openrouter.ai/api/v1"
       baseline_run_id:
         description: "GitHub run ID containing the frozen contemporaneous GT-off result"
         type: string
@@ -85,6 +85,11 @@ on:
         required: true
         options: [baseline, persistent_state_only, certified_full]
         default: certified_full
+      provider_only:
+        description: "OpenRouter provider.only filter (e.g. deepseek). Empty string disables the filter."
+        type: string
+        required: false
+        default: "deepseek"
 
 permissions:
   contents: read
@@ -109,7 +114,7 @@ env:
   SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
   GT_DENSE_INTRA_OP_THREADS: "4"
   GT_DENSE_INTER_OP_THREADS: "1"
-  GT_OPENROUTER_PROVIDER_ONLY: deepseek
+  GT_OPENROUTER_PROVIDER_ONLY: ${{ inputs.provider_only }}
   GT_OPENROUTER_DATA_COLLECTION: allow
 
 jobs:
@@ -403,11 +408,8 @@ jobs:
     timeout-minutes: 10
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
-      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
+      OPENAI_BASE_URL: ${{ inputs.provider_base_url }}
       MODEL: ${{ inputs.model }}
       PROVIDER: ${{ inputs.provider }}
       PROVIDER_BASE_URL: ${{ inputs.provider_base_url }}
@@ -445,7 +447,9 @@ jobs:
                   model = f"openai/{model}"
               export("GT_LITELLM_MODEL", model)
               export("OPENAI_BASE_URL", os.environ["PROVIDER_BASE_URL"])
-              export("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
+              provider_only = os.environ.get("GT_OPENROUTER_PROVIDER_ONLY", "").strip()
+              if provider_only:
+                  export("GT_OPENROUTER_PROVIDER_ONLY", provider_only)
               export("GT_OPENROUTER_DATA_COLLECTION", "allow")
           elif provider == "tokenrouter":
               if not model.startswith("openai/"):
@@ -572,11 +576,8 @@ jobs:
         task: ${{ fromJson(needs.plan.outputs.tasks) }}
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
-      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
+      OPENAI_BASE_URL: ${{ inputs.provider_base_url }}
       MODEL: ${{ inputs.model }}
       TASK: ${{ matrix.task }}
       STEP_LIMIT: ${{ inputs.step_limit }}
@@ -596,6 +597,32 @@ jobs:
           repository: datacurve-ai/deep-swe
           ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9
           path: deepswe-bench
+
+      - name: Serve the task image from the GHCR mirror
+        # pier resolves each task's image from task.toml, which pins an AWS ECR
+        # Public reference. Pulling the mirrored copy and retagging it under the
+        # ECR name leaves the image already present locally, so pier never pulls
+        # from ECR again. task.toml is deliberately NOT rewritten -- the pinned
+        # task set stays byte-identical.
+        env:
+          TASK: ${{ matrix.task }}
+          GHCR_PREFIX: ghcr.io/${{ github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -uo pipefail
+          TOML="deepswe-bench/tasks/${TASK}/task.toml"
+          [ -f "$TOML" ] || { echo "::notice::no task.toml for ${TASK}"; exit 0; }
+          SRC_IMG=$(grep -oE 'docker_image[[:space:]]*=[[:space:]]*"[^"]+"' "$TOML" | head -1 | cut -d'"' -f2)
+          [ -n "$SRC_IMG" ] || { echo "::notice::no docker_image pinned for ${TASK}"; exit 0; }
+          MIRROR="${GHCR_PREFIX}/${SRC_IMG##*/}"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null 2>&1 || true
+          if docker pull "$MIRROR" >/dev/null 2>&1; then
+            docker tag "$MIRROR" "$SRC_IMG"
+            echo "task image served from the GHCR mirror: $MIRROR"
+          else
+            echo "::notice::no GHCR mirror for ${SRC_IMG} -- run 'DeepSWE: Mirror task images to GHCR' once to stop re-pulling from ECR"
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -895,6 +922,31 @@ jobs:
 
   # Publish task outcomes independently from the strict GT receipt merge gate.
   # This is reporting-only and cannot promote a treatment or change scoring.
+      - name: Record task outcome for run visibility
+        # Reporting-only: a visibility failure must never flip a task job.
+        if: always()
+        continue-on-error: true
+        run: |
+          python scripts/gt_task_visibility.py emit \
+            --workflow "DeepSWE Mini-SWE central" \
+            --task "${{ matrix.task }}" \
+            --job-status "${{ job.status }}" \
+            --results-dir results \
+            --log "deepswe-task.log" \
+            --output "task-visibility/${{ matrix.task }}.json"
+
+      - name: Upload task outcome record
+        # run_attempt suffix keeps re-runs of one matrix job from colliding
+        # with the immutable artifact name from the first attempt.
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-visibility-${{ matrix.task }}-${{ github.run_attempt }}
+          path: task-visibility/
+          if-no-files-found: warn
+          retention-days: 7
+
   partial_results:
     name: Publish partial task results
     needs: [plan, run]
@@ -1101,16 +1153,24 @@ jobs:
                       and not (provider_route.get("provider_policy") or {})
                   )
               else:
-                  provider_route_valid = bool(
-                      route_common
-                      and provider_proof.get("requested_provider") == "deepseek"
-                      and provider_proof.get("allow_fallbacks") is False
-                      and provider_proof.get("require_parameters") is True
-                      and provider_route.get("api_base")
-                      == os.environ["PROVIDER_BASE_URL"]
-                      and (provider_route.get("provider_policy") or {}).get("only")
-                      == ["deepseek"]
-                  )
+                  expected_provider_only = os.environ.get("GT_OPENROUTER_PROVIDER_ONLY", "").strip()
+                  if expected_provider_only:
+                      provider_route_valid = bool(
+                          route_common
+                          and provider_proof.get("requested_provider") == expected_provider_only
+                          and provider_proof.get("allow_fallbacks") is False
+                          and provider_proof.get("require_parameters") is True
+                          and provider_route.get("api_base")
+                          == os.environ["PROVIDER_BASE_URL"]
+                          and (provider_route.get("provider_policy") or {}).get("only")
+                          == [expected_provider_only]
+                      )
+                  else:
+                      provider_route_valid = bool(
+                          route_common
+                          and provider_route.get("api_base")
+                          == os.environ["PROVIDER_BASE_URL"]
+                      )
               response_identity = receipt.get("provider_response_identity") or {}
               product_census = receipt.get("product_mechanism_census") or {}
               prompt_identity = receipt.get("provider_prompt_identity") or {}
@@ -1367,4 +1427,37 @@ jobs:
             DEEPSWE_EVALUATION_RESULTS.md
             DEEPSWE_BASELINE_RESULTS.json
             DEEPSWE_RELEASE_GATE.json
+          if-no-files-found: warn
+
+  visibility:
+    # Always runs, even when every task job failed -- an all-infra run must
+    # still report why, instead of vanishing into a red X.
+    name: "Run visibility"
+    needs: [plan, run]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: task-visibility-*
+          path: task-visibility
+          merge-multiple: true
+      - name: Aggregate per-task outcomes into the run summary
+        run: |
+          python scripts/gt_task_visibility.py aggregate \
+            --workflow "DeepSWE Mini-SWE central" \
+            --input-dir task-visibility \
+            --json-output task-visibility-summary.json \
+            --expected-tasks-json '${{ needs.plan.outputs.tasks }}'
+      - name: Upload the visibility summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-visibility-summary
+          path: task-visibility-summary.json
           if-no-files-found: warn
