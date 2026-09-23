@@ -2375,7 +2375,7 @@ class MiniSweCentralAgent(BaseAgent):
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
                 provider = (os.environ.get("GT_OPENROUTER_PROVIDER_ONLY") or "").strip()
-                if provider:
+                if provider and provider != "none":
                     provider_policy = {
                         "only": [provider],
                         "order": [provider],
