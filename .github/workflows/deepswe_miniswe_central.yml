@@ -86,7 +86,7 @@ on:
         options: [baseline, persistent_state_only, certified_full]
         default: certified_full
       provider_only:
-        description: "OpenRouter provider.only filter (e.g. deepseek). Empty string disables the filter."
+        description: "OpenRouter provider.only filter (e.g. deepseek). Set to 'none' to disable the filter."
         type: string
         required: false
         default: "deepseek"
@@ -114,7 +114,7 @@ env:
   SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
   GT_DENSE_INTRA_OP_THREADS: "4"
   GT_DENSE_INTER_OP_THREADS: "1"
-  GT_OPENROUTER_PROVIDER_ONLY: ${{ inputs.provider_only }}
+  GT_OPENROUTER_PROVIDER_ONLY: ${{ inputs.provider_only == 'none' && '' || inputs.provider_only }}
   GT_OPENROUTER_DATA_COLLECTION: allow
 
 jobs:
