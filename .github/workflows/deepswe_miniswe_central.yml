@@ -114,7 +114,7 @@ env:
   SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
   GT_DENSE_INTRA_OP_THREADS: "4"
   GT_DENSE_INTER_OP_THREADS: "1"
-  GT_OPENROUTER_PROVIDER_ONLY: ${{ inputs.provider_only == 'none' && '' || inputs.provider_only }}
+  GT_OPENROUTER_PROVIDER_ONLY: ${{ inputs.provider_only }}
   GT_OPENROUTER_DATA_COLLECTION: allow
 
 jobs:
@@ -448,7 +448,7 @@ jobs:
               export("GT_LITELLM_MODEL", model)
               export("OPENAI_BASE_URL", os.environ["PROVIDER_BASE_URL"])
               provider_only = os.environ.get("GT_OPENROUTER_PROVIDER_ONLY", "").strip()
-              if provider_only:
+              if provider_only and provider_only != "none":
                   export("GT_OPENROUTER_PROVIDER_ONLY", provider_only)
               export("GT_OPENROUTER_DATA_COLLECTION", "allow")
           elif provider == "tokenrouter":
@@ -1154,7 +1154,7 @@ jobs:
                   )
               else:
                   expected_provider_only = os.environ.get("GT_OPENROUTER_PROVIDER_ONLY", "").strip()
-                  if expected_provider_only:
+                  if expected_provider_only and expected_provider_only != "none":
                       provider_route_valid = bool(
                           route_common
                           and provider_proof.get("requested_provider") == expected_provider_only
