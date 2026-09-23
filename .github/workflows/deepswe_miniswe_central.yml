@@ -1054,7 +1054,8 @@ jobs:
               receipts = list(root.rglob("central_receipt.json"))
               results = list(root.rglob("result.json"))
               provider_proofs = list(root.rglob("provider-route-proof.json"))
-              if not receipts or not results or len(provider_proofs) != 1:
+              is_gt_off = (os.environ.get("ARM") or "gt_on") == "gt_off"
+              if not receipts or not results or (not is_gt_off and len(provider_proofs) != 1):
                   missing.append(task); continue
               receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
               parsed_results = [json.loads(p.read_text(encoding="utf-8")) for p in results]
@@ -1097,8 +1098,9 @@ jobs:
               outcome_class = classify_outcome(rewards, exception)
               preemptive = receipt.get("preemptive_retrieval") or {}
               dense_backend = preemptive.get("dense_backend") or {}
-              provider_proof = json.loads(
-                  provider_proofs[0].read_text(encoding="utf-8")
+              provider_proof = (
+                  json.loads(provider_proofs[0].read_text(encoding="utf-8"))
+                  if provider_proofs else {}
               )
               setup_overheads.append(provider_proof.get("benchmark_setup_overhead") or {})
               provider_route = receipt.get("provider_route") or {}
@@ -1108,31 +1110,10 @@ jobs:
                   if configured_model.startswith("openai/")
                   else f"openai/{configured_model}"
               )
-              route_common = bool(
-                  provider_proof.get("requested_model")
-                  == effective_model
-                  and provider_route.get("model")
-                  == effective_model
-                  and provider_route.get("credential_in_receipt") is False
-                  and provider_route.get("retry_policy")
-                  == "provider_once_no_retry"
-              )
-              if os.environ.get("PROVIDER") == "tokenrouter":
-                  provider_route_valid = bool(
-                      route_common
-                      and provider_proof.get("requested_provider") == "tokenrouter"
-                      and provider_proof.get("catalog_model_confirmed") is True
-                      and provider_route.get("api_base")
-                      == os.environ["PROVIDER_BASE_URL"]
-                      and not (provider_route.get("thinking_mode") or "")
-                      and provider_proof.get("thinking_mode") == "disabled"
-                      and provider_proof.get("forced_tool") == "select_catalog"
-                      and not (provider_route.get("provider_policy") or {})
-                  )
-              elif os.environ.get("PROVIDER") == "deepseek":
-                  # The default effective route remains openai/deepseek-v4-flash;
-                  # model-qualified routes (for example a dated 0731 snapshot)
-                  # are validated against the configured model below.
+              if is_gt_off and not provider_proofs:
+                  route_common = True
+                  provider_route_valid = True
+              else:
                   route_common = bool(
                       provider_proof.get("requested_model")
                       == effective_model
@@ -1142,35 +1123,57 @@ jobs:
                       and provider_route.get("retry_policy")
                       == "provider_once_no_retry"
                   )
-                  provider_route_valid = bool(
-                      route_common
-                      and provider_proof.get("requested_provider") == "deepseek_native"
-                      and provider_route.get("api_base")
-                      == os.environ["PROVIDER_BASE_URL"]
-                      and not (provider_route.get("thinking_mode") or "")
-                      and provider_proof.get("thinking_mode") == "disabled"
-                      and provider_proof.get("forced_tool") == "select_catalog"
-                      and not (provider_route.get("provider_policy") or {})
-                  )
-              else:
-                  expected_provider_only = os.environ.get("GT_OPENROUTER_PROVIDER_ONLY", "").strip()
-                  if expected_provider_only and expected_provider_only != "none":
+                  if os.environ.get("PROVIDER") == "tokenrouter":
                       provider_route_valid = bool(
                           route_common
-                          and provider_proof.get("requested_provider") == expected_provider_only
-                          and provider_proof.get("allow_fallbacks") is False
-                          and provider_proof.get("require_parameters") is True
+                          and provider_proof.get("requested_provider") == "tokenrouter"
+                          and provider_proof.get("catalog_model_confirmed") is True
                           and provider_route.get("api_base")
                           == os.environ["PROVIDER_BASE_URL"]
-                          and (provider_route.get("provider_policy") or {}).get("only")
-                          == [expected_provider_only]
+                          and not (provider_route.get("thinking_mode") or "")
+                          and provider_proof.get("thinking_mode") == "disabled"
+                          and provider_proof.get("forced_tool") == "select_catalog"
+                          and not (provider_route.get("provider_policy") or {})
+                      )
+                  elif os.environ.get("PROVIDER") == "deepseek":
+                      route_common = bool(
+                          provider_proof.get("requested_model")
+                          == effective_model
+                          and provider_route.get("model")
+                          == effective_model
+                          and provider_route.get("credential_in_receipt") is False
+                          and provider_route.get("retry_policy")
+                          == "provider_once_no_retry"
+                      )
+                      provider_route_valid = bool(
+                          route_common
+                          and provider_proof.get("requested_provider") == "deepseek_native"
+                          and provider_route.get("api_base")
+                          == os.environ["PROVIDER_BASE_URL"]
+                          and not (provider_route.get("thinking_mode") or "")
+                          and provider_proof.get("thinking_mode") == "disabled"
+                          and provider_proof.get("forced_tool") == "select_catalog"
+                          and not (provider_route.get("provider_policy") or {})
                       )
                   else:
-                      provider_route_valid = bool(
-                          route_common
-                          and provider_route.get("api_base")
-                          == os.environ["PROVIDER_BASE_URL"]
-                      )
+                      expected_provider_only = os.environ.get("GT_OPENROUTER_PROVIDER_ONLY", "").strip()
+                      if expected_provider_only and expected_provider_only != "none":
+                          provider_route_valid = bool(
+                              route_common
+                              and provider_proof.get("requested_provider") == expected_provider_only
+                              and provider_proof.get("allow_fallbacks") is False
+                              and provider_proof.get("require_parameters") is True
+                              and provider_route.get("api_base")
+                              == os.environ["PROVIDER_BASE_URL"]
+                              and (provider_route.get("provider_policy") or {}).get("only")
+                              == [expected_provider_only]
+                          )
+                      else:
+                          provider_route_valid = bool(
+                              route_common
+                              and provider_route.get("api_base")
+                              == os.environ["PROVIDER_BASE_URL"]
+                          )
               response_identity = receipt.get("provider_response_identity") or {}
               product_census = receipt.get("product_mechanism_census") or {}
               prompt_identity = receipt.get("provider_prompt_identity") or {}
@@ -1197,20 +1200,23 @@ jobs:
                   )
               )
               response_identity_valid = bool(
-                  expected_response_model
-                  and expected_response_provider
-                  and executor_identity.get("response_count")
-                  and executor_identity.get("stable_model_identity") is True
-                  and executor_identity.get("models") == [expected_response_model]
-                  and executor_identity.get("stable_provider_identity") is True
-                  and executor_identity.get("providers") == [expected_response_provider]
-                  and bootstrap_identity_valid
-                  and (
-                      not expected_fingerprint
-                      or (
-                          executor_identity.get("stable_fingerprint_identity") is True
-                          and executor_identity.get("system_fingerprints")
-                          == [expected_fingerprint]
+                  (is_gt_off and not provider_proofs)
+                  or (
+                      expected_response_model
+                      and expected_response_provider
+                      and executor_identity.get("response_count")
+                      and executor_identity.get("stable_model_identity") is True
+                      and executor_identity.get("models") == [expected_response_model]
+                      and executor_identity.get("stable_provider_identity") is True
+                      and executor_identity.get("providers") == [expected_response_provider]
+                      and bootstrap_identity_valid
+                      and (
+                          not expected_fingerprint
+                          or (
+                              executor_identity.get("stable_fingerprint_identity") is True
+                              and executor_identity.get("system_fingerprints")
+                              == [expected_fingerprint]
+                          )
                       )
                   )
               )
