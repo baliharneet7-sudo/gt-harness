@@ -915,13 +915,15 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p results/deepswe
+          JOB_NAME="deepswe-central-${GITHUB_RUN_ID}-${TASK}"
           set +e
-          timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" pier run \
-            -p deepswe-bench/tasks --include-task-name "$TASK" \
+          timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" harbor run \
+            -p deepswe-bench/tasks \
             --agent-import-path eval.miniswe_agent:MiniSweAgent \
             -m "$GT_LITELLM_MODEL" -o results/deepswe \
-            --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
-            --agent-timeout-multiplier 1.0 -n 1 -y 2>&1 | tee deepswe-task.log
+            --job-name "$JOB_NAME" \
+            --agent-timeout-multiplier 1.0 \
+            -n 1 -y -i "$TASK" 2>&1 | tee deepswe-task.log
           status=${PIPESTATUS[0]}
           set -e
           if [ "$status" -ne 0 ] \
@@ -931,12 +933,13 @@ jobs:
             mkdir -p results/deepswe-infra-attempt-1
             find results/deepswe -mindepth 1 -maxdepth 1 -exec mv -t results/deepswe-infra-attempt-1 -- {} + 2>/dev/null || true
             set +e
-            timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" pier run \
-              -p deepswe-bench/tasks --include-task-name "$TASK" \
+            timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" harbor run \
+              -p deepswe-bench/tasks \
               --agent-import-path eval.miniswe_agent:MiniSweAgent \
               -m "$GT_LITELLM_MODEL" -o results/deepswe \
-              --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
-              --agent-timeout-multiplier 1.0 -n 1 -y 2>&1 | tee -a deepswe-task.log
+              --job-name "$JOB_NAME" \
+              --agent-timeout-multiplier 1.0 \
+              -n 1 -y -i "$TASK" 2>&1 | tee -a deepswe-task.log
             status=${PIPESTATUS[0]}
             set -e
           fi
