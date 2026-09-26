@@ -8,14 +8,29 @@
 #
 # Promotion-capable runs use one immutable task profile from the frozen
 # baseline. Arbitrary subsets are diagnostic-only and cannot emit a verdict.
-# --agent-timeout-multiplier 1.0. This workflow has no baseline-generation arm.
-name: TB2 miniswe central matrix (GT-on)
+# --agent-timeout-multiplier 1.0.
+name: TB2 miniswe central matrix
 
 on:
   workflow_dispatch:
     inputs:
+      model:
+        description: "LLM model id (OpenAI-compatible for OpenRouter, e.g. openai/stealth/space-bunny-alpha). Only used when arm=gt_off."
+        type: string
+        required: false
+        default: ""
+      arm:
+        description: "gt_on = full GT treatment pipeline; gt_off = bare mini-swe-agent baseline (no GT substrate, no release guards)"
+        type: choice
+        options: [gt_on, gt_off]
+        default: gt_on
+      task_count:
+        description: "Number of tasks to run (gt_off only; gt_on uses the frozen profile). Max 89."
+        type: string
+        required: false
+        default: "20"
       comparison_profile:
-        description: "Frozen comparison denominator"
+        description: "Frozen comparison denominator (gt_on only)"
         type: choice
         options: [repair20-v1]
         default: repair20-v1
@@ -27,6 +42,16 @@ on:
         description: "Exact treatment commit or branch; blank freezes the dispatch commit"
         type: string
         default: ""
+      diagnostic_only:
+        description: "Skip release gates (gt_off always skips them)"
+        type: boolean
+        required: false
+        default: false
+      provider_only:
+        description: "OpenRouter provider.only filter (e.g. deepseek). Set to 'none' to disable."
+        type: string
+        required: false
+        default: "none"
       provider_preflight_timeout_sec:
         description: "Provider preflight timeout for this run; increase for queued TokenRouter routes"
         type: string
@@ -53,12 +78,14 @@ jobs:
 
   provider_free:
     needs: resolve
+    if: inputs.arm != 'gt_off'
     uses: ./.github/workflows/central_provider_free.yml
     with:
       ref: ${{ needs.resolve.outputs.sha }}
 
   release_identity:
     needs: [resolve, provider_free]
+    if: inputs.arm != 'gt_off'
     runs-on: ubuntu-latest
     outputs:
       prediction_sha256: ${{ steps.prediction.outputs.prediction_sha256 }}
@@ -114,14 +141,15 @@ jobs:
 
   plan:
     needs: [resolve, provider_free, release_identity]
+    if: always() && needs.resolve.result == 'success' && (inputs.arm == 'gt_off' || (needs.provider_free.result == 'success' && needs.release_identity.result == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
       tasks: ${{ steps.enum.outputs.tasks }}
       task_set_sha256: ${{ steps.enum.outputs.task_set_sha256 }}
-      prediction_sha256: ${{ needs.release_identity.outputs.prediction_sha256 }}
-      canary_model: ${{ steps.canary_identity.outputs.model }}
-      canary_provider: ${{ steps.canary_identity.outputs.provider }}
+      prediction_sha256: ${{ needs.release_identity.outputs.prediction_sha256 || '' }}
+      canary_model: ${{ steps.canary_identity.outputs.model || inputs.model }}
+      canary_provider: ${{ steps.canary_identity.outputs.provider || '' }}
     env:
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
@@ -143,12 +171,14 @@ jobs:
           python-version: "3.12"
       - id: route
         name: Resolve frozen provider route from release identity
+        if: inputs.arm != 'gt_off'
         run: |
           python -m scripts.provider_route_contract \
             --release-manifest eval/release/active_release.json \
             --github-output "$GITHUB_OUTPUT" \
             --json-output provider-route-contract.json
       - name: Bind only the frozen route credential
+        if: inputs.arm != 'gt_off'
         env:
           GT_SELECTED_PROVIDER_CREDENTIAL: ${{ secrets[steps.route.outputs.credential_secret_name] }}
         run: |
@@ -156,12 +186,22 @@ jobs:
             --release-manifest eval/release/active_release.json \
             --github-env "$GITHUB_ENV" \
             --bind-credential
+      - name: Bind baseline OpenRouter credential (gt_off)
+        if: inputs.arm == 'gt_off'
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_NEW }}
+        run: |
+          echo "::add-mask::$OPENROUTER_KEY"
+          echo "OPENAI_API_KEY=$OPENROUTER_KEY" >> "$GITHUB_ENV"
+          echo "OPENAI_BASE_URL=https://openrouter.ai/api/v1" >> "$GITHUB_ENV"
       - uses: actions/setup-go@v5
+        if: inputs.arm != 'gt_off'
         with:
           go-version-file: vendor/gt-index-src/go.mod
           cache-dependency-path: vendor/gt-index-src/go.sum
 
       - name: Build certified gt-index from the checked-out source
+        if: inputs.arm != 'gt_off'
         working-directory: vendor/gt-index-src
         env:
           CGO_ENABLED: "1"
@@ -179,6 +219,7 @@ jobs:
             vendor/groundtruth_mcp-*.whl
 
       - name: Provision pinned Snowflake ONNX runtime asset
+        if: inputs.arm != 'gt_off'
         run: |
           set -euo pipefail
           model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
@@ -191,9 +232,11 @@ jobs:
           echo "$SNOWFLAKE_TOKENIZER_SHA256  $model_dir/tokenizer.json" | sha256sum -c -
 
       - name: Prove repository intelligence substrate
+        if: inputs.arm != 'gt_off'
         run: python scripts/verify_gt_index_runtime.py
 
       - name: Prove pinned language contract
+        if: inputs.arm != 'gt_off'
         run: python scripts/verify_tb2_language_contract.py
 
       - name: Sanitize API keys (strip BOM / stray whitespace)
@@ -224,6 +267,7 @@ jobs:
           EOF
 
       - name: Prove exact persistent bootstrap provider contract (gates all jobs)
+        if: inputs.arm != 'gt_off'
         env:
           MODEL: ${{ steps.route.outputs.request_model }}
           PROVIDER_PREFLIGHT_TIMEOUT_SEC: ${{ inputs.provider_preflight_timeout_sec }}
@@ -240,6 +284,7 @@ jobs:
 
       - id: canary_identity
         name: Export observed bootstrap canary identity
+        if: inputs.arm != 'gt_off'
         run: |
           python - <<'EOF'
           import json, os
@@ -259,7 +304,7 @@ jobs:
           EOF
 
       - name: Upload exact bootstrap proof
-        if: always()
+        if: always() && inputs.arm != 'gt_off'
         uses: actions/upload-artifact@v4
         with:
           name: bootstrap-canary-${{ github.run_id }}
@@ -273,42 +318,51 @@ jobs:
         env:
           DATASET: terminal-bench@2.0
           COMPARISON_PROFILE: ${{ inputs.comparison_profile }}
+          ARM: ${{ inputs.arm }}
+          TASK_COUNT: ${{ inputs.task_count }}
         run: |
           set -euo pipefail
           harbor dataset download "$DATASET" -o ds --export
           python - <<'EOF'
-          import json, os
+          import hashlib, json, os
           from pathlib import Path
-
-          from scripts.release_manifest import load_release_manifest
-          from scripts.tb2_promotion_gate import task_set_sha256
 
           dataset = os.environ["DATASET"]
           root = Path("ds") / dataset.split("@", 1)[0]
-          available = {p.name for p in root.iterdir() if p.is_dir()}
+          available = sorted(p.name for p in root.iterdir() if p.is_dir())
           if not available:
               raise SystemExit(f"::error::no tasks found under {root}")
 
-          baseline = json.loads(
-              load_release_manifest().baseline_path.read_text(encoding="utf-8")
-          )
-          profile_id = os.environ["COMPARISON_PROFILE"]
-          profile = baseline["manifest"]["profiles"][profile_id]
-          tasks = sorted(
-              row["task"] for row in baseline["rows"]
-          ) if profile.get("task_source") == "all_rows" else sorted(profile["task_ids"])
-          missing = sorted(set(tasks) - available)
-          if missing:
-              raise SystemExit(f"::error::profile tasks absent from dataset: {missing}")
-          digest = task_set_sha256(tasks)
-          if len(tasks) != profile["task_count"] or digest != profile["task_set_sha256"]:
-              raise SystemExit("::error::frozen comparison profile failed count/hash validation")
+          arm = os.environ.get("ARM", "gt_on")
+          if arm == "gt_off":
+              task_count = min(int(os.environ.get("TASK_COUNT", "20")), len(available))
+              tasks = available[:task_count]
+              digest = hashlib.sha256(
+                  json.dumps(tasks, separators=(",", ":")).encode()
+              ).hexdigest()
+          else:
+              from scripts.release_manifest import load_release_manifest
+              from scripts.tb2_promotion_gate import task_set_sha256
+              baseline = json.loads(
+                  load_release_manifest().baseline_path.read_text(encoding="utf-8")
+              )
+              profile_id = os.environ["COMPARISON_PROFILE"]
+              profile = baseline["manifest"]["profiles"][profile_id]
+              tasks = sorted(
+                  row["task"] for row in baseline["rows"]
+              ) if profile.get("task_source") == "all_rows" else sorted(profile["task_ids"])
+              missing = sorted(set(tasks) - set(available))
+              if missing:
+                  raise SystemExit(f"::error::profile tasks absent from dataset: {missing}")
+              digest = task_set_sha256(tasks)
+              if len(tasks) != profile["task_count"] or digest != profile["task_set_sha256"]:
+                  raise SystemExit("::error::frozen comparison profile failed count/hash validation")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               f.write(f"tasks={json.dumps(tasks)}\n")
               f.write(f"task_set_sha256={digest}\n")
 
-          summary = [f"## Plan: {len(tasks)} tasks as individual jobs", ""]
+          summary = [f"## Plan ({arm}): {len(tasks)} tasks as individual jobs", ""]
           summary.append("`" + ", ".join(tasks) + "`")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
               f.write("\n".join(summary) + "\n")
@@ -336,9 +390,6 @@ jobs:
         task: ${{ fromJson(needs.plan.outputs.tasks) }}
     env:
       PYTHONUTF8: "1"
-      # gh release download uses GH_TOKEN in task jobs; without it a parallel
-      # task can fail before model execution with a misleading 401, leaving
-      # the denominator incomplete despite a valid pinned asset.
       GH_TOKEN: ${{ github.token }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
       SNOWFLAKE_MODEL_REVISION: 7802add0519e4bf94c46ef23552176697c7a1ac7
@@ -352,8 +403,8 @@ jobs:
       PREDICTION_SHA256: ${{ needs.plan.outputs.prediction_sha256 }}
       GT_COMMIT: ${{ needs.resolve.outputs.sha }}
       CANARY_MODEL: ${{ needs.plan.outputs.canary_model }}
-      # Provider credentials remain on the Harbor host. The external agent
-      # passes an empty env mapping to every model-selected task command.
+      ARM: ${{ inputs.arm }}
+      GT_OPENROUTER_PROVIDER_ONLY: ${{ inputs.provider_only }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -363,11 +414,13 @@ jobs:
           python-version: "3.12"
       - id: route
         name: Resolve frozen provider route from release identity
+        if: inputs.arm != 'gt_off'
         run: |
           python -m scripts.provider_route_contract \
             --release-manifest eval/release/active_release.json \
             --github-output "$GITHUB_OUTPUT"
       - name: Bind only the frozen route credential
+        if: inputs.arm != 'gt_off'
         env:
           GT_SELECTED_PROVIDER_CREDENTIAL: ${{ secrets[steps.route.outputs.credential_secret_name] }}
         run: |
@@ -375,12 +428,22 @@ jobs:
             --release-manifest eval/release/active_release.json \
             --github-env "$GITHUB_ENV" \
             --bind-credential
+      - name: Bind baseline OpenRouter credential (gt_off)
+        if: inputs.arm == 'gt_off'
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_NEW }}
+        run: |
+          echo "::add-mask::$OPENROUTER_KEY"
+          echo "OPENAI_API_KEY=$OPENROUTER_KEY" >> "$GITHUB_ENV"
+          echo "OPENAI_BASE_URL=https://openrouter.ai/api/v1" >> "$GITHUB_ENV"
       - uses: actions/setup-go@v5
+        if: inputs.arm != 'gt_off'
         with:
           go-version-file: vendor/gt-index-src/go.mod
           cache-dependency-path: vendor/gt-index-src/go.sum
 
       - name: Build certified gt-index from the checked-out source
+        if: inputs.arm != 'gt_off'
         working-directory: vendor/gt-index-src
         env:
           CGO_ENABLED: "1"
@@ -401,6 +464,16 @@ jobs:
           set -euo pipefail
           sudo systemctl start docker
           docker info >/dev/null
+      - name: Authenticate to Docker Hub
+        # Unauthenticated pulls share a 100/hr quota tied to the runner egress IP,
+        # which GitHub-hosted runners share across tenants. Authenticating lifts
+        # this job to 200/hr on its own account. Secrets already exist in all
+        # three repos; continue-on-error keeps an unset secret non-fatal.
+        uses: docker/login-action@v3
+        continue-on-error: true
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME_ROTATION }}
+          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKERHUB_TOKEN_ROTATION }}
 
       - name: Install nano-harness + harbor
         run: |
@@ -410,6 +483,7 @@ jobs:
             vendor/groundtruth_mcp-*.whl
 
       - name: Provision pinned Snowflake ONNX runtime asset in task job
+        if: inputs.arm != 'gt_off'
         run: |
           set -euo pipefail
           model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
@@ -440,6 +514,7 @@ jobs:
           PY
 
       - name: Verify pinned dense backend before Mini-SWE
+        if: inputs.arm != 'gt_off'
         run: |
           set -euo pipefail
           MODEL_DIR="$RUNNER_TEMP/snowflake-arctic-embed-m" python - <<'PY'
@@ -475,9 +550,11 @@ jobs:
           PY
 
       - name: Prove repository intelligence substrate
+        if: inputs.arm != 'gt_off'
         run: python scripts/verify_gt_index_runtime.py
 
       - name: Prove pinned language contract
+        if: inputs.arm != 'gt_off'
         run: python scripts/verify_tb2_language_contract.py
 
       - name: Sanitize API keys (strip BOM / stray whitespace)
@@ -501,20 +578,46 @@ jobs:
                   f.write(f"{name}={clean}\n")
           EOF
 
+      - name: Pull task image from the GHCR mirror
+        # The Actions-cache path below is capped at 10 GB per repository and
+        # cannot hold more than ~20 of the 89 TB2 images. A hit here means the
+        # image is never pulled from Docker Hub again on any subsequent run.
+        id: ghcr
+        env:
+          TASK: ${{ matrix.task }}
+          IMAGE_TAG: "20251031"
+          GHCR_PREFIX: ghcr.io/${{ github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -uo pipefail
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null 2>&1 || true
+          SRC="${GHCR_PREFIX}/tb2.${TASK}:${IMAGE_TAG}"
+          if docker pull "$SRC" >/dev/null 2>&1; then
+            docker tag "$SRC" "alexgshaw/${TASK}:${IMAGE_TAG}"
+            echo "hit=1" >> "$GITHUB_OUTPUT"
+            echo "task image served from the GHCR mirror: $SRC"
+          else
+            echo "hit=0" >> "$GITHUB_OUTPUT"
+            echo "::notice::no GHCR mirror for ${TASK} -- run 'TB2: Mirror task images to GHCR' once to stop re-pulling"
+          fi
+
       - name: Restore task image from cache
         id: restore
+        if: steps.ghcr.outputs.hit != '1'
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/tb2-img.tar.gz
           key: tb2-img-${{ matrix.task }}-20251031
 
       - name: Load cached task image
-        if: steps.restore.outputs.cache-hit == 'true'
+        if: steps.ghcr.outputs.hit != '1' && steps.restore.outputs.cache-hit == 'true'
         run: |
           docker load -i "${{ runner.temp }}/tb2-img.tar.gz"
           echo "loaded task image from cache for ${{ matrix.task }}"
 
       - name: Resolve Harbor's exact task-owned agent budget
+        if: inputs.arm != 'gt_off'
         env:
           DATASET: terminal-bench@2.0
           TASK: ${{ matrix.task }}
@@ -569,6 +672,7 @@ jobs:
           echo "resolved Harbor agent budget: ${EXECUTION_BUDGET}s"
 
       - name: Capture source-owned runtime observation
+        if: inputs.arm != 'gt_off'
         env:
           TASK: ${{ matrix.task }}
         run: |
@@ -710,6 +814,7 @@ jobs:
           echo "GT_RUNTIME_OBSERVATION_PATH=$RUNNER_TEMP/gt-runtime-sources/$TASK/runtime-observation.json" >> "$GITHUB_ENV"
 
       - name: Build caller-owned benchmark identity
+        if: inputs.arm != 'gt_off'
         env:
           COMPARISON_PROFILE: ${{ inputs.comparison_profile }}
           DATASET: terminal-bench@2.0
@@ -832,8 +937,9 @@ jobs:
           echo "GT_STEP_LIMIT=$STEP_LIMIT" >> "$GITHUB_ENV"
           echo "GT_BENCHMARK_MANIFEST_PATH=$IDENTITY_ROOT/benchmark-manifest.json" >> "$GITHUB_ENV"
 
-      - name: Run harbor - task ${{ matrix.task }}
+      - name: Run harbor - task ${{ matrix.task }} (gt_on)
         id: harbor
+        if: inputs.arm != 'gt_off'
         env:
           MODEL: ${{ needs.plan.outputs.canary_model }}
           DATASET: terminal-bench@2.0
@@ -874,8 +980,33 @@ jobs:
             "${FEATURE_ARGS[@]}" \
             -i "$TASK"
 
+      - name: Run harbor - task ${{ matrix.task }} (gt_off baseline)
+        id: harbor_baseline
+        if: inputs.arm == 'gt_off'
+        env:
+          MODEL: ${{ inputs.model }}
+          DATASET: terminal-bench@2.0
+          TASK: ${{ matrix.task }}
+        run: |
+          set -euo pipefail
+          AGENT="eval.miniswe_agent:MiniSweAgent"
+          JOB_NAME="tb2-miniswe-central-certified_full-integrated-${GITHUB_RUN_ID}-${TASK}"
+          echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
+
+          harbor run \
+            -d "$DATASET" \
+            --agent-import-path "$AGENT" \
+            -m "$MODEL" \
+            -o results/terminal-bench \
+            --job-name "$JOB_NAME" \
+            --agent-timeout-multiplier 1.0 \
+            --max-steps 300 \
+            -n 1 \
+            -y \
+            -i "$TASK"
+
       - name: Preserve runtime observation artifact
-        if: always()
+        if: always() && inputs.arm != 'gt_off'
         run: |
           if [ -n "${GT_RUNTIME_OBSERVATION_PATH:-}" ] && [ -f "$GT_RUNTIME_OBSERVATION_PATH" ]; then
             cp "$GT_RUNTIME_OBSERVATION_PATH" runtime-observation.json
@@ -885,7 +1016,7 @@ jobs:
           fi
 
       - name: Cache task image for future runs
-        if: steps.restore.outputs.cache-hit != 'true'
+        if: steps.ghcr.outputs.hit != '1' && steps.restore.outputs.cache-hit != 'true'
         id: saveimg
         env:
           TASK: ${{ matrix.task }}
@@ -909,7 +1040,7 @@ jobs:
           echo "saved ${TASK} image ($SIZE bytes) for future runs"
 
       - name: Upload task image cache
-        if: steps.restore.outputs.cache-hit != 'true' && steps.saveimg.outputs.cached == '1'
+        if: steps.ghcr.outputs.hit != '1' && steps.restore.outputs.cache-hit != 'true' && steps.saveimg.outputs.cached == '1'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/tb2-img.tar.gz
@@ -939,9 +1070,34 @@ jobs:
             gt-treatment-runtime.json
           if-no-files-found: warn
 
+      - name: Record task outcome for run visibility
+        # Reporting-only: a visibility failure must never flip a task job.
+        if: always()
+        continue-on-error: true
+        run: |
+          python scripts/gt_task_visibility.py emit \
+            --workflow "TB2 miniswe central (GT-on)" \
+            --task "${{ matrix.task }}" \
+            --job-status "${{ job.status }}" \
+            --results-dir results \
+            --log "" \
+            --output "task-visibility/${{ matrix.task }}.json"
+
+      - name: Upload task outcome record
+        # run_attempt suffix keeps re-runs of one matrix job from colliding
+        # with the immutable artifact name from the first attempt.
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-visibility-${{ matrix.task }}-${{ github.run_attempt }}
+          path: task-visibility/
+          if-no-files-found: warn
+          retention-days: 7
+
   merge:
     needs: [resolve, provider_free, plan, run]
-    if: always()
+    if: always() && needs.plan.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -960,6 +1116,7 @@ jobs:
           merge-multiple: false
 
       - name: Download exact provider-free proof
+        if: inputs.arm != 'gt_off'
         uses: actions/download-artifact@v4
         with:
           pattern: central-provider-free-${{ github.run_id }}
@@ -967,13 +1124,15 @@ jobs:
           merge-multiple: true
 
       - name: Download exact bootstrap route proof
+        if: inputs.arm != 'gt_off'
         uses: actions/download-artifact@v4
         with:
           pattern: bootstrap-canary-${{ github.run_id }}
           path: bootstrap-canary
           merge-multiple: true
 
-      - name: Merge task results
+      - name: Merge task results (gt_on)
+        if: inputs.arm != 'gt_off'
         env:
           EXPECTED_TASKS_JSON: ${{ needs.plan.outputs.tasks }}
           TASK_SET_SHA256: ${{ needs.plan.outputs.task_set_sha256 }}
@@ -985,21 +1144,84 @@ jobs:
           GT_RUN_ID: ${{ github.run_id }}
           PROVIDER_FREE_COMMIT: ${{ needs.provider_free.outputs.certified_commit }}
           PROVIDER_FREE_STATUS: ${{ needs.provider_free.outputs.mechanical_status }}
-        # The merge implementation lives in scripts/tb2_merge_results.py to
-        # stay below GitHub's expression-size limit. These anchors keep the
-        # fail-closed release contract reviewable at the dispatch surface:
-        # invalid_intelligence = [; out = [; harbor_result=got[0] if got else None
-        # audit_treatment_runtime; build_feature_lifecycle_report;
-        # assess_tb2_promotion; invalid_treatment_release_tasks;
-        # fingerprint drift does not excuse a baseline loss.
-        # from gt_engine.delivery_audit import audit_provider_deliveries
-        # dense_receipt.get("available") is True; dense_proof.get("available") is True
-        # provider_delivery_failures; invalid_provider_deliveries;
-        # invalid_intelligence or invalid_dense or invalid_provider_deliveries
-        # INVALID GT TREATMENT; INVALID TREATMENT RELEASE; invalid_treatment_release;
-        # not lifecycle_report["passed"]; not promotion_report.passed;
-        # call1_gt_changed_tasks; This is intervention accounting.
         run: python scripts/tb2_merge_results.py
+
+      - name: Merge task results (gt_off baseline)
+        if: inputs.arm == 'gt_off'
+        env:
+          EXPECTED_TASKS_JSON: ${{ needs.plan.outputs.tasks }}
+          ARM: gt_off
+          GT_RUN_ID: ${{ github.run_id }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          python - <<'MERGE_EOF'
+          import json, os
+          from pathlib import Path
+
+          tasks = json.loads(os.environ["EXPECTED_TASKS_JSON"])
+          task_root = Path("tasks")
+          solved = 0
+          outcome_counts = {"PASS": 0, "FAIL": 0, "INFRA_FAILURE": 0, "INFRA_TIMEOUT": 0, "UNKNOWN": 0}
+          rows = []
+          missing = []
+          for task in tasks:
+              prefix = f"tb2-miniswe-central-certified_full-integrated-{os.environ['GT_RUN_ID']}-task-{task}"
+              task_dir = task_root / prefix / "terminal-bench"
+              receipts = sorted(task_dir.glob("receipt-*.json")) if task_dir.exists() else []
+              results = sorted(task_dir.glob("result-*.json")) if task_dir.exists() else []
+              if not receipts or not results:
+                  missing.append(task)
+                  outcome_counts["INFRA_FAILURE"] += 1
+                  rows.append({"task": task, "outcome": "INFRA_FAILURE", "solved": 0})
+                  continue
+              result = json.loads(results[0].read_text(encoding="utf-8"))
+              receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+              resolved = result.get("resolved", False)
+              if resolved:
+                  outcome = "PASS"
+                  solved += 1
+              else:
+                  outcome = "FAIL"
+              outcome_counts[outcome] += 1
+              rows.append({
+                  "task": task,
+                  "outcome": outcome,
+                  "solved": int(resolved),
+                  "steps": receipt.get("steps", 0),
+                  "tokens": receipt.get("total_tokens", 0),
+              })
+
+          out = {
+              "arm": "gt_off",
+              "model": os.environ.get("MODEL", ""),
+              "solved": solved,
+              "planned": len(tasks),
+              "outcome_counts": outcome_counts,
+              "missing_artifacts": missing,
+              "rows": rows,
+          }
+          Path("merged.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+
+          md = [
+              "# TB2 baseline evaluation (gt_off)",
+              "",
+              f"- model: **{out['model']}**",
+              f"- solved: **{solved}/{len(tasks)}**",
+              f"- outcome counts: **{json.dumps(outcome_counts, sort_keys=True)}**",
+              f"- missing artifacts: **{len(missing)}**",
+              "",
+              "| task | outcome | solved | steps | tokens |",
+              "|---|---|---:|---:|---:|",
+          ]
+          for r in rows:
+              md.append(f"| {r['task']} | {r['outcome']} | {r.get('solved',0)} | {r.get('steps','')} | {r.get('tokens','')} |")
+          summary = "\n".join(md) + "\n"
+          Path("SUMMARY.md").write_text(summary, encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write(summary)
+          print(f"- solved: **{solved}/{len(tasks)}**")
+          print(f"- outcome counts: **{json.dumps(outcome_counts, sort_keys=True)}**")
+          MERGE_EOF
 
       - name: Upload merged result
         if: always()
@@ -1014,4 +1236,37 @@ jobs:
             tb2_treatment.json
             promotion_report.json
             regression_forensics.json
+          if-no-files-found: warn
+
+  visibility:
+    # Always runs, even when every task job failed -- an all-infra run must
+    # still report why, instead of vanishing into a red X.
+    name: "Run visibility"
+    needs: [plan, run]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: task-visibility-*
+          path: task-visibility
+          merge-multiple: true
+      - name: Aggregate per-task outcomes into the run summary
+        run: |
+          python scripts/gt_task_visibility.py aggregate \
+            --workflow "TB2 miniswe central (GT-on)" \
+            --input-dir task-visibility \
+            --json-output task-visibility-summary.json \
+            --expected-tasks-json '${{ needs.plan.outputs.tasks }}'
+      - name: Upload the visibility summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-visibility-summary
+          path: task-visibility-summary.json
           if-no-files-found: warn
