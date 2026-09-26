@@ -754,8 +754,10 @@ KIND_ENTRIES: tuple[CapabilityEntry, ...] = (
             "tests/test_typed_graph_real_producer.py::test_route_map_survives_an_api_call_only_route",
         ),
         limitations=(
-            "partial semantics: fixed framework manifest; MIDDLEWARE_ON not "
-            "surfaced; an API_CALL-only route reports route_handler_unresolved"
+            "partial semantics: fixed framework manifest; middleware and DI "
+            "injections are surfaced only where the manifest binds them (golden "
+            "route_map.json: express_use, fastapi_depends, spring_autowired); "
+            "an API_CALL-only route reports route_handler_unresolved"
             " + route_anchor_unavailable (never a fabricated anchor line)",
         ),
     ),

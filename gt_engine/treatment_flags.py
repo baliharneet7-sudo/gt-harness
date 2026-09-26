@@ -198,6 +198,47 @@ def resolve_treatment_flags(args: Any) -> dict[str, dict[str, str]]:
             f"treatment_integration_mode_invalid:{integration}"
         )
 
+    # --- delivery mode (HAR-93) -------------------------------------------
+    from gt_engine.attached_delivery import (
+        ATTACHED,
+        DELIVERY_MODE_ENV,
+        PUSH,
+        delivery_mode,
+    )
+
+    requested_delivery = str(effective("gt_delivery_mode") or "").strip().lower()
+    try:
+        resolved_delivery = delivery_mode(requested_delivery)
+    except ValueError as exc:
+        raise TreatmentFlagRefusal(
+            f"treatment_knob_value_invalid:gt_delivery_mode={requested_delivery}"
+        ) from exc
+    if gt_off:
+        if resolved_delivery == ATTACHED:
+            raise TreatmentFlagRefusal(
+                "treatment_knob_conflict:gt_delivery_mode=attached_under_gt_off"
+            )
+        os.environ.pop(DELIVERY_MODE_ENV, None)
+        resolution["gt_delivery_mode"] = {
+            "value": requested_delivery or "unset", "disposition": "moot_gt_off"}
+    elif resolved_delivery == ATTACHED:
+        if str(get("gt_mode") or "") not in ("", "advisory", "shadow"):
+            raise TreatmentFlagRefusal(
+                "treatment_knob_conflict:gt_delivery_mode=attached_vs_gt_mode"
+            )
+        # Attached keeps every computation but withholds every push: the
+        # session runs in SHADOW and the new tool/augment surfaces deliver.
+        args.gt_mode = "shadow"
+        os.environ[DELIVERY_MODE_ENV] = ATTACHED
+        resolution["gt_delivery_mode"] = {
+            "value": ATTACHED, "disposition": "wired:attached_shadow_session"}
+    else:
+        os.environ[DELIVERY_MODE_ENV] = PUSH
+        resolution["gt_delivery_mode"] = {
+            "value": requested_delivery or "unset",
+            "disposition": "wired:push" if requested_delivery else "unset",
+        }
+
     # --- budget reconciliation -------------------------------------------
     # The contract-supplied value must pass through ``effective()`` AND be
     # written back onto args: the runner consumes args.time_budget_seconds /

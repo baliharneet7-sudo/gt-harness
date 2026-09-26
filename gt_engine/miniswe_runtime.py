@@ -35,6 +35,7 @@ from typing import Any
 
 from minisweagent.exceptions import Submitted
 
+from .attached_delivery import is_attached
 from .gt_session import GTDecisionCandidate, GTMode, GTSession, GTSessionConfig
 from .miniswe_evidence import (
     classify_event,
@@ -372,6 +373,12 @@ def _run_submit_gate(session: GTSession, command: str, *, pre_execution: bool = 
     adapter = session.engine
     if adapter is None or session.disabled:
         return True
+    if is_attached():
+        # Attached delivery never blocks a native action (HAR-93): the submit
+        # goes through exactly as in stock Mini-SWE.
+        if pre_execution:
+            adapter.store.append("submit_gate_bypassed", reason="attached_delivery")
+        return True
     if not pre_execution and adapter.phase in {"IMPLEMENT", "VERIFY"}:
         if adapter.phase == "IMPLEMENT":
             adapter.begin_verify()
@@ -605,6 +612,10 @@ def _workspace_fingerprint(repo_root: str) -> dict[str, tuple[int, int] | str]:
 
 
 def _refresh_native_graph(adapter: MiniSweAdapter, session: GTSession) -> None:
+    if is_attached():
+        # Pay per intent: attached GT refreshes only when a gt-* tool or a
+        # search augmentation actually reads the graph (refresh-before-query).
+        return
     if (session.capability_active("graph_refresh")
             and session.capability_active("graph_queries")):
         adapter.refresh_graph(phase="native_action")
@@ -2319,7 +2330,11 @@ def install_runtime_hooks(
                     productive=bool(changed_files),
                     returncode=returncode,
                 )
-                if churn_signal == "steer":
+                if churn_signal and is_attached():
+                    # Attached delivery neither steers nor kills: record what
+                    # the push arm would have done, then let the agent run.
+                    adapter.store.append("churn_signal_shadow", signal=churn_signal)
+                elif churn_signal == "steer":
                     adapter.queue_churn_steer(
                         adapter.build_churn_steer(
                             adapter.churn_governor.stall_turns
@@ -2443,6 +2458,15 @@ def install_runtime_hooks(
                     session.degrade("plan_gate_delivery_receipt", exc)
                 directives.append({"role": "user", "content": directive})
         adapter.pending_directives = []
+        attached = getattr(adapter, "attached_delivery", None)
+        if attached is not None and not session.disabled:
+            try:
+                outputs = attached.observe_turn(
+                    [None if is_typed_action(action) else _command(action) for action in actions],
+                    outputs,
+                )
+            except Exception as exc:  # noqa: BLE001 - enrichment never costs the observation
+                adapter.store.append("gt_augment_fault", error=type(exc).__name__)
         formatter = getattr(model, "format_observation_messages", None)
         if session.disabled and native_add_messages is not None:
             agent.add_messages = native_add_messages

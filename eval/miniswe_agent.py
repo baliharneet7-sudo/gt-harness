@@ -132,6 +132,10 @@ class MiniSweAgent(BaseInstalledAgent):
         CliFlag(kwarg="execution_budget_sec", cli="--execution-budget-sec",
                 type="int"),
         CliFlag(kwarg="integration_mode", cli="--integration-mode"),
+        CliFlag(kwarg="gt_delivery_mode", cli="--gt-delivery-mode"),
+        # Emitted after the command's default --temperature 1.0; argparse keeps
+        # the last occurrence, so a launch value wins and an unset one is inert.
+        CliFlag(kwarg="temperature", cli="--temperature", type="str"),
         CliFlag(kwarg="policy_mode", cli="--policy-mode"),
         CliFlag(kwarg="preflight_mode", cli="--preflight-mode"),
         CliFlag(kwarg="treatment_profile", cli="--treatment-profile"),

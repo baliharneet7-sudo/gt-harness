@@ -31,50 +31,63 @@ PAID_ROUTE_MANIFESTS = (
 
 
 def test_paid_route_is_deepseek_streamlake_fp8_only() -> None:
-    """The active route: the HAR-83 benchmark model, one provider, fp8 only."""
+    """The DEFAULT route files: the HAR-83 benchmark model, one provider, fp8
+    only. A config fact, not a code allowlist - any model is launchable."""
     for name in PAID_ROUTE_MANIFESTS:
         route, _ = provider_preflight.load_route(ROOT / "config" / name)
         assert route["model"] == "deepseek/deepseek-v4-flash-0731", name
         assert route["provider_routing"] == STREAMLAKE_FP8_ROUTING, name
-    assert (
-        provider_preflight._AUTHORIZED_ROUTES["deepseek/deepseek-v4-flash-0731"]
-        == STREAMLAKE_FP8_ROUTING
-    )
     fp8, _ = provider_preflight.load_route(ROOT / "config" / PAID_ROUTE_MANIFESTS[1])
     assert fp8["route_id"] == "openrouter-deepseek-v4-flash-0731-streamlake-fp8-only"
 
 
-def test_each_authorized_route_identity_loads(tmp_path: Path) -> None:
-    """The allowlist is a closed set: deepseek stays authorized for the
-    benchmark route; union-alpha is the functional-verification route."""
-    base = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    for model, routing in provider_preflight._AUTHORIZED_ROUTES.items():
-        doc = dict(base, model=model, provider_routing=routing)
-        manifest = tmp_path / f"route-{model.split('/')[-1]}.json"
-        manifest.write_text(json.dumps(doc), encoding="utf-8")
-        route, _ = provider_preflight.load_route(manifest)
-        assert route["model"] == model
-
-
-def test_load_route_refuses_an_unauthorized_model(tmp_path: Path) -> None:
-    doc = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    doc["model"] = "openai/gpt-5"
+@pytest.mark.parametrize(("model", "routing"), [
+    ("deepseek/deepseek-v4-flash-0731", STREAMLAKE_FP8_ROUTING),
+    ("stealth/space-bunny-alpha", {"only": ["stealth"], "allow_fallbacks": False,
+                                   "require_parameters": True}),
+    ("openai/gpt-5.6-terra", {}),
+])
+def test_any_model_loads_with_a_well_formed_route(tmp_path: Path, model, routing) -> None:
+    doc = dict(json.loads(MANIFEST.read_text(encoding="utf-8")),
+               model=model, provider_routing=routing, reasoning_effort="max")
     manifest = tmp_path / "route.json"
     manifest.write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(ValueError, match="provider_model_not_allowed"):
+    route, digest = provider_preflight.load_route(manifest)
+    assert route["model"] == model and route["provider_routing"] == routing
+    assert len(digest) == 64
+
+
+@pytest.mark.parametrize("model", ["", "  ", " deepseek/x", 7])
+def test_load_route_refuses_a_malformed_model(tmp_path: Path, model) -> None:
+    doc = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    doc["model"] = model
+    manifest = tmp_path / "route.json"
+    manifest.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(ValueError, match="provider_model_invalid"):
         provider_preflight.load_route(manifest)
 
 
-def test_load_route_refuses_routing_drift(tmp_path: Path) -> None:
+@pytest.mark.parametrize("routing", [
+    {"only": ["streamlake"], "quantisations": ["fp8"]},
+    {"only": []},
+    {"only": ["streamlake"], "quantizations": ["fp7"]},
+    {"only": ["streamlake"], "allow_fallbacks": "false"},
+    ["streamlake"],
+])
+def test_load_route_refuses_malformed_routing(tmp_path: Path, routing) -> None:
     doc = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    doc["provider_routing"] = {
-        "only": ["stealth"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    }
+    doc["provider_routing"] = routing
     manifest = tmp_path / "route.json"
     manifest.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(ValueError, match="provider_routing_not_allowed"):
+        provider_preflight.load_route(manifest)
+
+
+def test_load_route_refuses_an_unknown_reasoning_effort(tmp_path: Path) -> None:
+    doc = dict(json.loads(MANIFEST.read_text(encoding="utf-8")), reasoning_effort="ultra")
+    manifest = tmp_path / "route.json"
+    manifest.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(ValueError, match="provider_reasoning_effort_invalid"):
         provider_preflight.load_route(manifest)
 
 

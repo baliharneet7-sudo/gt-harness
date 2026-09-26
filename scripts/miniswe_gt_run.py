@@ -691,46 +691,30 @@ def _templates() -> tuple[str, str]:
     return str(agent["system_template"]), str(agent["instance_template"])
 
 
-# The closed set of models that may carry a `provider` routing object, keyed
-# by the openai/-prefixed id the run layer sees. Must mirror
-# provider_preflight._AUTHORIZED_ROUTES - a model not listed here cannot
-# smuggle routing constraints through GT_PROVIDER_ROUTING_JSON.
-_PROVIDER_ROUTING_BY_MODEL = {
-    "openai/deepseek/deepseek-v4-flash-0731": {
-        "only": ["streamlake"],
-        # Enforced on every request: a relace/fp4 endpoint under the same
-        # model name scored 0/20 against the fp8 baseline's 17/20.
-        "quantizations": ["fp8"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
-    "openai/stealth/union-alpha": {
-        "only": ["stealth"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
-    "openai/unbiased/pareto": {
-        "only": ["unbiased"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
-    "openai/meta/muse-spark-1.2-contributor": {
-        "only": ["meta"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
-}
-
-
 def _model_and_kwargs(model: str, temperature: float) -> tuple[str, dict]:
-    """litellm-routable model id + kwargs for the configured gateway."""
+    """litellm-routable model id + kwargs for the configured gateway.
+
+    The model, its provider routing and its reasoning effort are launch
+    inputs (``GT_PROVIDER_ROUTING_JSON``, ``GT_REASONING_EFFORT``). No model is
+    special-cased here: a comparison is only valid when both arms were launched
+    with the same inputs, and the receipt records exactly what was sent.
+    """
+    from gt_harness.provider_routing import (
+        ProviderRoutingError,
+        validate_provider_routing,
+        validate_reasoning_effort,
+    )
+
     model_kwargs: dict = {"temperature": temperature, "num_retries": 0}
-    if model.removeprefix("openai/") == "meta/muse-spark-1.2-contributor":
-        # The retained DeepSWE baseline used xhigh reasoning. OpenRouter's
-        # OpenAI-compatible contract accepts this structured field, and
-        # leaving it implicit makes GT-on vs baseline outcome comparisons
-        # invalid even when the visible model identifier is identical.
-        model_kwargs["reasoning"] = {"effort": "xhigh"}
+    try:
+        effort = validate_reasoning_effort(os.environ.get("GT_REASONING_EFFORT", ""))
+    except ProviderRoutingError as exc:
+        raise ValueError(str(exc)) from exc
+    if effort:
+        # OpenRouter's OpenAI-compatible structured field. Leaving effort
+        # implicit makes a GT-on vs baseline comparison invalid even when the
+        # visible model identifier is identical (the leaderboard ran "max").
+        model_kwargs["reasoning"] = {"effort": effort}
     reserved_output = int(
         os.environ.get("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", "0") or 0
     )
@@ -751,15 +735,17 @@ def _model_and_kwargs(model: str, temperature: float) -> tuple[str, dict]:
         if not model.startswith("openai/"):
             model = f"openai/{model}"
         model_kwargs["api_base"] = base_url
-        expected_routing = _PROVIDER_ROUTING_BY_MODEL.get(model)
-        if expected_routing is not None:
-            raw_routing = os.environ.get("GT_PROVIDER_ROUTING_JSON", "")
-            try:
-                routing = json.loads(raw_routing)
-            except json.JSONDecodeError as exc:
-                raise ValueError("provider_routing_env_invalid") from exc
-            if routing != expected_routing:
-                raise ValueError("provider_routing_env_not_allowed")
+        # Fail closed: a gateway run must state its routing, even if only
+        # "{}" (OpenRouter chooses). An absent lock would let a certified
+        # route silently widen to any endpoint serving the same model name.
+        raw_routing = os.environ.get("GT_PROVIDER_ROUTING_JSON", "")
+        try:
+            routing = validate_provider_routing(json.loads(raw_routing))
+        except json.JSONDecodeError as exc:
+            raise ValueError("provider_routing_env_invalid") from exc
+        except ProviderRoutingError as exc:
+            raise ValueError(f"provider_routing_env_not_allowed:{exc}") from exc
+        if routing:
             model_kwargs["extra_body"] = {"provider": routing}
     return model, model_kwargs
 
@@ -869,6 +855,18 @@ def build_agent(
         "1", "true", "yes", "on",
     }
     gt_disabled = gt_off or gt_mode == "off" or global_killed
+    attached = False
+    if not gt_disabled:
+        from gt_engine.attached_delivery import attached_system_section, is_attached
+
+        attached = is_attached()
+    if attached:
+        # One tool surface (bash), one prompt delta: the stock template plus
+        # the GT tool reference. The typed function tool stays unadvertised.
+        system_template = f"{system_template}\n\n{attached_system_section()}"
+        disabled_capabilities = tuple(
+            dict.fromkeys((*disabled_capabilities, "typed_actions"))
+        )
     if gt_disabled:
         # GT-off remains the stock Mini-SWE model, including its Bash-only
         # provider schema and parser.
@@ -958,6 +956,10 @@ def build_agent(
     # The persistent plan. Same route as the two flags above and for the same
     # reason: container env is not a channel the harness trusts, and an explicit
     # operator "0" still wins because setdefault does not overwrite.
+    if attached:
+        # No plan call, no baseline suite run, no plan gate rows: attached
+        # delivery pushes nothing and blocks nothing.
+        os.environ["GT_PERSISTENT_PLAN"] = "0"
     os.environ.setdefault("GT_PERSISTENT_PLAN", "1")
     contract = extract_task_contract(task)
     compiled = compile_obligation_predicates(contract)
@@ -1285,6 +1287,12 @@ def build_agent(
         output_path=Path(output) if output else None,
     )
     install_runtime_hooks(agent, session)
+    if attached:
+        from gt_engine.attached_delivery import AttachedDelivery
+
+        delivery = AttachedDelivery(session)
+        delivery.start(layout.task_root / "bin", env_obj.config.env)
+        adapter.attached_delivery = delivery
     observer = RunReceiptObserver(
         Path(state_dir) / task_id,
         requested_model=model,
@@ -1760,6 +1768,7 @@ def main() -> int:
         "enable-progress-control", "enable-adaptive-validation-timeout",
         "enable-shadow-submit-gate", "enable-decision-sufficiency",
         "enable-task-start-advisory", "enable-replay-capture",
+        "gt-delivery-mode",
     ):
         parser.add_argument("--" + name, default="")
     for name in (
@@ -2052,6 +2061,20 @@ def main() -> int:
     report["model_identity"] = manifest["model"]
     report["research_valid"] = manifest["research_valid"]
     report["reproducibility_manifest"] = str(manifest_path)
+    # The limit the loop actually enforced, read from the live agent - the
+    # proof a requested --step-limit reached the runner (run 36255669736 asked
+    # for 300 and ran at the default 100 without any field saying so).
+    report["requested_step_limit"] = args.step_limit
+    report["effective_step_limit"] = int(
+        getattr(getattr(agent, "config", None), "step_limit", args.step_limit)
+    )
+    if gt_active:
+        from gt_engine.attached_delivery import delivery_report
+
+        report["gt_delivery"] = delivery_report(adapter)
+        attached_delivery = getattr(adapter, "attached_delivery", None)
+        if attached_delivery is not None:
+            attached_delivery.stop()
     if args.metrics:
         Path(args.metrics).parent.mkdir(parents=True, exist_ok=True)
         Path(args.metrics).write_text(json.dumps(report, sort_keys=True), encoding="utf-8")

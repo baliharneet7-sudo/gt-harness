@@ -48,6 +48,8 @@ _PROVIDER_VARS = (
     # Non-secret, exact provider policy. The runner rejects DeepSeek startup
     # when this is absent or differs from the Relace-only fail-closed route.
     "GT_PROVIDER_ROUTING_JSON",
+    # Non-secret launch input; validated by the runner (gt_harness.provider_routing).
+    "GT_REASONING_EFFORT",
 )
 
 

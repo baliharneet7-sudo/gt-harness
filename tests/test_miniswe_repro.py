@@ -33,29 +33,31 @@ from scripts.miniswe_repro import (
 MAX_TOOL_OUTPUT_CHARS = 16_000
 
 
-def test_muse_route_preserves_the_baseline_xhigh_reasoning_contract(monkeypatch) -> None:
-    # The muse id was later added to _PROVIDER_ROUTING_BY_MODEL, so with a
-    # gateway configured the route now REFUSES unless the provider lock is
-    # pinned in the environment: an unset GT_PROVIDER_ROUTING_JSON reaches
-    # json.loads("") and raises provider_routing_env_invalid. That refusal is
-    # the point of the lock, not a defect, so the test supplies the lock
-    # instead of weakening it - and pins it here so no ambient value can
-    # decide what this test measures. The reasoning contract below is
-    # unchanged and is still what this test is about.
+def test_reasoning_effort_is_a_launch_input_for_any_model(monkeypatch) -> None:
+    # No model is special-cased: effort rides only when the launch sets it,
+    # and an unknown effort refuses rather than silently sending nothing.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
     monkeypatch.delenv("GT_PROVIDER_RESERVED_OUTPUT_TOKENS", raising=False)
-    muse_routing = {
-        "only": ["meta"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    }
+    muse_routing = {"only": ["meta"], "allow_fallbacks": False, "require_parameters": True}
     monkeypatch.setenv("GT_PROVIDER_ROUTING_JSON", json.dumps(muse_routing))
 
+    monkeypatch.setenv("GT_REASONING_EFFORT", "xhigh")
     model, kwargs = _model_and_kwargs("meta/muse-spark-1.2-contributor", 1.0)
-
     assert model == "openai/meta/muse-spark-1.2-contributor"
     assert kwargs["reasoning"] == {"effort": "xhigh"}
     assert kwargs["extra_body"] == {"provider": muse_routing}
+
+    monkeypatch.setenv("GT_REASONING_EFFORT", "max")
+    _, kwargs = _model_and_kwargs("deepseek/deepseek-v4-flash-0731", 1.0)
+    assert kwargs["reasoning"] == {"effort": "max"}
+
+    monkeypatch.delenv("GT_REASONING_EFFORT")
+    _, kwargs = _model_and_kwargs("meta/muse-spark-1.2-contributor", 1.0)
+    assert "reasoning" not in kwargs
+
+    monkeypatch.setenv("GT_REASONING_EFFORT", "ultra")
+    with pytest.raises(ValueError, match="reasoning_effort_invalid"):
+        _model_and_kwargs("meta/muse-spark-1.2-contributor", 1.0)
 
 
 STREAMLAKE_FP8_ROUTING = {
@@ -81,25 +83,25 @@ def test_deepseek_route_forwards_streamlake_fp8_only_without_fallback(monkeypatc
     assert kwargs["extra_body"] == {"provider": STREAMLAKE_FP8_ROUTING}
 
 
-def test_deepseek_route_refuses_the_lock_without_the_fp8_constraint(monkeypatch) -> None:
+def test_gateway_route_is_forwarded_verbatim_for_any_model(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
-    unconstrained = {k: v for k, v in STREAMLAKE_FP8_ROUTING.items() if k != "quantizations"}
-    monkeypatch.setenv("GT_PROVIDER_ROUTING_JSON", json.dumps(unconstrained))
+    routing = {"only": ["stealth"], "allow_fallbacks": False, "require_parameters": True}
+    monkeypatch.setenv("GT_PROVIDER_ROUTING_JSON", json.dumps(routing))
+    model, kwargs = _model_and_kwargs("stealth/space-bunny-alpha", 1.0)
+    assert model == "openai/stealth/space-bunny-alpha"
+    assert kwargs["extra_body"] == {"provider": routing}
+    monkeypatch.setenv("GT_PROVIDER_ROUTING_JSON", "{}")
+    _, kwargs = _model_and_kwargs("stealth/space-bunny-alpha", 1.0)
+    assert "extra_body" not in kwargs
 
-    with pytest.raises(ValueError, match="provider_routing_env_not_allowed"):
-        _model_and_kwargs("deepseek/deepseek-v4-flash-0731", 1.0)
 
-
-def test_run_layer_routing_table_mirrors_the_preflight_allowlist() -> None:
-    """The preflight certifies the route, the run layer re-checks the env lock
-    against its own table; if the two drift, a certified route cannot run."""
+def test_run_layer_and_preflight_share_one_routing_validator() -> None:
+    """The preflight certifies the route file and the run layer re-checks the
+    env lock; both call the same validator, so they cannot drift."""
+    from gt_harness import provider_routing
     from scripts import provider_preflight
-    from scripts.miniswe_gt_run import _PROVIDER_ROUTING_BY_MODEL
 
-    assert _PROVIDER_ROUTING_BY_MODEL == {
-        f"openai/{model}": routing
-        for model, routing in provider_preflight._AUTHORIZED_ROUTES.items()
-    }
+    assert provider_preflight.validate_provider_routing is provider_routing.validate_provider_routing
 
 
 def test_deepseek_openrouter_route_refuses_missing_provider_lock(monkeypatch) -> None:
@@ -1307,11 +1309,11 @@ def test_union_alpha_route_forwards_stealth_only(monkeypatch) -> None:
     }
 
 
-def test_union_alpha_route_refuses_foreign_routing(monkeypatch) -> None:
+def test_gateway_route_refuses_malformed_routing(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.invalid/api/v1")
     monkeypatch.setenv(
         "GT_PROVIDER_ROUTING_JSON",
-        json.dumps({"only": ["streamlake"], "allow_fallbacks": False}),
+        json.dumps({"only": ["streamlake"], "quantisations": ["fp8"]}),
     )
     with pytest.raises(ValueError, match="provider_routing_env_not_allowed"):
         _model_and_kwargs("stealth/union-alpha", 1.0)

@@ -12,7 +12,7 @@ The producer's compatibility authority labels every graph-backed kind `sound_ove
 harness applies a ceiling that can only lower a label. Every graph-backed kind is certified
 `partial`, for these reasons:
 
-- Resolver edges are name-level: a stdlib `subprocess.run` resolves to a same-file `run` method and is marked CERTIFIED.
+- Resolver edges are name-level. Since producer 5c725ca9 a receiver must be proven before a same-file method certifies, so a stdlib `subprocess.run` stays an unresolved callsite (pinned in `tests/test_typed_graph_real_producer.py`), but same-name collisions without a receiver are still possible.
 - Dynamic dispatch is missed.
 - Several producers rely on fixed manifests.
 
@@ -28,7 +28,8 @@ demoted from REPLACE to AUGMENT, with reason `CERTIFICATION_NOT_EXACT` and omiss
 | syntax | exact | go, js, py, rb, ts | parse-only |
 | verification_status | execution_specific | all 30 | bound to command and revision |
 | definition, references, callers, symbol_context, processes, patch_impact | partial | go, java, js, py, rust, ts | name-level resolution |
-| route_map, api_impact | partial | go, java, js, py, ts | fixed framework manifest; MIDDLEWARE_ON not surfaced |
+| route_map | partial | go, java, js, py, ts | fixed framework manifest; middleware/DI surfaced only where the manifest binds them (golden: express_use, fastapi_depends, spring_autowired) |
+| api_impact | partial | go, java, js, py, ts | fixed framework manifest; MIDDLEWARE_ON not surfaced |
 | taint | partial | go, java, js, py, rust, ts | symbol-level CALLS reachability plus harness-side statement dataflow for Python sources (def-use over resolved callsites; unresolved callees/non-Python/unbound varargs are named omissions); not an over-approximation |
 | rename, shape_check, tool_map | partial | go, java, js, py, rust, ts | see CSV basis |
 | slice | partial | go, java, js, py, ts (CFG substrate only) | interprocedural hops are name-matched |
@@ -38,7 +39,7 @@ demoted from REPLACE to AUGMENT, with reason `CERTIFICATION_NOT_EXACT` and omiss
 - `RevisionVector.graph` is `configuration["graph_source_revision"]`. The runtime sets it from `EngineState.graph_source_revision` whenever the graph is current.
 - Without a bound revision, the value is the sentinel `graph-source-revision-unbound`. It is never read back out of the graph.
 - The indexer passes `-source-revision <workspace revision>` on full builds, batch amends and `-file` incrementals, but only when the producer's `-build-info` declares `source_revision_meta_v1`.
-- The vendored producer (0becde10) does not declare that capability. Its graphs therefore carry no `source_revision`, and the vendored wheel (5681eeae) still compares against `project_meta.git_commit`, which is the producer's build commit. Until W2's producer and W3's wheel are vendored, every graph kind reports `graph_revision_mismatch`. That report is honest: the revision cannot yet be verified.
+- The vendored producer is the certified Route-B build of 1e83ea68, which declares `source_revision_meta_v1`; the vendored wheel (658cad06) compares against `project_meta.source_revision`. `graph_revision_mismatch` therefore fires only on a real mismatch. (Before 2f3389e6/e6ab66aa the 0becde10 producer wrote no source revision and every graph kind reported the mismatch.)
 
 ## Bounded output
 

@@ -2682,6 +2682,12 @@ class MiniSweAdapter(GroundtruthController):
         if (not bool(transaction.complete) or not self.repo_root
                 or self._startup_index is not None):
             return
+        from gt_engine.attached_delivery import is_attached
+
+        if is_attached():
+            # The edit is recorded and the graph marked stale; refresh_graph
+            # completes the amend at the serving boundary if anything reads it.
+            return
         snapshot = self.engine_state.query_snapshot()
         if any(value != "transaction_bytes_unavailable"
                for value in snapshot.omissions):
@@ -3315,9 +3321,20 @@ class MiniSweAdapter(GroundtruthController):
                 phase="initial_index",
             )
             if type(exc).__name__ == "BenchmarkGraphRequired":
-                self.signal_startup_abort(
-                    "initial_index_failed:benchmark_graph_required"
-                )
+                from gt_engine.attached_delivery import is_attached
+
+                if is_attached():
+                    # Attached GT only adds; losing the graph must leave the
+                    # stock agent running, never kill it. The row is marked
+                    # treatment-invalid so it is not scored as GT.
+                    self.attached_treatment_invalid = (
+                        "initial_index_failed:benchmark_graph_required")
+                    self.store.append("attached_treatment_invalid",
+                                      reason=self.attached_treatment_invalid)
+                else:
+                    self.signal_startup_abort(
+                        "initial_index_failed:benchmark_graph_required"
+                    )
         else:
             if not getattr(receipt, "success", False):
                 self.store.append(

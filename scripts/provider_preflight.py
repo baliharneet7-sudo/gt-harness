@@ -30,6 +30,11 @@ if __package__ in (None, ""):
     if _REPOSITORY_ROOT not in _sys.path:
         _sys.path.insert(0, _REPOSITORY_ROOT)
 
+from gt_harness.provider_routing import (
+    ProviderRoutingError,
+    validate_provider_routing,
+    validate_reasoning_effort,
+)
 from scripts.gh_annotations import gh_command
 
 _SCHEMA = "gt.provider_route.v1"
@@ -58,7 +63,7 @@ _REQUIRED_KEYS = {
 #   (fingerprint fp_a18b46594c_prod0820_fp8_kvcache_20260402) while a GT-on
 #   run reached a relace/fp4 endpoint under the identical model name and
 #   scored 0/20 against 17/20, so the name alone is not the identity.
-_OPTIONAL_KEYS = {"pricing", "expected_quantization"}
+_OPTIONAL_KEYS = {"pricing", "expected_quantization", "reasoning_effort"}
 _PRICING_KEYS = {"prompt_usd_per_token", "completion_usd_per_token"}
 _PACING_KEYS = {
     "dispatch_stagger_seconds",
@@ -87,53 +92,6 @@ _DEFAULT_TOKENS_OUT_PER_TASK = 145_000
 # holds against the balance ("would exceed your available credits given your
 # current in-flight requests", run 35383113823).
 _DEFAULT_SAFETY_FACTOR = 1.25
-
-# Authorized (model -> provider_routing) pairs. The route file selects ONE of
-# these identities; a silent swap to an arbitrary model or provider fails
-# here, which is the control property the hardcoded pin existed for.
-#
-# - deepseek-v4-flash-0731/streamlake/fp8: the HAR-83 benchmark route (the
-#   only model whose results may be cited against the frozen GT-off
-#   baselines). StreamLake since 2026-09-19, chosen on the live identity probe
-#   (0731 fp8, thinking on every replay, deterministic at temperature 0, real
-#   prompt caching; prompt tokens +4 vs DeepSeek-native from its chat-template
-#   wrapper, accepted as a documented deviation). ``quantizations`` makes
-#   OpenRouter refuse a non-fp8 endpoint rather than the gate observing one.
-# - stealth/union-alpha/stealth: functional-verification route only. A $0
-#   preview model served by OpenRouter's anonymous Stealth provider -
-#   "does the machinery work" runs, never comparison evidence: the provider
-#   is unnamed, the preview can be delisted, and its numbers cannot join a
-#   matched cohort.
-_AUTHORIZED_ROUTES = {
-    "deepseek/deepseek-v4-flash-0731": {
-        "only": ["streamlake"],
-        # Enforced on every request: a relace/fp4 endpoint under the same
-        # model name scored 0/20 against the fp8 baseline's 17/20.
-        "quantizations": ["fp8"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
-    "stealth/union-alpha": {
-        "only": ["stealth"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
-    # union-alpha's stealth preview ended on 2026-09-17 and OpenRouter now
-    # serves the same deployment under its revealed name. The provider tag is
-    # "unbiased", not "stealth": routing it to the retired tag 404s.
-    "unbiased/pareto": {
-        "only": ["unbiased"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
-    # Contributor tier, served by Meta's own endpoint (provider tag "meta").
-    "meta/muse-spark-1.2-contributor": {
-        "only": ["meta"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
-}
-
 
 class ProviderPreflightError(RuntimeError):
     """A closed provider failure carrying only non-sensitive progress metadata."""
@@ -241,11 +199,24 @@ def load_route(path: Path) -> tuple[dict[str, Any], str]:
         raise ValueError("provider_route_identity_invalid")
     if route["base_url"] != "https://openrouter.ai/api/v1":
         raise ValueError("provider_base_url_not_allowed")
-    authorized_routing = _AUTHORIZED_ROUTES.get(route["model"])
-    if authorized_routing is None:
-        raise ValueError("provider_model_not_allowed")
-    if route["provider_routing"] != authorized_routing:
+    # The model is a launch input; what is closed is the routing SHAPE. The
+    # route file (and its sha256, attested in the run plan) records exactly
+    # which endpoint policy a run used, which is what makes two runs
+    # comparable - not membership in a table of models.
+    model = route["model"]
+    if not isinstance(model, str) or not model.strip() or model != model.strip():
+        raise ValueError("provider_model_invalid")
+    try:
+        validated = validate_provider_routing(route["provider_routing"])
+    except ProviderRoutingError as exc:
+        raise ValueError("provider_routing_not_allowed") from exc
+    if validated != route["provider_routing"]:
         raise ValueError("provider_routing_not_allowed")
+    if "reasoning_effort" in route:
+        try:
+            validate_reasoning_effort(route["reasoning_effort"])
+        except ProviderRoutingError as exc:
+            raise ValueError("provider_reasoning_effort_invalid") from exc
     if route["credential_env"] != "OPENROUTER_API_KEY":
         raise ValueError("provider_credential_env_not_allowed")
     requested_output = route["requested_output_tokens"]
