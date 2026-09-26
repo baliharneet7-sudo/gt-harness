@@ -381,6 +381,7 @@ jobs:
 
   run:
     needs: [resolve, plan]
+    if: always() && needs.plan.result == 'success' && needs.resolve.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:

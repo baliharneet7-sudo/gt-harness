@@ -627,10 +627,12 @@ jobs:
         with:
           python-version: "3.12"
       - uses: actions/setup-go@v5
+        if: inputs.arm != 'gt_off'
         with:
           go-version-file: vendor/gt-index-src/go.mod
           cache-dependency-path: vendor/gt-index-src/go.sum
       - name: Build current GT index with FTS5
+        if: inputs.arm != 'gt_off'
         working-directory: vendor/gt-index-src
         env:
           CGO_ENABLED: "1"
@@ -644,10 +646,15 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -e '.[retrieval]' "mini-swe-agent==2.4.6" "harbor==0.20.0" "datacurve-pier==0.3.1" pytest pytest-asyncio \
-            vendor/groundtruth_mcp-*.whl
+          if [ "${{ inputs.arm }}" = "gt_off" ]; then
+            python -m pip install -e '.' "mini-swe-agent==2.4.6" "harbor==0.20.0" "datacurve-pier==0.3.1"
+          else
+            python -m pip install -e '.[retrieval]' "mini-swe-agent==2.4.6" "harbor==0.20.0" "datacurve-pier==0.3.1" pytest pytest-asyncio \
+              vendor/groundtruth_mcp-*.whl
+          fi
           test "$(python -c 'import importlib.metadata as m; print(m.version("datacurve-pier"))')" = "0.3.1"
       - name: Provision and verify pinned Snowflake ONNX backend
+        if: inputs.arm != 'gt_off'
         run: |
           set -euo pipefail
           model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
@@ -681,12 +688,9 @@ jobs:
           PY
           echo "MODEL_DIR=$model_dir" >> "$GITHUB_ENV"
       - name: Prove current provider-free runtime before task execution
+        if: inputs.arm != 'gt_off'
         run: |
           set -euo pipefail
-          # GITHUB_ENV is available to later steps, but make the exact
-          # source-built binary explicit for every subprocess in this proof
-          # step.  The strict pytest child must not fall back to the stale
-          # wheel/cache binary.
           export GT_INDEX_BINARY="$RUNNER_TEMP/gt-index"
           test -x "$GT_INDEX_BINARY"
           python scripts/verify_gt_index_runtime.py
@@ -762,6 +766,7 @@ jobs:
           name: deepswe-bootstrap-canary-${{ github.run_id }}
           path: .
       - name: Run current central Mini-SWE on DeepSWE task
+        if: inputs.arm != 'gt_off'
         run: |
           set -uo pipefail
           mkdir -p results/deepswe
@@ -903,6 +908,39 @@ jobs:
               status=${PIPESTATUS[0]}
               set -e
             fi
+          fi
+          exit "$status"
+      - name: Run bare mini-swe-agent on DeepSWE task (gt_off baseline)
+        if: inputs.arm == 'gt_off'
+        run: |
+          set -uo pipefail
+          mkdir -p results/deepswe
+          set +e
+          timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" pier run \
+            -p deepswe-bench/tasks --include-task-name "$TASK" \
+            --agent-import-path eval.miniswe_agent:MiniSweAgent \
+            -m "$MODEL" -o results/deepswe \
+            --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
+            --agent-timeout-multiplier 1.0 -n 1 -y \
+            --max-steps "$STEP_LIMIT" 2>&1 | tee deepswe-task.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ] \
+            && ! find results/deepswe -name "*.json" -print -quit | grep -q .; then
+            echo "infra-only retry: no results produced"
+            sleep 120
+            mkdir -p results/deepswe-infra-attempt-1
+            find results/deepswe -mindepth 1 -maxdepth 1 -exec mv -t results/deepswe-infra-attempt-1 -- {} + 2>/dev/null || true
+            set +e
+            timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" pier run \
+              -p deepswe-bench/tasks --include-task-name "$TASK" \
+              --agent-import-path eval.miniswe_agent:MiniSweAgent \
+              -m "$MODEL" -o results/deepswe \
+              --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
+              --agent-timeout-multiplier 1.0 -n 1 -y \
+              --max-steps "$STEP_LIMIT" 2>&1 | tee -a deepswe-task.log
+            status=${PIPESTATUS[0]}
+            set -e
           fi
           exit "$status"
       - name: Upload task evidence
