@@ -209,13 +209,19 @@ class GrepAugmenter:
             if not symbols:
                 return ""
             from gt_engine.capabilities import structure
+            from gt_engine.miniswe_typed_actions import snapshot_scope
 
+            adapter = getattr(self.session, "_engine", None)
+            scope = ("augment", id(adapter), getattr(adapter, "global_action", 0),
+                     getattr(adapter, "_edit_epoch", 0))
             started = time.perf_counter()
             self.metrics.calls += 1
             blocks: list[str] = []
             try:
-                for symbol in symbols:
-                    result = structure.symbol_context(self.session, symbol)
+                with snapshot_scope(scope):
+                    symbol_results = [(symbol, structure.symbol_context(self.session, symbol))
+                                      for symbol in symbols]
+                for symbol, result in symbol_results:
                     if result.status in ("unavailable", "error", "abstain"):
                         continue
                     block = render_symbol_block(symbol, result.answer)

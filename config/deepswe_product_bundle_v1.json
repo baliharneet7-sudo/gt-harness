@@ -1295,6 +1295,7 @@
   "gt_engine/utility.py",
   "gt_engine/verification_contract.py",
   "gt_engine/verify.py",
+  "gt_engine/wheel_perf.py",
   "gt_engine/why_this_edge.py",
   "gt_harness/__init__.py",
   "gt_harness/canonical_io.py",

@@ -103,9 +103,13 @@ class AttachedDelivery:
     """Owns the tool server, the grep augmenter and uptake accounting."""
 
     def __init__(self, session: "GTSession"):
+        from gt_engine import wheel_perf
         from gt_engine.grep_augment import GrepAugmenter
         from gt_engine.tool_server import ToolDispatcher
 
+        # Attached answers are paid on the agent's clock; the push arm keeps
+        # the unmodified wheel path so the A/B control stays byte-identical.
+        wheel_perf.install()
         self.session = session
         self.dispatcher = ToolDispatcher(session)
         self.augmenter = GrepAugmenter(session)

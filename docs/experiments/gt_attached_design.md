@@ -62,8 +62,24 @@ Source of truth: `gt_engine/attached_delivery.FEATURE_SURFACES`. Pinned by `test
 
 ## 5. Known gaps (surfaced, not hidden)
 
-- **F6:** the certified producer (1e83ea68) writes 65 callsites but **0** `resolution_candidates` rows on the polyglot fixture. The host facade `analysis.callable_values` inner-joins on candidates, so it can never answer on a real graph. `gt-calls` reads the callsite table directly; callable-value *flow* needs producer work.
+- **F6 (harness bug, worked around for the agent):** the certified producer (1e83ea68) records call candidates as `HAS_CALLSITE` -> `CANDIDATE_TARGET`/`SELECTED_TARGET` edges (40 on the polyglot fixture), but the `resolution_candidates` table is empty, and the host facade `analysis.callable_values` inner-joins that table - it can never answer on a real graph. `gt-calls` reads the edges: each call in a function with its selected target or viable candidate set, cross-language candidates flagged (TS `greet` -> Java `OrderService.greet`; producer 9cf513af scopes those by language family). The facade itself should move onto the edges.
 - **F20:** `gt-tests pyapp/helpers.py` finds no covering test, although `gt-impact apply_tax` shows `test_total` calling it. The covering-test selector's reachability is narrower than the caller graph — worth fixing before relying on it.
 - **Python analysis depth:** there is no persisted Python CFG, so the analysis facades abstain on Python, but `gt-slice` works through the runtime `ast` CFG. Module-level and class-body calls produce no edges.
 - **`gt_bytes_would_push`:** not measurable in SHADOW, because the push producers do not run there. Adding them back would add per-action cost; the A/B compares arms directly instead.
 - **Untested at scale:** nothing here has run on a real DeepSWE repository yet. The next step is W3.2: a provider-free smoke on 6 repos.
+
+## 6. Efficiency on real repositories (measured)
+
+First real-repo smoke (adaptix@a691069, 489 files, 283 MB graph, local gt-index build):
+
+| call | before | cause | after |
+|---|---|---|---|
+| `gt-context` / `gt-flows` / `gt-calls` / every grep augmentation | **50–72 s** | wheel `processes._stable_id_to_nodes` joins `resolution_symbols` with `ON CAST(rs.native_id AS INTEGER) = n.id`; the cast defeats every index, so SQLite nested-scans ~99k nodes × resolution symbols on every `symbol_context` call (40 s self-time) | `gt_engine/wheel_perf.py`: same mapping via two linear scans + dict join — **0.94 s vs 40.12 s, output dict-identical (98,769 entries)**; pinned equal on the real producer graph by `tests/canonical/test_wheel_perf.py` |
+| every typed query | +~450 ms | `build_action_request` content-hashes the whole working tree per call | snapshot computed once per agent action (`miniswe_typed_actions.snapshot_scope`), the same granularity at which the engine observes edits |
+
+The shim is installed **only** in the attached arm, so the push arm — the A/B control — runs the unmodified wheel. The defect is in the certified wheel and should be fixed there. The same cast-join pattern also appears in `groundtruth/mcp/endpoints/_graph_db.py:145` and `groundtruth/resolve.py:498,597`.
+
+Consequence for past runs: wherever GT's push lanes called `symbol_context`/process detection on a real repository, this cost fell on the agent's wall clock. That is a candidate contributor to the TB2/DeepSWE timeouts and is worth checking in past journals.
+| repeat `symbol_context` / flows on the same graph | ~2 s each | process detection recomputed per call over an immutable published graph | memoized per graph file identity (path, size, mtime); an amend publishes a new file, so the cache can never serve a stale graph; cached == uncached pinned on the real graph |
+
+**Typed byte-bound defect (surfaced by adaptix):** for a heavily called symbol (`loader`, 98 callers), `callers` at depth ≥ 2 exceeds `QUERY_RESULT_MAX_BYTES`, and the bound *drops the whole answer* (`answer: null`, `query_result_unbounded_payload`) instead of truncating its rows. So the symbols where callers matter most read as "no callers". `gt-callers` and `gt-impact` now fall back to depth 1 and say so (`depth_reduced_to_1`). The bound itself (`gt_engine/typed_output_bounds.py`) should truncate rows, not null the answer; that affects the typed tool on the push arm too.

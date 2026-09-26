@@ -18,7 +18,9 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -379,9 +381,33 @@ def _snapshot_authority(
     return digest.hexdigest(), tuple(sorted(files)), complete
 
 
+# Within one scope (one agent action) the workspace cannot change as far as
+# the engine can observe - edits are recorded at action boundaries - so the
+# content address is computed once per scope instead of once per query.
+_SNAPSHOT_SCOPE: ContextVar[Any] = ContextVar("gt_snapshot_scope", default=None)
+_SNAPSHOT_CACHE: dict[tuple[Any, str], str] = {}
+
+
+@contextmanager
+def snapshot_scope(key: Any) -> Iterator[None]:
+    token = _SNAPSHOT_SCOPE.set(key)
+    try:
+        yield
+    finally:
+        _SNAPSHOT_SCOPE.reset(token)
+        for cached in [entry for entry in _SNAPSHOT_CACHE if entry[0] != key]:
+            _SNAPSHOT_CACHE.pop(cached, None)
+
+
 def _file_snapshot(repo_root: Path) -> str:
     """Content-address all working files, including untracked files and symlinks."""
-    return _snapshot_authority(repo_root)[0]
+    key = _SNAPSHOT_SCOPE.get()
+    if key is None:
+        return _snapshot_authority(repo_root)[0]
+    entry = (key, str(repo_root))
+    if entry not in _SNAPSHOT_CACHE:
+        _SNAPSHOT_CACHE[entry] = _snapshot_authority(repo_root)[0]
+    return _SNAPSHOT_CACHE[entry]
 
 
 # RevisionVector requires every dimension. When no EngineState authority is

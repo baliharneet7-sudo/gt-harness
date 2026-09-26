@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from gt_engine.capabilities import analysis, change, localization, runtime, structure
 from gt_engine.capabilities._query import CapabilityResult, run_typed, wrap
+from gt_engine.miniswe_typed_actions import snapshot_scope
 from gt_engine.tool_render import DEFAULT_TOOL_OUTPUT_BYTES, render_result
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -79,16 +80,30 @@ def _run_context(session: "GTSession", args: list[str]) -> CapabilityResult:
     return structure.symbol_context(session, args[0], **_symbol_hints(args))
 
 
+def _callers_with_fallback(session: "GTSession", symbol: str, depth: int,
+                           **hints: Any) -> CapabilityResult:
+    """A heavily called symbol can overflow the typed byte bound, which drops
+    the whole answer; the callers that matter most would then read as none.
+    Fall back to the nearest band and say so."""
+    result = structure.callers(session, symbol, depth=depth, **hints)
+    if result.answer is None and depth > 1 and "callers_truncated" in result.omissions:
+        shallow = structure.callers(session, symbol, depth=1, **hints)
+        if shallow.answer is not None:
+            return dataclasses.replace(shallow, omissions=(
+                f"depth_reduced_to_1:depth_{depth}_exceeded_byte_bound", *shallow.omissions))
+    return result
+
+
 def _run_callers(session: "GTSession", args: list[str]) -> CapabilityResult:
     usage = TOOLS["gt-callers"].usage
     _need(args, 1, usage)
     depth = _int(args[1], usage) if len(args) > 1 else 2
-    return structure.callers(session, args[0], depth=max(1, min(depth, 6)))
+    return _callers_with_fallback(session, args[0], max(1, min(depth, 6)))
 
 
 def _run_impact(session: "GTSession", args: list[str]) -> CapabilityResult:
     _need(args, 1, TOOLS["gt-impact"].usage)
-    return structure.callers(session, args[0], depth=3, **_symbol_hints(args))
+    return _callers_with_fallback(session, args[0], 3, **_symbol_hints(args))
 
 
 def _run_refs(session: "GTSession", args: list[str]) -> CapabilityResult:
@@ -184,18 +199,24 @@ def _run_shape(session: "GTSession", args: list[str]) -> CapabilityResult:
 
 
 _CALLSITE_QUERY = (
-    "SELECT cs.source_line, cs.callee, cs.dispatch_state, cs.candidate_count,"
-    " cs.mechanism, t.name, t.file_path, t.start_line"
-    " FROM resolution_callsites cs"
-    " LEFT JOIN nodes t ON CAST(t.id AS TEXT) = cs.selected_target_native_id"
-    " WHERE cs.source_native_id = ? ORDER BY cs.source_line, cs.callsite_ordinal"
+    "SELECT c.id, c.line_start, c.callee_lexeme, c.candidate_state, c.dispatch_form,"
+    " ct.type, ct.trust_tier, t.name, t.qualified_name, t.file_path, t.start_line, t.language"
+    " FROM edges h JOIN nodes c ON c.id = h.target_id"
+    " LEFT JOIN edges ct ON ct.source_id = c.id"
+    " AND ct.type IN ('CANDIDATE_TARGET', 'SELECTED_TARGET')"
+    " LEFT JOIN nodes t ON t.id = ct.target_id"
+    " WHERE h.type = 'HAS_CALLSITE' AND h.source_id = ?"
+    " ORDER BY c.line_start, c.id, ct.type DESC, t.file_path, t.start_line"
 )
+_MAX_CANDIDATES_SHOWN = 4
 
 
 def _run_calls(session: "GTSession", args: list[str]) -> CapabilityResult:
     """How every call inside one function resolved (F5 direct resolution,
-    F6 callable values): the producer's retained callsite table, read with a
-    LEFT join so an unresolved or external call is shown, not dropped."""
+    F6 callable values, F7 dispatch): each callsite with its selected target
+    or its viable candidate set, read from the producer's HAS_CALLSITE /
+    CANDIDATE_TARGET / SELECTED_TARGET edges. Unresolved calls are shown,
+    never dropped; a candidate in another language is flagged."""
     _need(args, 1, TOOLS["gt-calls"].usage)
     from gt_engine.capabilities._query import graph_conn, resolve_symbol_node
 
@@ -206,18 +227,39 @@ def _run_calls(session: "GTSession", args: list[str]) -> CapabilityResult:
     if conn is None:
         return wrap(session, "calls", status="unavailable", omissions=("graph_unavailable",))
     try:
-        rows = conn.execute(_CALLSITE_QUERY, (str(node.get("id")),)).fetchall()
-    except Exception as exc:  # noqa: BLE001 - an older graph may lack the table
+        rows = conn.execute(_CALLSITE_QUERY, (node.get("id"),)).fetchall()
+    except Exception as exc:  # noqa: BLE001 - an older graph may lack the callsite layer
         return wrap(session, "calls", status="unavailable",
-                    omissions=(f"resolution_substrate_absent:{type(exc).__name__}",))
+                    omissions=(f"callsite_layer_absent:{type(exc).__name__}",))
     finally:
         conn.close()
+    language = node.get("language")
+    sites: dict[int, dict[str, Any]] = {}
+    for cid, line, callee, state, dispatch, edge, tier, name, qname, path, start, lang in rows:
+        site = sites.setdefault(cid, {"line": line, "callee": callee, "state": state,
+                                      "dispatch": dispatch, "selected": None, "candidates": []})
+        if not name:
+            continue
+        where = f"{qname or name} ({path}:{start})"
+        if language and lang and lang != language:
+            where += f" [other language: {lang}]"
+        if edge == "SELECTED_TARGET":
+            site["selected"] = f"{where} [{tier}]"
+        elif where not in site["candidates"]:
+            site["candidates"].append(where)
     calls = []
-    for line, callee, state, count, mechanism, name, path, start in rows:
-        target = f"{name} ({path}:{start})" if name else "-"
+    for site in sites.values():
+        if site["selected"]:
+            target = site["selected"]
+        elif site["candidates"]:
+            shown = site["candidates"][:_MAX_CANDIDATES_SHOWN]
+            more = len(site["candidates"]) - len(shown)
+            target = "one of: " + "; ".join(shown) + (f"; +{more} more" if more > 0 else "")
+        else:
+            target = "unresolved (external or unknown)"
         calls.append({
-            "file_path": node.get("file_path"), "line": line,
-            "name": f"{callee} -> {target} [{state}, {count} candidate(s), {mechanism}]",
+            "file_path": node.get("file_path"), "line": site["line"],
+            "name": f"{site['callee']} -> {target} [{site['state']}, {site['dispatch']}]",
         })
     return wrap(session, "calls", answer={"calls": calls}, semantics="partial",
                 omissions=() if calls else ("no_callsites_recorded",))
@@ -461,6 +503,11 @@ class ToolDispatcher:
         ):
             adapter.refresh_graph(phase="graph_query")
 
+    def _scope_key(self) -> tuple[Any, ...]:
+        adapter = getattr(self.session, "_engine", None)
+        return ("tool", id(adapter), getattr(adapter, "global_action", 0),
+                getattr(adapter, "_edit_epoch", 0))
+
     def _journal(self, **row: Any) -> None:
         store = getattr(getattr(self.session, "_engine", None), "store", None)
         if store is not None:
@@ -483,7 +530,8 @@ class ToolDispatcher:
             try:
                 if spec.reads_graph:
                     self._refresh_if_stale()
-                result = spec.run(self.session, list(args))
+                with snapshot_scope(self._scope_key()):
+                    result = spec.run(self.session, list(args))
                 if spec.shape is not None:
                     result = dataclasses.replace(
                         result, answer=spec.shape(result.answer, list(args)))
