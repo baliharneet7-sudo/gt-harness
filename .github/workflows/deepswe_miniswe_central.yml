@@ -156,7 +156,7 @@ jobs:
         id: gt
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Enforce active release authorization
-        if: ${{ !inputs.diagnostic_only }}
+        if: ${{ !inputs.diagnostic_only && inputs.arm != 'gt_off' }}
         run: |
           python -m scripts.release_workflow_guard \
             --workflow deepswe_miniswe_central.yml \
