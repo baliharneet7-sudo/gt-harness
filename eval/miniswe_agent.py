@@ -159,8 +159,8 @@ class MiniSweAgent(BaseInstalledAgent):
         # T1.1: the requested model MUST reach the runner (it was silently
         # dropped before, so a non-default model fell back to deepseek-v4-flash).
         # The runner's --model + --metrics are the single source of truth.
-        step_limit = os.environ.get("GT_STEP_LIMIT", "")
-        step_limit_arg = f"--step-limit {step_limit} " if step_limit else ""
+        # GT_STEP_LIMIT is forwarded into the container via --ae; expand it at
+        # shell time so the runner sees the configured limit (default 100).
         return (
             f'"{_REMOTE_PY}" {_REMOTE_RUNNER} '
             f"--task {shlex.quote(instruction)} --model {shlex.quote(model)} "
@@ -168,7 +168,7 @@ class MiniSweAgent(BaseInstalledAgent):
             f"--output /logs/agent/miniswe_trajectory.json "
             f"--temperature 1.0 "
             f"--metrics /logs/agent/miniswe_report.json "
-            f"{step_limit_arg}"
+            '${GT_STEP_LIMIT:+--step-limit $GT_STEP_LIMIT} '
             f"{extra_args}"
             "</dev/null 2>&1"
         )
