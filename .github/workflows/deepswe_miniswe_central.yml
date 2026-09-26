@@ -923,6 +923,9 @@ jobs:
             -m "$GT_LITELLM_MODEL" -o results/deepswe \
             --job-name "$JOB_NAME" \
             --agent-timeout-multiplier 1.0 \
+            --allow-agent-host openrouter.ai \
+            --ae "OPENAI_API_KEY=${OPENAI_API_KEY}" \
+            --ae "OPENAI_BASE_URL=${OPENAI_BASE_URL}" \
             -n 1 -y -i "$TASK" 2>&1 | tee deepswe-task.log
           status=${PIPESTATUS[0]}
           set -e
@@ -939,6 +942,9 @@ jobs:
               -m "$GT_LITELLM_MODEL" -o results/deepswe \
               --job-name "$JOB_NAME" \
               --agent-timeout-multiplier 1.0 \
+              --allow-agent-host openrouter.ai \
+              --ae "OPENAI_API_KEY=${OPENAI_API_KEY}" \
+              --ae "OPENAI_BASE_URL=${OPENAI_BASE_URL}" \
               -n 1 -y -i "$TASK" 2>&1 | tee -a deepswe-task.log
             status=${PIPESTATUS[0]}
             set -e
