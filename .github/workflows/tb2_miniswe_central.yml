@@ -1001,7 +1001,6 @@ jobs:
             -o results/terminal-bench \
             --job-name "$JOB_NAME" \
             --agent-timeout-multiplier 1.0 \
-            --max-steps 300 \
             -n 1 \
             -y \
             -i "$TASK"

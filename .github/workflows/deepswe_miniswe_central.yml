@@ -919,10 +919,9 @@ jobs:
           timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" pier run \
             -p deepswe-bench/tasks --include-task-name "$TASK" \
             --agent-import-path eval.miniswe_agent:MiniSweAgent \
-            -m "$MODEL" -o results/deepswe \
+            -m "$GT_LITELLM_MODEL" -o results/deepswe \
             --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
-            --agent-timeout-multiplier 1.0 -n 1 -y \
-            --max-steps "$STEP_LIMIT" 2>&1 | tee deepswe-task.log
+            --agent-timeout-multiplier 1.0 -n 1 -y 2>&1 | tee deepswe-task.log
           status=${PIPESTATUS[0]}
           set -e
           if [ "$status" -ne 0 ] \
@@ -935,10 +934,9 @@ jobs:
             timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" pier run \
               -p deepswe-bench/tasks --include-task-name "$TASK" \
               --agent-import-path eval.miniswe_agent:MiniSweAgent \
-              -m "$MODEL" -o results/deepswe \
+              -m "$GT_LITELLM_MODEL" -o results/deepswe \
               --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
-              --agent-timeout-multiplier 1.0 -n 1 -y \
-              --max-steps "$STEP_LIMIT" 2>&1 | tee -a deepswe-task.log
+              --agent-timeout-multiplier 1.0 -n 1 -y 2>&1 | tee -a deepswe-task.log
             status=${PIPESTATUS[0]}
             set -e
           fi
