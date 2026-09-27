@@ -112,6 +112,10 @@ def test_only_closed_supported_workflow_set_is_active() -> None:
     # the default branch). The host-owned central lane it used to carry is
     # retired.
     #
+    # `gt_mini_{tb2,deepswe,swelive}.yml` -- GT-on staged robustness runs: a
+    # fixed 20-task set per benchmark, first5 then rest15 (gated on a
+    # successful first5), 5 parallel, delegating to the certified pipelines.
+    #
     # `tb2_miniswe_engine.yml` -- admitted because campaign 1 hardened it
     # (adapter import guard, monitor timeout ownership, ruff target guard) and
     # the dependency tests in `tests/test_benchmark_workflow_dependencies.py`
@@ -129,6 +133,9 @@ def test_only_closed_supported_workflow_set_is_active() -> None:
         "deepswe_gt_harness_product.yml",
         "deepswe_gt_harness_product_p0731.yaml",
         "deepswe_miniswe_central.yml",
+        "gt_mini_deepswe.yml",
+        "gt_mini_swelive.yml",
+        "gt_mini_tb2.yml",
         "producer_build.yml",
         "swebench_live_lite_full.yml",
         "swelive_gt_harness_paid.yaml",

@@ -897,7 +897,11 @@ def _prove_container_install(bundle: Mapping[str, Any], *, bundle_dir: Path) -> 
         image_source = "local_digest_cache"
         pull_return_code = 0
     else:
-        for delay in (0, 15, 30, 60):
+        # Public ECR throttles anonymous pulls per source IP, and GitHub-hosted
+        # runners share IPs across accounts: three readiness runs dispatched
+        # together (runs 36299535723/36299537905/36299540109) exhausted a
+        # 0/15/30/60 s schedule. A throttle clears in minutes, not seconds.
+        for delay in (0, 30, 60, 120, 240):
             pull_attempts += 1
             if delay:
                 time.sleep(delay)

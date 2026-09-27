@@ -55,7 +55,14 @@ def test_gt_smoke_is_source_bound_and_uses_the_product_agent() -> None:
 def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
-    assert "max-parallel: 20" in text
+    def inputs_default(name: str) -> str:
+        return yaml.safe_load(text)[True]["workflow_dispatch"]["inputs"][name]["default"]
+
+    # Parallelism is a launch input (1..20, default 20) so a run can share
+    # an account's runner pool; the matrix reads it, the plan validates it.
+    assert inputs_default("max_parallel") == "20"
+    assert "max-parallel: ${{ fromJSON(inputs.max_parallel) }}" in text
+    assert 'int(os.environ["MAX_PARALLEL"]) > 20' in text
     assert "options: [gate-one, remaining-19, all-20, full-89, subset]" in text
     assert '"gate-one": tasks[:1]' in text
     assert '"remaining-19": tasks[1:]' in text
@@ -67,7 +74,7 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert "STEP_LIMIT: ${{ inputs.step_limit }}" in text
     assert '"step_limit": int(os.environ["STEP_LIMIT"])' in text
     assert "attempts_per_task" in text
-    assert '"parallel": min(20, len(selected))' in text
+    assert '"parallel": min(int(os.environ["MAX_PARALLEL"]), len(selected))' in text
     assert '"full_task_count": len(pool)' in text
     # Both cohort pins, side by side: repair20's identity is unchanged by the
     # addition of the baseline's own 89-task cohort, which must contain it.
@@ -1468,6 +1475,7 @@ def _planner_receipt(tmp_path: Path, monkeypatch, *, unresolved_reason: str) -> 
     monkeypatch.setenv("MODEL", "stealth/space-bunny-alpha")
     monkeypatch.setenv("GT_DELIVERY_MODE", "attached")
     monkeypatch.setenv("STEP_LIMIT", "100")
+    monkeypatch.setenv("MAX_PARALLEL", "20")
     monkeypatch.setenv("PROVIDER_ROUTE_SHA256", "r" * 64)
     monkeypatch.setenv("DATASET", "terminal-bench@2.0")
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output"))

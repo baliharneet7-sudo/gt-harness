@@ -55,6 +55,68 @@ on:
         required: false
         type: string
         default: "100"
+      max_parallel:
+        description: "Concurrent task jobs (1-20); share the account's runner pool"
+        required: false
+        type: string
+        default: "20"
+  workflow_call:
+    inputs:
+      cohort_stage:
+        description: "Run gate-one first; release remaining-19 only after an official grade. full-89 is\
+  \ the frozen GT-off baseline cohort - authorized full runs only"
+        required: false
+        type: string
+        default: "gate-one"
+      subset_tasks:
+        description: "subset only: comma-separated task ids, each drawn from the frozen repair20 set"
+        required: false
+        type: string
+        default: ""
+      model:
+        description: "OpenRouter model id chosen at launch (bare id, e.g. stealth/space-bunny-alpha)"
+        required: true
+        type: string
+      gt_delivery_mode:
+        description: "GT delivery: attached (gt-* tools + grep augmentation) or push (legacy injection)"
+        required: false
+        type: string
+        default: "attached"
+      provider_only:
+        description: "Comma list of OpenRouter provider tags; empty = OpenRouter chooses"
+        required: false
+        type: string
+        default: ""
+      quantization:
+        description: "Comma list of required quantizations (e.g. fp8); empty = none"
+        required: false
+        type: string
+        default: ""
+      allow_fallbacks:
+        description: "Allow OpenRouter provider fallbacks when provider_only is set"
+        required: false
+        type: boolean
+        default: false
+      reasoning_effort:
+        description: "minimal|low|medium|high|xhigh|max; empty = not sent"
+        required: false
+        type: string
+        default: ""
+      temperature:
+        description: "Sampling temperature"
+        required: false
+        type: string
+        default: "1.0"
+      step_limit:
+        description: "Agent step limit (the frozen TB2 baseline ran 100)"
+        required: false
+        type: string
+        default: "100"
+      max_parallel:
+        description: "Concurrent task jobs (1-20); share the account's runner pool"
+        required: false
+        type: string
+        default: "20"
 
 permissions:
   contents: read
@@ -66,6 +128,7 @@ env:
   MODEL: ${{ inputs.model }}
   GT_DELIVERY_MODE: ${{ inputs.gt_delivery_mode }}
   STEP_LIMIT: ${{ inputs.step_limit }}
+  MAX_PARALLEL: ${{ inputs.max_parallel }}
   DATASET: terminal-bench@2.0
   IMAGE_TAG: "20251031"
   TIMEOUT_MULTIPLIER: "5.0"
@@ -133,6 +196,8 @@ jobs:
               raise SystemExit("gt_delivery_mode must be attached or push")
           if not re.fullmatch(r"[1-9][0-9]*", os.environ["STEP_LIMIT"]):
               raise SystemExit("step_limit must be a positive integer")
+          if not re.fullmatch(r"[1-9][0-9]*", os.environ["MAX_PARALLEL"]) or int(os.environ["MAX_PARALLEL"]) > 20:
+              raise SystemExit("max_parallel must be an integer in 1..20")
           temperature = float(os.environ["TEMPERATURE"])
           if temperature < 0:
               raise SystemExit("temperature must be >= 0")
@@ -708,7 +773,7 @@ jobs:
               "full_task_ids": pool,
               "task_set_sha256": pool_digest,
               "repair20_task_set_sha256": digest,
-              "parallel": min(20, len(selected)),
+              "parallel": min(int(os.environ["MAX_PARALLEL"]), len(selected)),
               "attempts_per_task": 1,
               "agent": "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent",
               "agent_scaffold": "mini-swe-agent",
@@ -1005,7 +1070,7 @@ jobs:
     timeout-minutes: 355
     strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       TASK: ${{ matrix.task }}
