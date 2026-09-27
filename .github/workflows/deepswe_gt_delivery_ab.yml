@@ -675,7 +675,15 @@ jobs:
           SOURCE_DIGEST: ${{ matrix.container_digest }}
         run: |
           set -euo pipefail
-          docker pull "${SOURCE_IMAGE}@${SOURCE_DIGEST}"
+          # Public ECR throttles anonymous pulls per runner IP (a shared pool).
+          # A throttle clears in minutes; retry before calling the task lost.
+          pulled=0
+          for delay in 0 30 60 120 240; do
+            sleep "$delay"
+            if docker pull "${SOURCE_IMAGE}@${SOURCE_DIGEST}"; then pulled=1; break; fi
+            echo "::warning title=Task image pull::retrying after ${delay}s backoff"
+          done
+          test "$pulled" = 1
           docker image inspect "${SOURCE_IMAGE}@${SOURCE_DIGEST}" >/dev/null
           docker tag "${SOURCE_IMAGE}@${SOURCE_DIGEST}" "$SOURCE_IMAGE"
           docker image inspect "$SOURCE_IMAGE" >/dev/null
