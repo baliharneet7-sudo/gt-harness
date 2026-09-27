@@ -13,7 +13,8 @@ from typing import Any
 from gt_engine.capabilities._query import CapabilityResult
 
 DEFAULT_TOOL_OUTPUT_BYTES = 6_000
-AUGMENT_OUTPUT_BYTES = 2_000
+# Room for two symbols' neighbours plus their graph facts (graph_facts).
+AUGMENT_OUTPUT_BYTES = 3_000
 _MAX_ROWS_PER_LIST = 20
 _MAX_STEPS_SHOWN = 8
 

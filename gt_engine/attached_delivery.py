@@ -6,7 +6,8 @@ every GT computation but changes how it reaches the agent:
 
 * ``gt-*`` shell tools the agent chooses to call (``tool_server``);
 * a ``[GT]`` block appended to the agent's own grep/rg/ag observation
-  (``grep_augment``);
+  (``grep_augment``), and to its edits and failing test runs
+  (``action_augment``);
 * nothing pushed, nothing blocked: the push pipeline runs in SHADOW, and the
   plan call, submit gate and churn abort are bypassed.
 
@@ -104,6 +105,7 @@ class AttachedDelivery:
 
     def __init__(self, session: "GTSession"):
         from gt_engine import wheel_perf
+        from gt_engine.action_augment import ActionAugmenter
         from gt_engine.grep_augment import GrepAugmenter
         from gt_engine.tool_server import ToolDispatcher
 
@@ -113,6 +115,7 @@ class AttachedDelivery:
         self.session = session
         self.dispatcher = ToolDispatcher(session)
         self.augmenter = GrepAugmenter(session)
+        self.action_augmenter = ActionAugmenter(session)
         self.uptake = UptakeTracker()
         self.server = None
         self.bin_dir: Path | None = None
@@ -136,17 +139,22 @@ class AttachedDelivery:
             self.server.stop()
             self.server = None
 
+    plan_bytes_delivered: int = 0
+
     #: Turns between delivery checkpoints into the metrics file (see
     #: scripts/miniswe_gt_run.py _checkpoint_report).
     CHECKPOINT_EVERY_TURNS = 5
     on_turn: Any = None
     _turns: int = 0
 
-    def observe_turn(self, commands: Iterable[str | None], outputs: list[dict]) -> list[dict]:
-        """Account uptake and append ``[GT]`` blocks to search observations.
+    def observe_turn(self, commands: Iterable[str | None], outputs: list[dict],
+                     facts: list[dict | None] | None = None) -> list[dict]:
+        """Account uptake and append ``[GT]`` blocks to action observations.
 
         ``commands[i]`` is the shell command of action ``i`` (None for a
-        non-shell action); ``outputs`` is index-aligned. Returns new outputs.
+        non-shell action); ``outputs`` and ``facts`` are index-aligned.
+        ``facts[i]`` carries the action's recorded edit (``changes``,
+        ``syntax``) and ``returncode``/``output``. Returns new outputs.
         """
         augmented = list(outputs)
         for index, command in enumerate(commands):
@@ -157,7 +165,7 @@ class AttachedDelivery:
             for text in tool_texts[self._tool_texts_seen:]:
                 self.uptake.register(text, command)
             self._tool_texts_seen = len(tool_texts)
-            block = self.augmenter.augment(command)
+            block = self._block(command, (facts or [])[index] if index < len(facts or []) else None)
             if not block:
                 continue
             self.uptake.register(block, command)
@@ -165,6 +173,10 @@ class AttachedDelivery:
             original = str(result.get("output") or "")
             result["output"] = f"{original}\n\n{block}" if original else block
             augmented[index] = result
+        try:
+            augmented = self._deliver_plan_once(commands, augmented)
+        except Exception:  # noqa: BLE001 - the plan never costs the observation
+            pass
         self._turns += 1
         if self.on_turn is not None and self._turns % self.CHECKPOINT_EVERY_TURNS == 0:
             try:
@@ -173,43 +185,88 @@ class AttachedDelivery:
                 pass
         return augmented
 
+    def _deliver_plan_once(self, commands: Iterable[str | None], outputs: list[dict]) -> list[dict]:
+        """Append the task plan to this turn's first shell observation, once,
+        as soon as a current graph exists (see ``attached_plan``)."""
+        from gt_engine.tool_server import EXIT_ANSWER, plan_holder
+
+        if getattr(self, "session", None) is None:
+            return outputs
+        holder = plan_holder(self.session)
+        if holder.delivered or holder.failed:
+            return outputs
+        index = next((i for i, command in enumerate(commands) if command is not None), None)
+        if index is None or index >= len(outputs) or holder.get() is None:
+            return outputs
+        text, code = self.dispatcher.render("gt-plan", [])
+        holder.delivered = True
+        if code != EXIT_ANSWER:
+            return outputs
+        self.plan_bytes_delivered = len(text.encode("utf-8"))
+        self.uptake.register(text, "")
+        result = dict(outputs[index])
+        original = str(result.get("output") or "")
+        result["output"] = f"{original}\n\n{text}" if original else text
+        return [*outputs[:index], result, *outputs[index + 1:]]
+
+    def _block(self, command: str, facts: dict | None) -> str:
+        """Search, edit and failure blocks for one action, in that order."""
+        blocks = [self.augmenter.augment(command)]
+        if facts:
+            if facts.get("changes"):
+                blocks.append(self.action_augmenter.after_edit(facts["changes"], facts.get("syntax") or ()))
+            blocks.append(self.action_augmenter.after_failure(
+                command, str(facts.get("output") or ""), facts.get("returncode")))
+        return "\n\n".join(block for block in blocks if block)
+
     def metrics(self) -> dict[str, Any]:
         tools = self.dispatcher.metrics.as_dict()
         augment = self.augmenter.metrics.as_dict(self.augmenter.search_commands)
+        actions = self.action_augmenter.metrics.as_dict()
         return {
             "gt_delivery_mode": ATTACHED,
             **tools,
             **augment,
+            **actions,
+            "gt_plan_delivered": plan_holder_delivered(self.session),
+            "gt_plan_bytes_delivered": self.plan_bytes_delivered,
             "gt_search_commands": self.augmenter.search_commands,
-            "gt_bytes_delivered": tools["gt_tool_bytes_delivered"] + augment["augment_bytes_delivered"],
+            "gt_bytes_delivered": (tools["gt_tool_bytes_delivered"] + augment["augment_bytes_delivered"]
+                                   + actions["action_augment_bytes_delivered"] + self.plan_bytes_delivered),
             **self.uptake.as_dict(),
         }
+
+
+def plan_holder_delivered(session: "GTSession") -> bool:
+    holder = getattr(getattr(session, "_engine", None), "attached_plan", None)
+    return bool(getattr(holder, "delivered", False))
 
 
 # How each of the 21 audited GT features reaches the agent in attached mode.
 # "substrate" features have no surface of their own: every graph answer is
 # built from them. A test pins that every named surface exists and answers.
 FEATURE_SURFACES: dict[str, tuple[str, ...]] = {
-    "F1 parsing": ("substrate",),
+    "F1 parsing": ("substrate", "edit-augment"),
     "F2 definitions": ("gt-def", "gt-context", "augment"),
-    "F3 references": ("gt-refs",),
-    "F4 callers/callees": ("gt-callers", "gt-context", "gt-impact", "augment"),
-    "F5 direct call resolution": ("gt-calls",),
-    "F6 callable values": ("gt-calls",),
-    "F7 receiver/inheritance/overload": ("gt-shape",),
-    "F8 framework/DI/middleware": ("gt-routes",),
+    "F3 references": ("gt-refs", "augment"),
+    "F4 callers/callees": ("gt-callers", "gt-context", "gt-impact", "augment", "edit-augment"),
+    "F5 direct call resolution": ("gt-calls", "augment"),
+    "F6 callable values": ("gt-calls", "augment"),
+    "F7 receiver/inheritance/overload": ("gt-shape", "gt-calls", "augment"),
+    "F8 framework/DI/middleware": ("gt-routes", "augment"),
     "F9 processes": ("gt-flows", "augment"),
-    "F10 communities": ("gt-module",),
+    "F10 communities": ("gt-module", "augment"),
     "F11 hybrid retrieval": ("gt-query",),
     "F12 symbol context": ("gt-context", "augment"),
-    "F13 patch impact / co-change": ("gt-changes", "gt-impact", "gt-cochange"),
-    "F14 CFG": ("gt-slice",),
-    "F15 reaching definitions": ("gt-slice",),
-    "F16 control dependence": ("gt-slice",),
-    "F17 PDG / slice": ("gt-slice",),
-    "F18 routes / API impact": ("gt-routes", "gt-api"),
-    "F19 taint": ("gt-taint",),
-    "F20 test feedback / recovery": ("gt-verify", "gt-tests", "gt-check", "gt-failures"),
+    "F13 patch impact / co-change": ("gt-changes", "gt-impact", "gt-cochange", "augment", "edit-augment"),
+    "F14 CFG": ("gt-slice", "failure-augment"),
+    "F15 reaching definitions": ("gt-slice", "failure-augment"),
+    "F16 control dependence": ("gt-slice", "failure-augment"),
+    "F17 PDG / slice": ("gt-slice", "failure-augment"),
+    "F18 routes / API impact": ("gt-routes", "gt-api", "augment", "edit-augment"),
+    "F19 taint": ("gt-taint", "edit-augment"),
+    "F20 test feedback / recovery": ("gt-verify", "gt-tests", "gt-check", "gt-failures",
+                                     "edit-augment", "failure-augment"),
     "F21 freshness / amend": ("substrate",),
 }
 
@@ -239,9 +296,12 @@ def attached_system_section() -> str:
         f"{tool_reference()}\n\n"
         "`gt-help` lists more (routes and API clients, slices, taint, interface checks, "
         "renames, co-change, recurring failures).\n\n"
-        "Your grep/rg/ag results may end with a `[GT]` block listing the definition, "
-        "callers, callees and flows of the symbols you searched for. Graph facts are "
-        "name-level: confirm by reading the code before editing."
+        "Your grep/rg/ag results may end with a `[GT]` block about the symbols you searched "
+        "for (definition, callers, callees, flows, references, overrides, routes, module). "
+        "After an edit, a `[GT]` block lists the functions you changed, their callers and "
+        "the tests that reach them; after a failing test run, where it failed and the lines "
+        "that value depends on. A `[GT] task plan` ties the issue's lines to the code they "
+        "name (run gt-plan to see it again). Graph facts are name-level: confirm by reading the code."
     )
 
 

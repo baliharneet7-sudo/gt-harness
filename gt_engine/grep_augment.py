@@ -12,7 +12,7 @@ import re
 import shlex
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from gt_engine.tool_render import AUGMENT_OUTPUT_BYTES, cap_text
@@ -137,7 +137,8 @@ def _neighbors(label: str, rows: Any, total: Any) -> str | None:
     return f"    {label}: {shown}" + (f" (+{more} more)" if more > 0 else "")
 
 
-def render_symbol_block(symbol: str, answer: Any) -> str | None:
+def render_symbol_block(symbol: str, answer: Any, facts: tuple[str, ...] = ()) -> str | None:
+    """``facts`` are extra lines (``graph_facts``) appended under the symbol."""
     if not isinstance(answer, dict):
         return None
     definition = answer.get("definition")
@@ -162,7 +163,30 @@ def render_symbol_block(symbol: str, answer: Any) -> str | None:
             text = flow.get("display_label") or flow.get("label") if isinstance(flow, dict) else flow
             if text:
                 lines.append(f"    in flow: {text}")
+    lines.extend(f"    {fact}" for fact in facts)
     return "\n".join(lines) if len(lines) > 1 else None
+
+
+def _facts(session: "GTSession", answer: Any) -> tuple[tuple[str, str], ...]:
+    """(features, line) for references, resolution, dispatch, routes, module
+    and co-change of the resolved definition (see ``graph_facts``)."""
+    from gt_engine.graph_facts import symbol_facts
+
+    definition = answer.get("definition") if isinstance(answer, dict) else None
+    return tuple(symbol_facts(session, definition)) if isinstance(definition, dict) else ()
+
+
+def block_features(answer: Any, facts: tuple[tuple[str, str], ...]) -> set[str]:
+    """The features one rendered symbol block carries."""
+    features = {"F2", "F12"}
+    if isinstance(answer, dict):
+        if answer.get("callers") or answer.get("callees"):
+            features.add("F4")
+        if answer.get("flows"):
+            features.add("F9")
+    for ids, _line in facts:
+        features.update(ids.split())
+    return features
 
 
 @dataclass
@@ -172,6 +196,7 @@ class AugmentMetrics:
     errors: int = 0
     time_ms: int = 0
     bytes_delivered: int = 0
+    features: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self, search_commands: int) -> dict[str, Any]:
         return {
@@ -181,6 +206,7 @@ class AugmentMetrics:
             "augment_time_s": round(self.time_ms / 1000.0, 3),
             "augment_bytes_delivered": self.bytes_delivered,
             "augment_hit_rate": round(self.hits / search_commands, 4) if search_commands else 0.0,
+            "augment_features": dict(sorted(self.features.items())),
         }
 
 
@@ -230,13 +256,16 @@ class GrepAugmenter:
                     symbol_results = [(symbol, structure.symbol_context(self.session, symbol))
                                       for symbol in symbols]
                 hit_symbols: list[str] = []
+                hit_features: set[str] = set()
                 for symbol, result in symbol_results:
                     if result.status in ("unavailable", "error", "abstain"):
                         continue
-                    block = render_symbol_block(symbol, result.answer)
+                    facts = _facts(self.session, result.answer)
+                    block = render_symbol_block(symbol, result.answer, tuple(line for _ids, line in facts))
                     if block:
                         blocks.append(block)
                         hit_symbols.append(symbol)
+                        hit_features |= block_features(result.answer, facts)
             except Exception as exc:  # noqa: BLE001 - enrichment is silent on failure
                 self.metrics.errors += 1
                 self._journal(pattern=pattern[:200], outcome=f"error:{type(exc).__name__}")
@@ -257,6 +286,8 @@ class GrepAugmenter:
                 self.max_bytes,
             )
             self.metrics.hits += 1
+            for feature in hit_features:
+                self.metrics.features[feature] = self.metrics.features.get(feature, 0) + 1
             self.metrics.bytes_delivered += len(text.encode("utf-8"))
             self.delivered_texts.append(text)
             self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="hit",

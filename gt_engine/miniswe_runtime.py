@@ -1919,6 +1919,8 @@ def install_runtime_hooks(
         repository_wide_queries = 0
         typed_turn_bytes = 0
         rendered_by_index: dict[int, str] = {}
+        # Per-action edit/test facts for attached delivery (action_augment).
+        attached_facts: dict[int, dict] = {}
         typed_by_index: dict[int, dict[str, Any]] = {}
         directives: list[dict] = []
         def submit_allowed(*, pre_execution: bool = False) -> bool:
@@ -2296,6 +2298,12 @@ def install_runtime_hooks(
                         adapter.begin_implement()
                     adapter.note_edit(changed_files)
                 _refresh_native_graph(adapter, session)
+                attached_facts[action_index] = {
+                    "changes": dict(edit_before_after) if edit_before_after else {},
+                    "syntax": tuple((transaction_artifacts or {}).get("syntax") or ()),
+                    "returncode": semantic_returncode,
+                    "output": output,
+                }
                 if returncode not in (None, 0):
                     adapter.record_episode_failure(
                         command=command,
@@ -2464,6 +2472,7 @@ def install_runtime_hooks(
                 outputs = attached.observe_turn(
                     [None if is_typed_action(action) else _command(action) for action in actions],
                     outputs,
+                    [attached_facts.get(index) for index in range(1, len(actions) + 1)],
                 )
             except Exception as exc:  # noqa: BLE001 - enrichment never costs the observation
                 adapter.store.append("gt_augment_fault", error=type(exc).__name__)

@@ -37,13 +37,15 @@ FIXTURE_CALLS: dict[str, list[str]] = {
     "gt-changes": ["pyapp/server.py"],
     "gt-verify": [],
     "gt-failures": [],
+    "gt-plan": [],
     "gt-help": [],
 }
 
 # Surfaces whose fixture has no data to report: a named no-answer is the
 # correct behaviour (no test was run; no git history; no recurring failure).
+# gt-plan: the shared fixture session carries no issue text.
 NAMED_NO_ANSWER_OK = {"gt-cochange", "gt-verify", "gt-failures",
-                      "gt-module", "gt-tools"}
+                      "gt-module", "gt-tools", "gt-plan"}
 
 
 def test_every_tool_has_a_fixture_call():
@@ -64,6 +66,31 @@ def test_tool_answers_or_names_why_not(polyglot_session, tool):
     assert len(text.encode("utf-8")) <= ToolDispatcher(session).max_bytes
 
 
+def _action_features(session, surface: str) -> set[str]:
+    """Features the edit / failure augmentation reported for a fixture action
+    that exercises each of them (a route handler that reaches a sink, edited
+    with a parse error; a failing test whose frame has a backward slice)."""
+    from pathlib import Path
+
+    from gt_engine.action_augment import ActionAugmenter
+
+    root = str(session._engine.repo_root)
+    augmenter = ActionAugmenter(session)
+    if surface == "edit-augment":
+        before = (Path(root) / "pyapp/server.py").read_text(encoding="utf-8")
+        edits = before.replace('warm = run_query("ls")', 'warm = run_query("pwd")').replace(
+            "    return execute(command)", "    return execute(command.strip())")
+        augmenter.after_edit({"pyapp/server.py": (before, edits)},
+                             [{"path": "pyapp/server.py", "valid": False, "line": 1}])
+    else:
+        output = ('Traceback (most recent call last):\n'
+                  f'  File "{root}/pyapp/test_server.py", line 11, in test_sanitize\n'
+                  f'  File "{root}/pyapp/server.py", line 56, in sanitize\n'
+                  "AssertionError: 'bc' != 'abc'\n")
+        augmenter.after_failure("python -m pytest", output, 1)
+    return set(augmenter.metrics.as_dict()["action_augment_features"])
+
+
 @pytest.mark.parametrize("feature", sorted(FEATURE_SURFACES))
 def test_feature_reaches_the_agent(polyglot_session, feature):
     session, _adapter = polyglot_session
@@ -78,6 +105,8 @@ def test_feature_reaches_the_agent(polyglot_session, feature):
             answered.append(code == EXIT_ANSWER)
         elif surface == "augment":
             answered.append(bool(GrepAugmenter(session).augment('grep -rn "def execute" .')))
+        elif surface in ("edit-augment", "failure-augment"):
+            answered.append(feature.split()[0] in _action_features(session, surface))
         else:
             _text, code = dispatcher.dispatch(surface, FIXTURE_CALLS[surface])
             answered.append(code == EXIT_ANSWER)

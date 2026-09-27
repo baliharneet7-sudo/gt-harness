@@ -220,6 +220,56 @@ def test_f11_query_ranks_the_owning_source_file_first(oracle):
 # ---------------------------------------------------------------- F14-F17 / F19
 
 
+def _blocks_by_line(answer: dict) -> dict[int, dict]:
+    return {line: block for block in answer["blocks"] for line in block["statement_lines"]}
+
+
+def test_f14_go_cfg_has_the_loop_and_its_exit(oracle):
+    session, _d, root = oracle
+    path = "go/calc/shapes.go"
+    answer = analysis.cfg(session, "TotalArea").answer
+    by_line = _blocks_by_line(answer)
+    header = by_line[line_of(root, path, "for _, shape := range shapes")]
+    body = by_line[line_of(root, path, "total += shape.Area()")]
+    after = by_line[line_of(root, path, "scaled := total * 2")]
+    edges = {(a, b, label) for a, b, label in answer["edges"]}
+    assert (header["id"], body["id"], "true") in edges
+    assert (body["id"], header["id"], "loop_back") in edges
+    assert (header["id"], after["id"], "false") in edges
+
+
+def test_f15_both_definitions_of_total_reach_the_use_after_the_loop(oracle):
+    session, _d, root = oracle
+    path = "go/calc/shapes.go"
+    cfg = analysis.cfg(session, "TotalArea").answer
+    after = _blocks_by_line(cfg)[line_of(root, path, "scaled := total * 2")]["id"]
+    reaching = analysis.reaching_definitions(session, "TotalArea").answer
+    assert reaching["in"][str(after)]["total"] == sorted([
+        f"total:{line_of(root, path, 'total := 0.0')}",
+        f"total:{line_of(root, path, 'total += shape.Area()')}",
+    ])
+
+
+def test_f16_loop_body_is_control_dependent_on_the_loop_header(oracle):
+    session, _d, root = oracle
+    path = "go/calc/shapes.go"
+    by_line = _blocks_by_line(analysis.cfg(session, "TotalArea").answer)
+    header = by_line[line_of(root, path, "for _, shape := range shapes")]["id"]
+    body = by_line[line_of(root, path, "total += shape.Area()")]["id"]
+    after = by_line[line_of(root, path, "scaled := total * 2")]["id"]
+    dependence = analysis.control_dependence(session, "TotalArea").answer["control_dependence"]
+    pairs = {(row["block"], row["depends_on"]) for row in dependence}
+    assert (body, header) in pairs
+    assert not any(block == after for block, _ in pairs), dependence
+
+
+@pytest.mark.xfail(strict=True, reason="producer persists no Python CFG (F14-F16 abstain "
+                   "no_persisted_cfg); Python slices use the runtime ast CFG instead")
+def test_f14_python_cfg_is_persisted(oracle):
+    session, _d, _root = oracle
+    assert analysis.cfg(session, "total").status == "ok"
+
+
 def test_f17_slice_tool_shows_the_dependent_statements(oracle):
     _s, dispatcher, root = oracle
     path = "go/calc/shapes.go"

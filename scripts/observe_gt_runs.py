@@ -108,6 +108,12 @@ def observe_task(agent_dir: Path) -> dict[str, Any]:
         "augment_hits": delivery.get("augment_hits",
                                      sum(row.get("outcome") == "hit" for row in augment_rows)),
         "augment_outcomes": dict(Counter(str(row.get("outcome")).split(":")[0] for row in augment_rows)),
+        "augment_features": delivery.get("augment_features") or {},
+        "edit_augment": f"{delivery.get('edit_augment_hits', 0)}/{delivery.get('edit_augment_calls', 0)}",
+        "failure_augment": f"{delivery.get('failure_augment_hits', 0)}/{delivery.get('failure_augment_calls', 0)}",
+        "action_features": delivery.get("action_augment_features") or {},
+        "plan_delivered": delivery.get("gt_plan_delivered"),
+        "plan_built": bool(event_names.get("attached_plan_built")),
         "bytes_delivered": delivery.get("gt_bytes_delivered"),
         "deliveries": delivery.get("gt_context_deliveries"),
         "referenced": delivery.get("gt_context_referenced"),
@@ -117,19 +123,41 @@ def observe_task(agent_dir: Path) -> dict[str, Any]:
     }
 
 
+# Surfaces that attach GT to the agent's own actions report WHICH features
+# each delivery carried (augment_features / action_augment_features); a
+# feature is credited only for deliveries that carried it.
+_ATTACHED_SURFACES = {"augment": "augment_features", "edit-augment": "action_features",
+                      "failure-augment": "action_features"}
+
+
 def feature_coverage(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     used: Counter[str] = Counter()
+    carried: dict[str, Counter[str]] = {"augment_features": Counter(), "action_features": Counter()}
     for task in tasks:
         for name, count in (task.get("tool_calls_by_name") or {}).items():
             used[name] += int(count or 0)
-        used["augment"] += int(task.get("augment_hits") or 0)
+        for key, counter in carried.items():
+            counter.update({feature: int(count or 0) for feature, count in (task.get(key) or {}).items()})
+        if not task.get("augment_features") and task.get("augment_hits"):
+            # Runs before per-feature tagging: every hit block carried at
+            # least the definition and its symbol context, nothing provable more.
+            carried["augment_features"].update({"F2": int(task["augment_hits"]),
+                                                "F12": int(task["augment_hits"])})
     any_valid_graph = any(task.get("treatment_valid") for task in tasks)
     coverage: dict[str, dict[str, Any]] = {}
     for feature, surfaces in FEATURE_SURFACES.items():
+        feature_id = feature.split()[0]
         if surfaces == ("substrate",):
             coverage[feature] = {"reached": any_valid_graph, "via": "substrate (every answer)"}
             continue
-        hits = {surface: used[surface] for surface in surfaces if used[surface]}
+        hits: dict[str, int] = {}
+        for surface in surfaces:
+            if surface in _ATTACHED_SURFACES:
+                count = carried[_ATTACHED_SURFACES[surface]][feature_id]
+                if count:
+                    hits["action-augment" if surface != "augment" else "augment"] = count
+            elif used[surface]:
+                hits[surface] = used[surface]
         coverage[feature] = {"reached": bool(hits), "via": hits or "unused"}
     return coverage
 
@@ -148,7 +176,10 @@ def render(tasks: list[dict[str, Any]], coverage: dict[str, dict[str, Any]]) -> 
     lines += ["", "Tool calls by name:"]
     for t in tasks:
         lines.append(f"- {t['task']}: {t['tool_calls_by_name'] or '{}'} status={t['tool_status'] or '{}'}"
-                     f" augment={t['augment_outcomes'] or '{}'}")
+                     f" augment={t['augment_outcomes'] or '{}'} edit={t['edit_augment']}"
+                     f" failure={t['failure_augment']} plan={t['plan_delivered']}")
+    planned = sum(1 for t in tasks if t.get("plan_delivered"))
+    lines += ["", f"Task plan (not one of the 21): delivered in {planned}/{len(tasks)} tasks"]
     reached = sum(1 for row in coverage.values() if row["reached"])
     lines += ["", f"Feature coverage: {reached}/{len(coverage)} reached the agent"]
     for feature, row in coverage.items():

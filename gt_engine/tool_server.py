@@ -617,6 +617,30 @@ def _run_failures(session: "GTSession", args: list[str]) -> CapabilityResult:
     return runtime.repeated_failure_state(session)
 
 
+def plan_holder(session: "GTSession") -> Any:
+    """The run's one attached plan (see ``attached_plan``), shared by the
+    ``gt-plan`` tool and the one-time delivery."""
+    from gt_engine.attached_plan import AttachedPlanHolder
+
+    engine = getattr(session, "_engine", None)
+    holder = getattr(engine, "attached_plan", None)
+    if not isinstance(holder, AttachedPlanHolder):
+        holder = AttachedPlanHolder(session)
+        if engine is not None:
+            engine.attached_plan = holder
+    return holder
+
+
+def _run_plan(session: "GTSession", args: list[str]) -> CapabilityResult:
+    plan = plan_holder(session).get()
+    if plan is None:
+        return wrap(session, "attached_plan", status="abstain",
+                    omissions=("no_current_graph_or_no_requirement_lines",))
+    omissions = () if plan.anchored_rows else ("no_requirement_anchored_in_graph",)
+    return wrap(session, "attached_plan", answer=plan.as_answer(), semantics="heuristic",
+                omissions=omissions)
+
+
 def _run_help(session: "GTSession", args: list[str]) -> CapabilityResult:
     return wrap(session, "help", semantics="exact", answer={"tools": [
         {"name": f"{spec.usage}  - {spec.summary}"} for spec in TOOLS.values()
@@ -816,6 +840,9 @@ TOOLS: dict[str, ToolSpec] = {
         ToolSpec("gt-failures", "gt-failures",
                  "failures that keep recurring after your edits",
                  _run_failures, lambda _args: "recurring failures", reads_graph=False),
+        ToolSpec("gt-plan", "gt-plan",
+                 "the issue's requirements tied to the code they name, in edit order, with tests",
+                 _run_plan, lambda _args: "task plan", "gt-context <symbol> for an anchor"),
     )
 }
 
@@ -933,6 +960,19 @@ class ToolDispatcher:
                 store.append("gt_tool_call", **row)
             except Exception:  # noqa: BLE001 - journaling never fails a tool call
                 pass
+
+    def render(self, name: str, args: list[str]) -> tuple[str, int]:
+        """A tool's answer text for GT's own delivery (the one-time plan):
+        same rendering as ``dispatch``, but not counted as an agent call."""
+        spec = TOOLS[name]
+        with self._lock:
+            if spec.reads_graph:
+                self._refresh_if_stale()
+            with snapshot_scope(self._scope_key()):
+                result = spec.run(self.session, list(args))
+            text, has_answer = render_result(
+                spec.title(list(args)), result, next_hint=spec.next_hint, max_bytes=self.max_bytes)
+        return text, EXIT_ANSWER if has_answer else EXIT_NO_ANSWER
 
     def dispatch(self, name: str, args: list[str]) -> tuple[str, int]:
         spec = TOOLS.get(name)
