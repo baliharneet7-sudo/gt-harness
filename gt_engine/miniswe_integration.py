@@ -3333,6 +3333,16 @@ class MiniSweAdapter(GroundtruthController):
             return False
         if self._background_build_count >= self.MAX_BACKGROUND_GRAPH_BUILDS:
             return False
+        # A workspace with no source yet has nothing to build; attempting
+        # anyway spent the budget before the agent wrote its code (TB2
+        # bn-fit-modify, run 36351259430: one build on an empty tree, then
+        # solve.py was written and GT stayed silent for the whole task).
+        from gt_engine import indexer
+
+        excluded = tuple(getattr(getattr(self.engine_state, "layout", None), "excluded_roots", ()) or ())
+        if not self.repo_root or not indexer.is_code_repo(
+                str(self.repo_root), **({"excluded_roots": excluded} if excluded else {})):
+            return False
         self._background_build_count += 1
         self._startup_index = self._background_graph_builder()
         self.store.append("graph_background_build_scheduled",

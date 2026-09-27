@@ -569,3 +569,22 @@ def test_a_read_with_no_graph_schedules_a_background_build_and_never_blocks():
     adapter.engine_state.graph_path = "g.db"   # a stale existing graph amends inline
     refresh_if_stale(session)
     assert calls == ["poll", "BLOCKING refresh"]
+
+
+def test_an_edit_that_writes_source_wakes_the_graph_build(monkeypatch):
+    # TB2 db-wal-recovery (run 36351259430): the agent wrote fix_wal.py but
+    # never searched, so no build was ever scheduled and GT stayed silent.
+    import gt_engine.tool_server as tool_server
+
+    calls = []
+    monkeypatch.setattr(tool_server, "refresh_if_stale",
+                        lambda session, passive=False: calls.append(passive))
+    delivery = AttachedDelivery.__new__(AttachedDelivery)
+    delivery.session = SimpleNamespace(_engine=SimpleNamespace(engine_state=SimpleNamespace(graph_path="")))
+    delivery._wake_on_new_source({"learned_dag.csv": ("", "x")})
+    assert calls == []
+    delivery._wake_on_new_source({"fix_wal.py": (None, "print(1)")})
+    assert calls == [True]
+    delivery.session._engine.engine_state.graph_path = "/g/graph.db"
+    delivery._wake_on_new_source({"fix_wal.py": ("a", "b")})
+    assert calls == [True]

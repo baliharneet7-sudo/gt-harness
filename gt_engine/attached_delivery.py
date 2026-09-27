@@ -217,11 +217,29 @@ class AttachedDelivery:
         result["output"] = f"{original}\n\n{text}" if original else text
         return [*outputs[:index], result, *outputs[index + 1:]]
 
+    def _wake_on_new_source(self, changes: dict) -> None:
+        """An edit that writes source into a graph-less workspace starts the
+        (background, never blocking) build. Only searches used to: TB2
+        db-wal-recovery (run 36351259430) wrote fix_wal.py, never searched,
+        and got no GT for the whole task."""
+        from gt_engine.indexer import SOURCE_EXTS
+        from gt_engine.tool_server import refresh_if_stale
+
+        state = getattr(getattr(self.session, "_engine", None), "engine_state", None)
+        if state is not None and getattr(state, "graph_path", ""):
+            return
+        if any(Path(str(path)).suffix.lower() in SOURCE_EXTS for path in changes):
+            try:
+                refresh_if_stale(self.session, passive=True)
+            except Exception:  # noqa: BLE001 - waking the graph never costs the action
+                pass
+
     def _block(self, command: str, facts: dict | None) -> str:
         """Search, edit and failure blocks for one action, in that order."""
         blocks = [self.augmenter.augment(command)]
         if facts:
             if facts.get("changes"):
+                self._wake_on_new_source(facts["changes"])
                 blocks.append(self.action_augmenter.after_edit(
                     facts["changes"], facts.get("syntax") or (), str(facts.get("pre_edit_graph") or "")))
             blocks.append(self.action_augmenter.after_failure(

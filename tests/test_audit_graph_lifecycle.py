@@ -1609,9 +1609,13 @@ def test_a_later_graph_publication_clears_the_startup_failure_flag(tmp_path, mon
         adapter.close_graph_lifecycle()
 
 
+SOLVE_PY = "def main():" + chr(10) + "    return 1" + chr(10)
+
+
 def test_background_graph_build_is_bounded_and_skips_when_a_graph_exists(tmp_path):
     adapter = _adapter(tmp_path)
     try:
+        (Path(adapter.repo_root) / "solve.py").write_text(SOLVE_PY, encoding="utf-8")
         builds = []
         adapter._background_graph_builder = lambda: builds.append(1) or _DoneFuture(
             IndexBuildReceipt(IndexBuildStatus.BUILD_FAILED, error_type="x"))
@@ -1623,5 +1627,26 @@ def test_background_graph_build_is_bounded_and_skips_when_a_graph_exists(tmp_pat
         assert adapter.schedule_background_graph_build() is False  # cap reached
         assert len(builds) == adapter.MAX_BACKGROUND_GRAPH_BUILDS == 2
         assert len(_journal_rows(adapter, "graph_background_build_scheduled")) == 2
+    finally:
+        adapter.close_graph_lifecycle()
+
+
+
+def test_a_workspace_without_source_does_not_spend_the_build_budget(tmp_path):
+    # TB2 bn-fit-modify (run 36351259430): a build on the still-empty tree
+    # spent the budget before the agent wrote solve.py; GT stayed silent.
+    adapter = _adapter(tmp_path)
+    try:
+        for stale in Path(adapter.repo_root).rglob("*"):
+            if stale.is_file() and stale.suffix in (".py", ".go", ".ts", ".js"):
+                stale.unlink()
+        builds = []
+        adapter._background_graph_builder = lambda: builds.append(1) or _DoneFuture(
+            IndexBuildReceipt(IndexBuildStatus.BUILD_FAILED, error_type="x"))
+        assert adapter.schedule_background_graph_build() is False
+        assert adapter.schedule_background_graph_build() is False
+        (Path(adapter.repo_root) / "solve.py").write_text(SOLVE_PY, encoding="utf-8")
+        assert adapter.schedule_background_graph_build() is True
+        assert builds == [1]
     finally:
         adapter.close_graph_lifecycle()
