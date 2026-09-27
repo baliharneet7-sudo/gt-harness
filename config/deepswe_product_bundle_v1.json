@@ -1270,6 +1270,7 @@
   "gt_engine/event_journal.py",
   "gt_engine/evidence_router.py",
   "gt_engine/feature_matrix.py",
+  "gt_engine/feature_trace.py",
   "gt_engine/generated_typed_capabilities.py",
   "gt_engine/graph_context.py",
   "gt_engine/graph_coordinator.py",
