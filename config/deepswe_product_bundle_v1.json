@@ -200,9 +200,10 @@
     "2f194415833f006a466180899d17836ebfdcb2b3",
     "92b08c3938e8e19c033c8bf693a5902c934f42f4",
     "3ee0ce16695b6da736dde945f227a968490931cd",
-    "ec587cccf275d9c86dedf8962971afa5d6f4c972"
+    "ec587cccf275d9c86dedf8962971afa5d6f4c972",
+    "93e2e86eef853fe76cbad3a1d3eaa1b73134704d"
    ],
-   "attestation_digest_sha256": "7736a2f2bdfd9c23d11cb25a846359b6b9ae96d614b5b37a0c19f0b729b847ac",
+   "attestation_digest_sha256": "18fb5c1f573739b8b00a18fba2dabbe8a67c3efe80dd6dffd4beb5d9d51e21f4",
    "authority": "HAR-81_OWNER_DIRECTIVE",
    "certified_source_commit": "cffca1fd29001577bf35a3355b7238e6cedd1130",
    "post_certification_changed_paths": [
@@ -477,6 +478,7 @@
     "src/groundtruth/lsp/client.py",
     "src/groundtruth/lsp/edge_verifier.py",
     "src/groundtruth/main.py",
+    "src/groundtruth/mcp/__init__.py",
     "src/groundtruth/mcp/composite.py",
     "src/groundtruth/mcp/composite_server.py",
     "src/groundtruth/mcp/endpoints/_graph_db.py",
@@ -964,6 +966,7 @@
     "tests/unit/test_lsp_primary_resolution.py",
     "tests/unit/test_lsp_promotion_scheduler.py",
     "tests/unit/test_lsp_runtime_recovery.py",
+    "tests/unit/test_mcp_package_lazy_server.py",
     "tests/unit/test_mismatch_false_positive.py",
     "tests/unit/test_novelty.py",
     "tests/unit/test_obligations_proof_languages.py",
@@ -1034,7 +1037,7 @@
     }
    ],
    "reason_code": "digest_recorded_source_descends_from_unadvanced_default",
-   "review_inbox_commit": "aaf79405329bdfc5e1bd776459e22eb4eb7fb485",
+   "review_inbox_commit": "8ea708f0e0c161a04c0a3e3d2db973f21f8b62e6",
    "review_packets": [
     {
      "head_sha": "db9daf9ecf3a6ec1c92c40fba214ee66e4d09d14",
@@ -1173,20 +1176,29 @@
      "packet_id": "har90-certified-producer-ec587ccc",
      "path": "inbox/HAR-90/har90-certified-producer-ec587ccc.json",
      "status": "PASS"
+    },
+    {
+     "basis": "certified_producer_build_green",
+     "head_sha": "93e2e86eef853fe76cbad3a1d3eaa1b73134704d",
+     "kind": "check_outcome",
+     "packet_digest_sha256": "5d4b2d3622c5ec4ce7609bf4b58824f69c028796a14ada24f40b54bda0c7c367",
+     "packet_id": "har90-certified-producer-93e2e86e",
+     "path": "inbox/HAR-90/har90-certified-producer-93e2e86e.json",
+     "status": "PASS"
     }
    ],
    "schema": "gt.groundtruth_lineage_exception.v1",
-   "source_commit": "ec587cccf275d9c86dedf8962971afa5d6f4c972",
+   "source_commit": "93e2e86eef853fe76cbad3a1d3eaa1b73134704d",
    "status": "VERIFIED_DESCENDANT_LINEAGE_EXCEPTION"
   },
   "producer_build": {
    "schema": "gt.producer_build_binding.v1",
    "status": "VERIFIED",
-   "source_commit": "ec587cccf275d9c86dedf8962971afa5d6f4c972",
-   "source_tree": "8264973f96c16cf820112411dd7ddeac1cb07ecd",
-   "binary_sha256": "5764db77b777d8adc2131f7d3f65f34d591ecbe6a35bcbeb8bc027ec73091264",
+   "source_commit": "93e2e86eef853fe76cbad3a1d3eaa1b73134704d",
+   "source_tree": "721ec9e24f527bd4b4f321b8561d8c62266bf08b",
+   "binary_sha256": "291c9b983180e3e9e4ef116349c403a0d607be7bdf3fbd944877411d734d5dc1",
    "build_info_path": "vendor/gt-index-linux-amd64.build-info.json",
-   "build_info_sha256": "18a95eac0c7d410910a9a8bd9059519751263a6ab0bc9f0f8a563b99f5aae6d4",
+   "build_info_sha256": "02f7d9fd0a5f1b20381aa4a141ab789a64f1b25db5a83b7b42daed691d3546ca",
    "builder_image_digest": "af9b40f2b1851be993763b85288f8434af87b5678af04355b1e33ff530b5765f",
    "build_tags": "netgo,osusergo,sqlite_fts5",
    "static_linking": true
@@ -1205,14 +1217,14 @@
    "versioned_query_policy"
   ],
   "producer_path": "vendor/gt-index-linux-amd64",
-  "producer_sha256": "5764db77b777d8adc2131f7d3f65f34d591ecbe6a35bcbeb8bc027ec73091264",
+  "producer_sha256": "291c9b983180e3e9e4ef116349c403a0d607be7bdf3fbd944877411d734d5dc1",
   "provenance_status": "VERIFIED_ROUTE_B_SOURCE_BOUND",
   "repository": "https://github.com/harneet2512/groundtruth.git",
-  "source_commit": "ec587cccf275d9c86dedf8962971afa5d6f4c972",
-  "source_tree": "8264973f96c16cf820112411dd7ddeac1cb07ecd",
+  "source_commit": "93e2e86eef853fe76cbad3a1d3eaa1b73134704d",
+  "source_tree": "721ec9e24f527bd4b4f321b8561d8c62266bf08b",
   "wheel_path": "vendor/groundtruth_mcp-1.0.0-py3-none-any.whl",
   "wheel_runtime_status": "VERIFIED_VENDORED_ROUTE_B",
-  "wheel_sha256": "a873f92aa6c70a4be658f84e62f21fd3df0fb0b3593b1a47c2f26826f67c871e"
+  "wheel_sha256": "6597a6c0154b9720329eea54e5352e824474ec5c41cc6c86fbb7c97ac32d564b"
  },
  "harbor_version": "0.20.0",
  "miniswe_agent_version": "2.4.6",
