@@ -197,13 +197,27 @@ def _run_routes(session: "GTSession", args: list[str]) -> CapabilityResult:
 MAX_CHANGED_FILES = 12
 
 
-def _edited_paths(session: "GTSession") -> list[str]:
-    """Every path the agent's recorded edit transactions touched, in order."""
+def _base_text(repo_root: str, path: str) -> str:
+    """Git HEAD text - the fallback baseline for a file no edit transaction touched."""
+    done = subprocess.run(
+        ["git", "-C", repo_root, "show", f"HEAD:{path}"],
+        capture_output=True, timeout=30, check=False,
+    )
+    return done.stdout.decode("utf-8", errors="replace") if done.returncode == 0 else ""
+
+
+def _edit_preimages(session: "GTSession") -> dict[str, str]:
+    """Each edited path's text before the agent first touched it, from the
+    engine's own recorded edit transactions (content-addressed pre-images).
+    ``git show HEAD`` is not that baseline: the workspace may not be a git
+    repository, and after the agent commits, HEAD already contains its edits."""
+    from gt_engine.capabilities._query import read_cas_blob
+
     store = getattr(getattr(session, "_engine", None), "store", None)
     journal = Path(getattr(store, "path", "") or "")
-    paths: list[str] = []
+    preimages: dict[str, str] = {}
     if not journal.is_file():
-        return paths
+        return preimages
     with journal.open(encoding="utf-8") as handle:
         for line in handle:
             if '"edit_transaction"' not in line:
@@ -214,23 +228,23 @@ def _edited_paths(session: "GTSession") -> list[str]:
                 continue
             if row.get("event") != "edit_transaction":
                 continue
-            for path in row.get("changed_paths") or ():
-                if path not in paths:
-                    paths.append(str(path))
-    return paths
-
-
-def _base_text(repo_root: str, path: str) -> str:
-    done = subprocess.run(
-        ["git", "-C", repo_root, "show", f"HEAD:{path}"],
-        capture_output=True, timeout=30, check=False,
-    )
-    return done.stdout.decode("utf-8", errors="replace") if done.returncode == 0 else ""
+            blob = read_cas_blob(session, "edit_transactions", str(row.get("artifact_sha256") or ""))
+            try:
+                changes = json.loads(blob or b"{}").get("changes") or []
+            except ValueError:
+                continue
+            for change in changes:
+                path = str(change.get("path") or "")
+                if path and path not in preimages:
+                    raw = change.get("before_content_hex")
+                    preimages[path] = bytes.fromhex(raw).decode("utf-8", "replace") if raw else ""
+    return preimages
 
 
 def _run_changes(session: "GTSession", args: list[str]) -> CapabilityResult:
     repo_root = str(getattr(getattr(session, "_engine", None), "repo_root", "") or "")
-    paths = list(args) or _edited_paths(session)
+    preimages = _edit_preimages(session)
+    paths = list(args) or list(preimages)
     if not repo_root or not paths:
         return wrap(session, "patch_impact", status="abstain",
                     omissions=("no_edits_recorded",))
@@ -238,7 +252,8 @@ def _run_changes(session: "GTSession", args: list[str]) -> CapabilityResult:
     for path in paths[:MAX_CHANGED_FILES]:
         target = Path(repo_root) / path
         after = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
-        edited[path] = {"before": _base_text(repo_root, path), "after": after}
+        before = preimages[path] if path in preimages else _base_text(repo_root, path)
+        edited[path] = {"before": before, "after": after}
     result = change.patch_impact(session, edited)
     if result.answer is None and len(edited) > 1:
         # One unmappable file (an export-only index, a config file) sinks the
@@ -258,10 +273,68 @@ def _run_changes(session: "GTSession", args: list[str]) -> CapabilityResult:
         if merged:
             result = dataclasses.replace(result, answer=merged, status="partial", omissions=tuple(
                 f"changed_symbols_unmapped:{path}" for path in unmapped))
+    impact = (result.answer or {}).get("impact") if isinstance(result.answer, dict) else None
+    if not (impact or {}).get("changed_symbols"):
+        landed = _impact_of_edits(session, edited)
+        if landed:
+            result = wrap(session, "patch_impact", answer=landed, semantics="partial",
+                          omissions=("impact_from_landed_edits",))
     if len(paths) > MAX_CHANGED_FILES:
         result = dataclasses.replace(result, omissions=(
             *result.omissions, f"changed_files_truncated:{len(paths)}>{MAX_CHANGED_FILES}"))
     return result
+
+
+_CHANGED_SYMBOLS_SHOWN = 8
+
+
+def _changed_line_ranges(before: str, after: str) -> list[tuple[int, int]]:
+    """1-based line ranges of ``after`` that differ from ``before``."""
+    import difflib
+
+    ranges = []
+    matcher = difflib.SequenceMatcher(a=before.splitlines(), b=after.splitlines(), autojunk=False)
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        ranges.append((j1 + 1, max(j2, j1 + 1)))
+    return ranges
+
+
+def _impact_of_edits(session: "GTSession", edited: dict[str, dict[str, str]]) -> dict[str, Any]:
+    """The functions an edit touched, on the current (amended) graph, and who
+    calls them. ``patch_impact`` analyses a *proposed* patch against the
+    pre-edit graph; after the edit has landed the graph is post-edit, so it
+    maps no changed symbol - this answers the question the agent is asking."""
+    from gt_engine.capabilities._query import graph_conn
+
+    conn = graph_conn(session)
+    if conn is None:
+        return {}
+    changed: list[tuple[str, str, int, int]] = []
+    try:
+        for path, texts in edited.items():
+            for start, end in _changed_line_ranges(texts["before"], texts["after"]):
+                for name, label, begin, finish in conn.execute(
+                    "SELECT name, label, start_line, end_line FROM nodes WHERE file_path = ?"
+                    " AND label IN ('Function', 'Method') AND start_line <= ? AND end_line >= ?"
+                    " ORDER BY end_line - start_line", (path, end, start)):
+                    key = (name, path, begin, finish)
+                    if key not in changed:
+                        changed.append(key)
+                    break
+    finally:
+        conn.close()
+    if not changed:
+        return {}
+    answer: dict[str, Any] = {"changed functions": [
+        {"file_path": path, "line": begin, "name": name} for name, path, begin, _end in changed]}
+    for name, path, _begin, _end in changed[:_CHANGED_SYMBOLS_SHOWN]:
+        callers = _callers_with_fallback(session, name, 2, path=path)
+        rows = [row for band in ((callers.answer or {}).get("callers_by_depth") or {}).values()
+                for row in band] if isinstance(callers.answer, dict) else []
+        answer[f"callers of {name}"] = rows
+    return answer
 
 
 def _run_check(session: "GTSession", args: list[str]) -> CapabilityResult:
@@ -278,7 +351,47 @@ def _run_api(session: "GTSession", args: list[str]) -> CapabilityResult:
 
 def _run_shape(session: "GTSession", args: list[str]) -> CapabilityResult:
     _need(args, 1, TOOLS["gt-shape"].usage)
-    return change.shape_change(session, args[0], **_symbol_hints(args))
+    result = change.shape_change(session, args[0], **_symbol_hints(args))
+    if result.answer is not None and "no_verifiable_contracts" not in result.omissions:
+        return result
+    conformance = _name_level_conformance(session, args[0])
+    if not conformance:
+        return result
+    return wrap(session, "shape_check", semantics="heuristic", answer=conformance,
+                omissions=("certified_shape_check_unverifiable", "method_names_only"))
+
+
+def _name_level_conformance(session: "GTSession", contract: str) -> dict[str, Any]:
+    """Which classes extending/implementing ``contract`` lack one of its
+    method names. The certified check counts only callable members it can
+    verify and skips interface method signatures (TypeScript), so it reports
+    nothing exactly where a missing method matters."""
+    from gt_engine.capabilities._query import graph_conn
+
+    conn = graph_conn(session)
+    if conn is None:
+        return {}
+    try:
+        required = sorted({row[0] for row in conn.execute(
+            "SELECT m.name FROM nodes m JOIN nodes p ON p.id = m.parent_id"
+            " WHERE p.name = ? AND m.label = 'Method'", (contract,))})
+        implementers = conn.execute(
+            "SELECT DISTINCT c.id, c.name, c.file_path, c.start_line FROM edges e"
+            " JOIN nodes t ON t.id = e.target_id JOIN nodes c ON c.id = e.source_id"
+            f" WHERE t.name = ? AND e.type IN ({','.join('?' * len(_HIERARCHY_EDGES))})"
+            " ORDER BY c.file_path, c.start_line", (contract, *_HIERARCHY_EDGES)).fetchall()
+        rows = []
+        for class_id, name, path, line in implementers:
+            present = {row[0] for row in conn.execute(
+                "SELECT name FROM nodes WHERE parent_id = ? AND label = 'Method'", (class_id,))}
+            missing = [method for method in required if method not in present]
+            verdict = "MISSING " + ", ".join(missing) if missing else "has every method"
+            rows.append({"file_path": path, "line": line, "name": f"{name}: {verdict}"})
+    finally:
+        conn.close()
+    if not required or not rows:
+        return {}
+    return {f"implementations of {contract} (requires {', '.join(required)})": rows}
 
 
 _CALLSITE_QUERY = (
@@ -292,6 +405,44 @@ _CALLSITE_QUERY = (
     " ORDER BY c.line_start, c.id, ct.type DESC, t.file_path, t.start_line"
 )
 _MAX_CANDIDATES_SHOWN = 4
+
+
+_HIERARCHY_EDGES = ("EXTENDS", "IMPLEMENTS", "DECLARED_IMPLEMENTS")
+
+
+def _overriding_methods(session: "GTSession", sites: dict[int, dict[str, Any]]) -> dict[str, list[str]]:
+    """For each virtual callee, the same-named methods of every class that
+    (transitively) extends or implements a class declaring it. The producer's
+    hierarchy expansion reaches Go interfaces but leaves Python/TS virtual
+    calls at the base declaration; the graph's EXTENDS/IMPLEMENTS edges answer
+    the same question by name."""
+    from gt_engine.capabilities._query import graph_conn
+
+    callees = sorted({site["callee"] for site in sites.values()
+                      if site["dispatch"] in ("virtual", "interface") and not site["selected"]})
+    if not callees:
+        return {}
+    conn = graph_conn(session)
+    if conn is None:
+        return {}
+    out: dict[str, list[str]] = {}
+    try:
+        for callee in callees:
+            rows = conn.execute(
+                "WITH RECURSIVE declaring(id) AS ("
+                " SELECT p.id FROM nodes m JOIN nodes p ON p.id = m.parent_id"
+                " WHERE m.name = ? AND m.label = 'Method'"
+                " UNION SELECT e.source_id FROM edges e JOIN declaring d ON e.target_id = d.id"
+                f" WHERE e.type IN ({','.join('?' * len(_HIERARCHY_EDGES))}))"
+                " SELECT DISTINCT c.name, m.file_path, m.start_line FROM declaring d"
+                " JOIN nodes c ON c.id = d.id JOIN nodes m ON m.parent_id = c.id"
+                " WHERE m.name = ? AND m.label = 'Method' ORDER BY m.file_path, m.start_line",
+                (callee, *_HIERARCHY_EDGES, callee),
+            ).fetchall()
+            out[callee] = [f"{cls}.{callee} ({path}:{line})" for cls, path, line in rows]
+    finally:
+        conn.close()
+    return out
 
 
 def _run_calls(session: "GTSession", args: list[str]) -> CapabilityResult:
@@ -330,12 +481,15 @@ def _run_calls(session: "GTSession", args: list[str]) -> CapabilityResult:
             site["selected"] = f"{where} [{tier}]"
         elif where not in site["candidates"]:
             site["candidates"].append(where)
+    overrides = _overriding_methods(session, sites)
     calls = []
     for site in sites.values():
         if site["selected"]:
             target = site["selected"]
         elif site["candidates"]:
-            shown = site["candidates"][:_MAX_CANDIDATES_SHOWN]
+            extra = [o for o in overrides.get(site["callee"], []) if o not in site["candidates"]]
+            site["candidates"] = site["candidates"] + [f"{o} [via inheritance]" for o in extra]
+            shown = site["candidates"][:_MAX_CANDIDATES_SHOWN + 2]
             more = len(site["candidates"]) - len(shown)
             target = "one of: " + "; ".join(shown) + (f"; +{more} more" if more > 0 else "")
         else:
@@ -482,13 +636,42 @@ def _shape_routes(answer: Any, args: list[str]) -> Any:
     return {"routes": rows}
 
 
+_SLICE_LINES_SHOWN = 40
+
+
+def _source_line(session: "GTSession", path: str, line: int) -> str:
+    root = Path(str(getattr(getattr(session, "_engine", None), "repo_root", "") or ""))
+    try:
+        lines = (root / path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return lines[line - 1].strip() if 0 < line <= len(lines) else ""
+
+
 def _run_slice(session: "GTSession", args: list[str]) -> CapabilityResult:
+    """The statements a line depends on (or affects), each with its source
+    text - the slice's value is the lines themselves, which the generic
+    renderer dropped as a nested list."""
     usage = TOOLS["gt-slice"].usage
     _need(args, 2, usage)
     direction = args[2] if len(args) > 2 else "backward"
     if direction not in ("backward", "forward"):
         raise ToolUsageError(usage)
-    return analysis.slice(session, args[0], _int(args[1], usage), direction)
+    result = analysis.slice(session, args[0], _int(args[1], usage), direction)
+    answer = result.answer if isinstance(result.answer, dict) else None
+    if not answer or not answer.get("slices"):
+        return result
+    shaped: dict[str, Any] = {}
+    for item in answer["slices"]:
+        path = str(item.get("file_path") or "")
+        rows = [{"file_path": path, "line": number, "name": _source_line(session, path, number)}
+                for number in (item.get("slice_lines") or [])[:_SLICE_LINES_SHOWN]]
+        label = f"{item.get('direction', direction)} slice of {item.get('function')} at line {item.get('criterion_line')}"
+        shaped[label] = rows
+        calls = [call.get("name") for call in item.get("call_sites") or [] if call.get("name")]
+        if calls:
+            shaped[f"calls not followed ({label})"] = [{"name": name} for name in calls]
+    return dataclasses.replace(result, answer=shaped)
 
 
 def _run_taint(session: "GTSession", args: list[str]) -> CapabilityResult:

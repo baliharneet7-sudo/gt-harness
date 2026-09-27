@@ -99,10 +99,34 @@ def _render_value(key: str, value: Any, lines: list[str], indent: str = "") -> b
         if value and _first(value, _LOCATION_KEYS + _NAME_KEYS) is not None:
             lines.append(f"{indent}{key}: {_render_row(value)}")
             return True
-        return False
+        # A nested block mixing lists and dicts (e.g. patch_impact's
+        # ``impact``): render each part instead of silently dropping all of it.
+        found = False
+        for sub_key in sorted(value, key=str):
+            found = _render_value(f"{key} {sub_key}", value[sub_key], lines, indent) or found
+        return found
     if key not in _SKIP_SCALARS and value not in (None, "", False) and not _is_hash(value):
         lines.append(f"{indent}{key}: {value}")
     return False
+
+
+# Echoes of the request and query bookkeeping: true, but nothing the agent can
+# act on, and paid for in context on every call.
+_NOISE_KEYS = frozenset({
+    "symbol", "max_depth", "resolved_nodes", "returned_count", "primary_selection",
+    "matched", "reachable_symbol_count", "paths_found", "certified_paths_found",
+    "dataflow_scope", "source", "sink", "direction", "line", "slice_count", "query",
+    "rrf_k", "sources", "provenance",
+})
+
+
+def _drop_noise(answer: dict) -> dict:
+    kept = {key: value for key, value in answer.items() if key not in _NOISE_KEYS}
+    for echo in ("resolved_symbols", "candidates"):
+        rows = kept.get(echo)
+        if isinstance(rows, list) and len(rows) <= 1:
+            kept.pop(echo)
+    return kept
 
 
 def render_answer(answer: Any) -> tuple[list[str], bool]:
@@ -110,6 +134,7 @@ def render_answer(answer: Any) -> tuple[list[str], bool]:
     lines: list[str] = []
     substantive = False
     if isinstance(answer, dict):
+        answer = _drop_noise(answer)
         for key in sorted(answer, key=str):
             substantive = _render_value(str(key), answer[key], lines) or substantive
     elif isinstance(answer, list):

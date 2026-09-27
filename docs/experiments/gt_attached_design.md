@@ -95,3 +95,22 @@ The no-answers are named and mostly legitimate: no HTTP routes or MCP tools in t
 The **certified** producer (`vendor/gt-index-linux-amd64`, sha `d4655bcc…`, source 1e83ea68) does not finish on aiomonitor@b73fea2 — 43 source files — within 300 s. A goroutine dump places it in `resolver.AnalyzeVTAWithBudget` (`vta.go:374` → `vta.go:167`, called from `main.go:816`). Each worklist iteration scans every call × argument × every assignment (9,726 calls, 4,846 assignments ≈ 94M `parameterMatches`) and re-sorts evidence edge sets that grow every round. `GT_VTA_ITERATION_BUDGET` (default 64) bounds iterations, not per-iteration work: with the budget at 1, 2, 4 and 8 the certified binary still timed out at 240 s every time, so **no harness-side knob mitigates it** — a single iteration is already too expensive. HAR-93 records aiomonitor indexing under 0becde10, so this is a regression in the certified build. In a benchmark this means a graphless run (attached: treatment-invalid row; push: startup abort). It must be fixed in the producer (bound per-iteration work, or index parameters by (file, scope)) and re-certified before a DeepSWE run.
 
 The same cast-join pattern also appears in `groundtruth/mcp/endpoints/_graph_db.py:145` and `groundtruth/resolve.py:498,597`. Wherever the push lanes called `symbol_context` or process detection on a real repository, that cost fell on the agent's wall clock — a candidate contributor to past timeouts, worth checking in old journals.
+
+## 7. Ground-truth verification of the 21 features
+
+`tests/canonical/test_feature_oracle.py` runs every feature, through the exact tool surface the attached agent uses, against `tests/canonical/fixtures/oracle` (Python, TypeScript, Go). Every correct answer there is known in advance — who calls what, which implementations a virtual call reaches, which statements a slice must hold, which tests reach a file, what an edit affects. It asserts truth, not a snapshot of prior output. Result: **25 pass, 2 strict xfail** (both F1: nested function declarations are not definitions in Python or TypeScript — a producer gap). Verbatim agent-facing output: `gt_attached_agent_view.md`.
+
+Defects this suite and the real-repo validator (`scripts/validate_features_real_repos.py`, awilix fully validated) found and fixed in the attached surface:
+
+| feature | defect | fix |
+|---|---|---|
+| F3 | references showed the enclosing callback's line, not the call | render `reference_line` |
+| F6/F7 | Python/TS virtual calls listed only the base declaration | expand via EXTENDS/IMPLEMENTS edges, labelled `[via inheritance]` |
+| F7 | TS interface conformance "unverifiable" | name-level conformance from graph (`Rude: MISSING farewell`) |
+| F10 | module = a label only | sibling files listed |
+| F11 | test files crowded out the source to change | source list before related tests |
+| F13 | impact of landed edits mapped nothing (proposed-patch analysis on a post-edit graph; `git HEAD` as baseline) | pre-images from the engine's edit transactions; changed functions + callers on the amended graph |
+| F13/F17 | nested answers (`impact`, `slice_lines`) silently dropped by the renderer | render nested blocks; slice lines with source text |
+| all | echo/bookkeeping lines paid in context | filtered; answers are 170–550 bytes |
+
+Known gaps (producer): F1 nested definitions; F4 recall 55–80% of textual call sites on awilix; F8 Koa `router.get` not in the manifest; the certified covering-test selector (replaced in the tool by graph reachability).
