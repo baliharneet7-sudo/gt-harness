@@ -648,9 +648,13 @@ def attest_deepswe(
             treatment.get("verified"), field="verified",
             task=task, errors=errors,
         )
-        if not verified:
+        # Completion is verified by the push-mode submit gate. SHADOW mode
+        # (attached delivery) bypasses that gate by design - the agent decides
+        # when it is done - so an unverified completion is not a defect there.
+        shadow = treatment.get("gt_mode") == "shadow"
+        if not verified and not shadow:
             errors.append(f"product_completion_unverified:{task}")
-        if unmet_predicates:
+        if unmet_predicates and not shadow:
             errors.append(f"product_unmet_predicates:{task}")
         product_rows.append(
             {

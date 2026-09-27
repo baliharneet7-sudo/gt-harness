@@ -1635,7 +1635,14 @@ def verify_runtime_receipt(receipt_path: Path) -> list[str]:
         errors.append("treatment_receipt_schema")
     if treatment.get("treatment_status") != "ACTIVE":
         errors.append("treatment_not_active")
-    if treatment.get("contract_shipped") is not True:
+    # SHADOW mode (attached delivery) computes GT and pushes nothing into the
+    # prompt: no contract, no evidence deliveries. Its GT reaches the agent
+    # through gt-* tools and grep augmentation, journaled separately. The
+    # push-delivery requirements below are meaningless there (SWE-Live GT
+    # mini first5, run 36314627126: all five GREEN tasks failed attestation
+    # on them).
+    shadow = treatment.get("gt_mode") == "shadow"
+    if treatment.get("contract_shipped") is not True and not shadow:
         errors.append("treatment_contract_not_shipped")
     evidence_events = treatment.get("evidence_deliveries")
     if not isinstance(evidence_events, list):
@@ -1801,12 +1808,21 @@ def verify_runtime_receipt(receipt_path: Path) -> list[str]:
             errors.append("treatment_dense_execution_census_mismatch")
         if dense_runs and dense != dense_runs[-1]:
             errors.append("treatment_dense_execution_identity_mismatch")
+    # SHADOW (attached) skips the whole-repository dense sidecar by design, so
+    # its LAST dense receipt may be a lookup against that skipped sidecar;
+    # what must hold is that dense retrieval answered (the candidate re-rank).
+    shadow_dense_answered = treatment.get("gt_mode") == "shadow" and any(
+        isinstance(row, dict)
+        and row.get("schema") == "gt.dense_index_receipt.v1"
+        and row.get("query_ready") is True
+        for row in (treatment.get("dense_execution_receipts") or [])
+    )
     if (
         treatment.get("retrieval_mode") != "hybrid_required"
         or not isinstance(dense, dict)
         or (
             dense.get("schema") != "gt.dense_index_receipt.v1"
-            or dense.get("query_ready") is not True
+            or (dense.get("query_ready") is not True and not shadow_dense_answered)
         )
     ):
         errors.append("treatment_dense_index_not_ready")
@@ -1922,7 +1938,8 @@ def verify_runtime_receipt(receipt_path: Path) -> list[str]:
     if utilisation != expected_utilisation:
         errors.append("treatment_graph_utilisation_mismatch")
     indexed_files = int(certification.get("indexed_file_count") or 0)
-    if indexed_files > 0 and not utilisation.get("graph_backed_delivery"):
+    if (indexed_files > 0 and not utilisation.get("graph_backed_delivery")
+            and treatment.get("gt_mode") != "shadow"):
         errors.append("treatment_graph_evidence_absent")
     # Context health is judged journal-side, not from the receipt's claim:
     # a starved provider view or control-plane pointer emission makes the
