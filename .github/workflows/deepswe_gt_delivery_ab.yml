@@ -471,7 +471,18 @@ jobs:
             IMAGE_REF="${IMAGE}@${DIGEST}"
             RAW_MANIFEST="$(mktemp)"
             if ! docker buildx imagetools inspect --raw "${MIRROR}@${DIGEST}" > "$RAW_MANIFEST" 2>/dev/null; then
-              docker buildx imagetools inspect --raw "$IMAGE_REF" > "$RAW_MANIFEST"
+              # Public ECR answers 429 "Data limit exceeded" per runner IP
+              # (run 36345273390 died on manifest 30-odd of 113): back off
+              # instead of failing the whole cohort on one throttled read.
+              FETCHED=0
+              for WAIT in 0 20 60 120 240; do
+                sleep "$WAIT"
+                if docker buildx imagetools inspect --raw "$IMAGE_REF" > "$RAW_MANIFEST" 2>/tmp/inspect.err; then
+                  FETCHED=1; break
+                fi
+                echo "::warning title=manifest retry::${TASK} after ${WAIT}s: $(tail -1 /tmp/inspect.err)"
+              done
+              test "$FETCHED" = 1
             fi
             test -s "$RAW_MANIFEST"
             OBSERVED="$(sha256sum "$RAW_MANIFEST" | awk '{print $1}')"
