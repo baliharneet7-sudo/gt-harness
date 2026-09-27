@@ -154,10 +154,44 @@ def test_workflow_uses_one_pull_and_retains_image_by_id():
     ) in text
 
 
-def test_prewarm_requires_dense_work_before_the_provider():
+def test_prewarm_attempts_dense_work_before_the_provider():
     text = (ROOT / "benchmarks/swelive_harness/prewarm_graph.py").read_text(
         encoding="utf-8"
     )
     assert "embedding_budget_seconds=1800.0" in text
-    assert 'receipt.embedding_state != "refreshed"' in text
-    assert '"dense_ready_before_provider": True' in text
+    assert '"dense_ready_before_provider": dense_ready' in text
+
+
+def test_a_missed_dense_budget_or_graph_never_costs_the_task(tmp_path, monkeypatch):
+    """Run 36303715831 lost beancount__beancount-931: the graph built, the
+    10,007-document dense sidecar was estimated past its budget, the prewarm
+    raised, the install step failed and the agent never ran."""
+    import importlib.util
+    import json
+    from types import SimpleNamespace
+
+    spec = importlib.util.spec_from_file_location(
+        "prewarm_graph", ROOT / "benchmarks/swelive_harness/prewarm_graph.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GT_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("GT_TASK_ID", "t")
+    receipt_path = tmp_path / "pre-spend-graph.json"
+    monkeypatch.setenv("GT_PREWARM_RECEIPT", str(receipt_path))
+    monkeypatch.setattr(module, "capture_workspace", lambda *a, **k: SimpleNamespace(revision="r1"))
+    for graph_db, success, embedding, expected in (
+        ("g.db", True, "budget_insufficient", "graph_only"),
+        (None, False, "not_requested", "graph_unavailable"),
+        ("g.db", True, "refreshed", "ready"),
+    ):
+        fake = SimpleNamespace(
+            success=success, graph_db=graph_db, status="built" if success else "build_failed",
+            error_type="" if success else "x", error_diagnostic="",
+            embedding_state=embedding, embedding_failure_reason="planned=10007",
+        )
+        monkeypatch.setattr(module, "ensure_index_with_receipt", lambda *a, _f=fake, **k: _f)
+        assert module.main() == 0
+        written = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert written["status"] == expected
+        assert written["dense_ready_before_provider"] is (embedding == "refreshed")

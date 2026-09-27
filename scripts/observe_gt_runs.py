@@ -36,8 +36,11 @@ def _read(path: Path) -> dict[str, Any] | None:
 
 def _events(agent_dir: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    trial = agent_dir.parent
-    for path in sorted(trial.rglob("events.jsonl")):
+    # The runner tees one journal to agent/events.jsonl and keeps the original
+    # under agent/gt-state/<task>/; reading both double-counts every row.
+    primary = agent_dir / "events.jsonl"
+    paths = [primary] if primary.is_file() else sorted(agent_dir.parent.rglob("events.jsonl"))[:1]
+    for path in paths:
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 row = json.loads(line)
@@ -74,8 +77,16 @@ def observe_task(agent_dir: Path) -> dict[str, Any]:
     tool_rows = [row for row in events if row.get("event") == "gt_tool_call"]
     augment_rows = [row for row in events if row.get("event") == "gt_augment"]
     event_names = Counter(str(row.get("event")) for row in events)
+    unavailable = [row for row in events if row.get("event") == "index_unavailable"]
+    if event_names.get("initial_index_ready") or event_names.get("graph_publication"):
+        graph = "ready"
+    elif unavailable:
+        graph = "none: " + str(unavailable[0].get("error") or unavailable[0].get("error_type"))[:80]
+    else:
+        graph = "unknown"
     return {
         "task": _task_name(agent_dir),
+        "graph": graph,
         "report_present": bool(report),
         "reward": _reward(agent_dir),
         "mode": delivery.get("gt_delivery_mode"),
@@ -124,12 +135,12 @@ def feature_coverage(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def render(tasks: list[dict[str, Any]], coverage: dict[str, dict[str, Any]]) -> str:
-    lines = ["| task | reward | mode | valid | steps (limit) | gt tools | augment hit/calls | referenced | bytes |",
-             "|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| task | reward | graph | mode | valid | steps (limit) | gt tools | augment hit/calls | referenced | bytes |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for t in tasks:
         limit = t["effective_step_limit"]
         lines.append(
-            f"| {t['task']} | {t['reward']} | {t['mode']} | {t['treatment_valid']}"
+            f"| {t['task']} | {t['reward']} | {t['graph']} | {t['mode']} | {t['treatment_valid']}"
             f"{(' (' + t['invalid_reason'] + ')') if t['invalid_reason'] else ''} "
             f"| {t['steps']} ({limit}) | {t['tool_calls']} | {t['augment_hits']}/{t['augment_calls']} "
             f"| {t['referenced']}/{t['deliveries']} | {t['bytes_delivered']} |"

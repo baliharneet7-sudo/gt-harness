@@ -27,7 +27,7 @@ def main() -> int:
     source_revision = capture_workspace(
         workspace, excluded_roots=layout.excluded_roots
     ).revision
-    output = Path("/logs/agent/pre-spend-graph.json")
+    output = Path(os.environ.get("GT_PREWARM_RECEIPT", "/logs/agent/pre-spend-graph.json"))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(
@@ -55,14 +55,24 @@ def main() -> int:
         # The bound stays below Pier's 2,100-second setup watchdog.
         embedding_budget_seconds=1800.0,
     )
-    if not receipt.success or not receipt.graph_db:
-        raise RuntimeError(
-            "task-local graph prewarm failed: "
+    # Neither miss may cost the task. The runtime already runs a task whose
+    # graph is unavailable degraded-and-graded (an attached run is marked
+    # treatment-invalid, never killed), and hybrid retrieval re-ranks the
+    # lexical candidates with an on-demand dense index - it does not need this
+    # whole-repository sidecar. Aborting here lost beancount__beancount-931 in
+    # run 36303715831: the graph was built, 10,007 documents' dense sidecar
+    # was estimated at 2,382 s against an 1,800 s budget, the install step
+    # failed, and the agent never ran. Record the miss instead.
+    graph_ready = bool(receipt.success and receipt.graph_db)
+    dense_ready = receipt.embedding_state == "refreshed"
+    if not graph_ready:
+        print(
+            "[GT][WARNING] task-local graph prewarm did not build: "
             f"{receipt.error_type or receipt.status}: {receipt.error_diagnostic}"
         )
-    if receipt.embedding_state != "refreshed":
-        raise RuntimeError(
-            "task-local dense prewarm failed: "
+    elif not dense_ready:
+        print(
+            "[GT][WARNING] task-local dense sidecar not prewarmed: "
             f"{receipt.embedding_state}: {receipt.embedding_failure_reason}"
         )
     payload = asdict(receipt) if is_dataclass(receipt) else dict(vars(receipt))
@@ -73,9 +83,10 @@ def main() -> int:
             "workspace": str(workspace),
             "state_root": str(state_root),
             "source_revision": source_revision,
-            "ready_before_provider": True,
-            "dense_ready_before_provider": True,
-            "status": "ready",
+            "ready_before_provider": graph_ready,
+            "dense_ready_before_provider": dense_ready,
+            "dense_failure_reason": "" if dense_ready else str(receipt.embedding_failure_reason or receipt.embedding_state),
+            "status": "ready" if graph_ready and dense_ready else ("graph_only" if graph_ready else "graph_unavailable"),
         }
     )
     output.write_text(
