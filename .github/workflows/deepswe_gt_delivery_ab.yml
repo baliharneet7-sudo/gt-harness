@@ -449,32 +449,52 @@ jobs:
   mirror_plan:
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
     outputs:
       images: ${{ steps.images.outputs.images }}
+      missing: ${{ steps.images.outputs.missing }}
     steps:
-      - name: List the cohort's pinned task images
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: List the cohort's task images not yet in the GHCR cache
         id: images
         env:
           TASK_MATRIX: ${{ needs.plan.outputs.matrix }}
+          GHCR_TOKEN: ${{ github.token }}
+          MIRROR: ghcr.io/${{ github.repository_owner }}/deepswe-v1-1
         run: |
           set -euo pipefail
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/google/go-containerregistry/cmd/crane@v0.20.3
+          export CRANE="$RUNNER_TEMP/bin/crane"
+          "$CRANE" auth login ghcr.io -u "${{ github.actor }}" -p "$GHCR_TOKEN" >/dev/null
           python3 - <<'PY'
-          import json, os
+          import json, os, subprocess
           rows = json.loads(os.environ["TASK_MATRIX"])["include"]
           images = sorted({(row["container_image"], row["container_digest"]) for row in rows})
-          # Two independent jobs per image: a runner whose IP has exhausted
-          # public ECR's anonymous data quota never recovers on retry (run
-          # 36346438031's digest gate: five retries over 7 minutes, all
-          # "Data limit exceeded"), another runner usually has quota.
-          matrix = [{"image": image, "digest": digest, "attempt": attempt}
-                    for image, digest in images for attempt in (1,)]
+          # One job checks the whole cohort against the cache; copy jobs run
+          # only for images actually missing. Run 36359464192 spent 113 runner
+          # start-ups (~26 s each) confirming a cache that was already full.
+          missing = []
+          for image, digest in images:
+              got = subprocess.run([os.environ["CRANE"], "digest", f"{os.environ['MIRROR']}@{digest}"],
+                                   capture_output=True, text=True).stdout.strip()
+              if got != digest:
+                  missing.append({"image": image, "digest": digest, "attempt": 1})
+          print(f"{len(images) - len(missing)}/{len(images)} task images already cached")
+          matrix = missing or [{"image": "none", "digest": "none", "attempt": 0}]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write("images=" + json.dumps({"include": matrix}, separators=(",", ":")) + chr(10))
+              out.write(f"missing={len(missing)}" + chr(10))
           PY
 
   mirror:
     needs: mirror_plan
+    if: ${{ needs.mirror_plan.outputs.missing != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
