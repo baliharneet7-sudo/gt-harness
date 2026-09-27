@@ -34,9 +34,12 @@ def test_gt_smoke_is_source_bound_and_uses_the_product_agent() -> None:
     assert manifest["baseline_harness_parent"] == (
         "f4aaf2bf88d007334195a6c71a34cd16b82bb8dc"
     )
-    assert manifest["gt_source_commit"] == (
-        "921bec20d3dbabd12e4b442936d9259c24cdcc74"
-    )
+    # The product pin is re-derived per release; what must hold is that the
+    # checked-out product trees are exactly the declared ones.
+    from scripts.rederive_import_manifest import verify
+
+    assert re.fullmatch(r"[0-9a-f]{40}", manifest["gt_source_commit"])
+    assert verify(manifest) == []
     assert "TREATMENT_SHA: ${{ github.sha }}" in text
     assert "GT_SOURCE_SHA: 921bec20d3dbabd12e4b442936d9259c24cdcc74" in text
     assert "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent" in text

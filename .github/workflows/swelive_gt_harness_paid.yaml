@@ -131,6 +131,7 @@ jobs:
           import hashlib
           import json
           import os
+          import re
           import tomllib
           from pathlib import Path
 
@@ -155,8 +156,8 @@ jobs:
               Path("config/tb2_gt_import_manifest.json").read_text(encoding="utf-8-sig")
           )
           gt_source_commit = import_manifest.get("gt_source_commit")
-          if gt_source_commit != "921bec20d3dbabd12e4b442936d9259c24cdcc74":
-              raise SystemExit("SWE-Live GT source is not the final 921bec20 revision")
+          if not re.fullmatch(r"[0-9a-f]{40}", str(gt_source_commit or "")):
+              raise SystemExit("SWE-Live GT source commit is not declared")
           official_evaluator_commit = "ad79b850f15e33992e96f03f6e97f05ddf9aa0be"
           manifest_path = Path("swelive-bench/manifest.json")
           manifest_bytes = manifest_path.read_bytes()

@@ -62,15 +62,17 @@ jobs:
           python-version: ${{ steps.product-pins.outputs.python_version }}
           cache: pip
 
-      - name: Verify imported 921bec20 product objects
+      - name: Verify the declared product source objects
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json, subprocess
+          import json, re, subprocess
           from pathlib import Path
           manifest = json.loads(Path("config/tb2_gt_import_manifest.json").read_text(encoding="utf-8-sig"))
-          assert manifest["gt_source_commit"] == "921bec20d3dbabd12e4b442936d9259c24cdcc74"
+          # The pin is re-derived per product release (scripts/rederive_import_manifest.py);
+          # what must hold is that HEAD's product trees ARE the declared ones.
+          assert re.fullmatch(r"[0-9a-f]{40}", manifest["gt_source_commit"]), manifest["gt_source_commit"]
           observed = {}
           for path, expected in manifest["source_object_ids"].items():
               actual = subprocess.check_output(

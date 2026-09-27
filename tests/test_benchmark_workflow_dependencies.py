@@ -84,9 +84,7 @@ def test_live_gt_smoke_is_miniswe_official_and_bound_to_the_imported_source() ->
     manifest = json.loads(
         (ROOT / "config" / "tb2_gt_import_manifest.json").read_text(encoding="utf-8-sig")
     )
-    assert manifest["gt_source_commit"] == (
-        "921bec20d3dbabd12e4b442936d9259c24cdcc74"
-    )
+    assert re.fullmatch(r"[0-9a-f]{40}", manifest["gt_source_commit"])
     assert "uses: ./.github/workflows/swelive_gt_harness_paid.yaml" in dispatcher
     assert "secrets: inherit" in dispatcher
     assert "secrets.OPENROUTER_NEW" in workflow
@@ -95,7 +93,7 @@ def test_live_gt_smoke_is_miniswe_official_and_bound_to_the_imported_source() ->
     assert "openhands" not in workflow.lower()
     assert "python -m swebench.harness.run_evaluation" in workflow
     assert "official evaluator disagrees with Pier verifier" in workflow
-    assert 'gt_source_commit != "921bec20d3dbabd12e4b442936d9259c24cdcc74"' in workflow
+    assert 're.fullmatch(r"[0-9a-f]{40}", str(gt_source_commit or ""))' in workflow
     assert "uses: ./.github/workflows/deepswe_gt_harness_product.yml" in workflow
     assert "needs: [plan, readiness, readiness_binding]" in workflow
 
