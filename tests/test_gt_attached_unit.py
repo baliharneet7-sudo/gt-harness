@@ -524,3 +524,20 @@ def test_callees_are_located_at_their_definition_not_the_call_site():
     text = "\n".join(lines)
     assert "sh.py:3273" in text and "sh.py:141" not in text
     assert "tests/sh_test.py:1700" in text
+
+
+def test_attached_startup_graph_is_not_held_behind_the_dense_sidecar(monkeypatch):
+    """The graph is adopted only when the startup receipt lands, and the dense
+    refresh runs before it returns: SWE-Live beancount (run 36308182617) spent
+    its whole run graph-less behind a ~2,382 s embedding under the push-mode
+    bound of 35% of the wall budget."""
+    import importlib
+
+    from gt_engine.attached_delivery import ATTACHED, DELIVERY_MODE_ENV, PUSH
+
+    run = importlib.import_module("scripts.miniswe_gt_run")
+    monkeypatch.setenv(DELIVERY_MODE_ENV, ATTACHED)
+    assert run._startup_embedding_budget(10_500) == run.ATTACHED_STARTUP_EMBEDDING_BUDGET_SECONDS <= 120
+    monkeypatch.setenv(DELIVERY_MODE_ENV, PUSH)
+    assert run._startup_embedding_budget(10_500) == 0.35 * 10_500
+    assert run._startup_embedding_budget(None) is None

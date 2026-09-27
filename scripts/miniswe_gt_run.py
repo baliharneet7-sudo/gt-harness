@@ -691,6 +691,28 @@ def _templates() -> tuple[str, str]:
     return str(agent["system_template"]), str(agent["instance_template"])
 
 
+#: Attached delivery's bound on the whole-repository dense sidecar refresh the
+#: startup index runs before its receipt returns. The graph is adopted only
+#: when that receipt lands, so the push-mode bound (35% of the wall budget,
+#: ~3,675 s on SWE-Live) kept beancount__beancount-931 graph-less for its
+#: whole run (run 36308182617: 10,007 documents, ~2,382 s of CPU embedding,
+#: and the agent finished first). A plan estimated past this bound is skipped
+#: at once, nothing spent; retrieval re-ranks its candidates on demand.
+ATTACHED_STARTUP_EMBEDDING_BUDGET_SECONDS = 120.0
+
+
+def _startup_embedding_budget(wall_time_limit_seconds: float | None) -> float | None:
+    from gt_engine.attached_delivery import is_attached
+
+    if is_attached():
+        return ATTACHED_STARTUP_EMBEDDING_BUDGET_SECONDS
+    return (
+        0.35 * wall_time_limit_seconds
+        if wall_time_limit_seconds and wall_time_limit_seconds > 0
+        else None
+    )
+
+
 def _model_and_kwargs(model: str, temperature: float) -> tuple[str, dict]:
     """litellm-routable model id + kwargs for the configured gateway.
 
@@ -1139,11 +1161,7 @@ def build_agent(
             # the stale graph - which is correct: it becomes the certified
             # amend parent instead of being adopted as current.
             source_revision=adapter.repository_revision,
-            embedding_budget_seconds=(
-                0.35 * wall_time_limit_seconds
-                if wall_time_limit_seconds and wall_time_limit_seconds > 0
-                else None
-            ),
+            embedding_budget_seconds=_startup_embedding_budget(wall_time_limit_seconds),
         )
 
     def _finalize_startup(receipt) -> None:
