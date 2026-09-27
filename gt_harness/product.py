@@ -893,8 +893,31 @@ def _prove_container_install(bundle: Mapping[str, Any], *, bundle_dir: Path) -> 
             "digest": digest,
             "pull_attempts": 0,
         }
+    # A digest-addressed mirror (GT_IMAGE_MIRROR, e.g. the account's own GHCR
+    # copy made by `crane copy`, which preserves the manifest digest) serves
+    # the same bytes: pulling ``<mirror>@<digest>`` cannot yield a different
+    # image. It is tried before the public registry, whose anonymous per-IP
+    # rate and data limits are shared by every job on a GitHub runner IP.
+    mirror = os.environ.get("GT_IMAGE_MIRROR", "").strip().rstrip("/")
+    mirror_ref = f"{mirror}@{digest}" if mirror else ""
+    if cached.returncode != 0 and mirror_ref:
+        for command, source in (
+            (["docker", "image", "inspect", mirror_ref], "local_mirror_cache"),
+            (["docker", "pull", mirror_ref], "mirror_digest_pull"),
+        ):
+            try:
+                attempt = subprocess.run(
+                    command, capture_output=True, text=True, encoding="utf-8", timeout=900,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if attempt.returncode == 0:
+                image_ref, image_source = mirror_ref, source
+                break
     if cached.returncode == 0:
         image_source = "local_digest_cache"
+        pull_return_code = 0
+    elif image_ref == mirror_ref and mirror_ref:
         pull_return_code = 0
     else:
         # Public ECR throttles anonymous pulls per source IP, and GitHub-hosted

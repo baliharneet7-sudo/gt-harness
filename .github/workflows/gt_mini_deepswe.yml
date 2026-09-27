@@ -90,8 +90,85 @@ jobs:
           fi
           echo "tasks=$REST15" >> "$GITHUB_OUTPUT"
 
-  gt_on:
+  mirror_plan:
     needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      images: ${{ steps.images.outputs.images }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Map the stage's tasks to their pinned images
+        id: images
+        env:
+          TASKS: ${{ needs.gate.outputs.tasks }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          catalog = json.load(open("config/deepswe_task_catalog_v1.json", encoding="utf-8"))
+          rows = {row["task_id"]: row for row in catalog["tasks"]}
+          # abs-module-cache-flags's image is also the readiness fixture image.
+          wanted = [t for t in os.environ["TASKS"].split(",") if t] + ["abs-module-cache-flags"]
+          images = sorted({(rows[t]["container_image"], rows[t]["container_digest"]) for t in wanted})
+          matrix = [{"image": image, "digest": digest} for image, digest in images]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("images=" + json.dumps({"include": matrix}, separators=(",", ":")) + chr(10))
+          PY
+
+  mirror:
+    # Copy each image into this account's GHCR by digest. crane copy keeps the
+    # manifest bytes, so <mirror>@<digest> is the identical image; readiness,
+    # the digest gate and every task pull read it before public ECR, whose
+    # anonymous per-IP rate and data limits a shared runner IP may have used
+    # up ("toomanyrequests: Data limit exceeded"). Already-mirrored digests
+    # are skipped. A failure here warns - consumers still fall back to ECR.
+    needs: mirror_plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.mirror_plan.outputs.images) }}
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Mirror the image by digest
+        env:
+          SRC_IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ matrix.digest }}
+          GHCR_TOKEN: ${{ github.token }}
+          MIRROR: ghcr.io/${{ github.repository_owner }}/deepswe-v1-1
+        run: |
+          set -uo pipefail
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/google/go-containerregistry/cmd/crane@v0.20.3
+          crane="$RUNNER_TEMP/bin/crane"
+          "$crane" auth login ghcr.io -u "${{ github.actor }}" -p "$GHCR_TOKEN"
+          if [ "$("$crane" digest "${MIRROR}@${DIGEST}" 2>/dev/null)" = "$DIGEST" ]; then
+            echo "already mirrored: ${MIRROR}@${DIGEST}"; exit 0
+          fi
+          TAG="${SRC_IMAGE##*:}"
+          for delay in 0 60 120 240 480; do
+            sleep "$delay"
+            if "$crane" copy "${SRC_IMAGE}@${DIGEST}" "${MIRROR}:${TAG}"; then
+              got="$("$crane" digest "${MIRROR}@${DIGEST}")"
+              if [ "$got" = "$DIGEST" ]; then echo "mirrored ${MIRROR}@${DIGEST}"; exit 0; fi
+              echo "::error title=Mirror digest::copied ${TAG} but mirror reports ${got}"; exit 1
+            fi
+            echo "::warning title=Mirror copy::${SRC_IMAGE} retry after ${delay}s"
+          done
+          echo "::error title=Mirror copy::${SRC_IMAGE}@${DIGEST} could not be copied"; exit 1
+
+  gt_on:
+    needs: [gate, mirror]
+    # A failed mirror leaves ECR as the (throttle-prone) fallback; say so in
+    # the mirror job, but still run.
+    if: ${{ always() && needs.gate.result == 'success' }}
     uses: ./.github/workflows/deepswe_gt_delivery_ab.yml
     secrets: inherit
     with:

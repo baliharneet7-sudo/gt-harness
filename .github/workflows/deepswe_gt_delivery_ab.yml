@@ -457,6 +457,11 @@ jobs:
       - name: Verify every exact task-image manifest without provider access
         run: |
           set -euo pipefail
+          # The raw manifest must hash to the pinned digest wherever it is
+          # read from: the account's digest mirror (same bytes) first, then
+          # public ECR, whose anonymous limits a runner IP may have exhausted.
+          if ! printf '%s' "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin; then echo "::warning title=GHCR mirror::login failed; public registry only"; fi
+          MIRROR="ghcr.io/${{ github.repository_owner }}/deepswe-v1-1"
           printf '%s' "$TASK_MATRIX" | jq -c '[.include[] | {task, container_image, container_digest}] | unique | .[]' | while read -r TASK_ROW; do
             TASK="$(printf '%s' "$TASK_ROW" | jq -r '.task')"
             IMAGE="$(printf '%s' "$TASK_ROW" | jq -r '.container_image')"
@@ -465,7 +470,9 @@ jobs:
             printf '%s' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
             IMAGE_REF="${IMAGE}@${DIGEST}"
             RAW_MANIFEST="$(mktemp)"
-            docker buildx imagetools inspect --raw "$IMAGE_REF" > "$RAW_MANIFEST"
+            if ! docker buildx imagetools inspect --raw "${MIRROR}@${DIGEST}" > "$RAW_MANIFEST" 2>/dev/null; then
+              docker buildx imagetools inspect --raw "$IMAGE_REF" > "$RAW_MANIFEST"
+            fi
             test -s "$RAW_MANIFEST"
             OBSERVED="$(sha256sum "$RAW_MANIFEST" | awk '{print $1}')"
             test "sha256:${OBSERVED}" = "${DIGEST}"
@@ -675,17 +682,27 @@ jobs:
           SOURCE_DIGEST: ${{ matrix.container_digest }}
         run: |
           set -euo pipefail
-          # Public ECR throttles anonymous pulls per runner IP (a shared pool).
-          # A throttle clears in minutes; retry before calling the task lost.
-          pulled=0
-          for delay in 0 30 60 120 240; do
-            sleep "$delay"
-            if docker pull "${SOURCE_IMAGE}@${SOURCE_DIGEST}"; then pulled=1; break; fi
-            echo "::warning title=Task image pull::retrying after ${delay}s backoff"
-          done
-          test "$pulled" = 1
-          docker image inspect "${SOURCE_IMAGE}@${SOURCE_DIGEST}" >/dev/null
-          docker tag "${SOURCE_IMAGE}@${SOURCE_DIGEST}" "$SOURCE_IMAGE"
+          # The account's digest mirror first (crane copy preserves the
+          # manifest digest, so <mirror>@<digest> is the same image); public
+          # ECR, whose anonymous per-IP rate and data limits a shared runner
+          # IP may have exhausted, only as the fallback, with backoff.
+          MIRROR_REF="ghcr.io/${{ github.repository_owner }}/deepswe-v1-1@${SOURCE_DIGEST}"
+          if ! printf '%s' "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin; then echo "::warning title=GHCR mirror::login failed; public registry only"; fi
+          if docker pull "$MIRROR_REF"; then
+            REF="$MIRROR_REF"
+          else
+            REF="${SOURCE_IMAGE}@${SOURCE_DIGEST}"
+            pulled=0
+            for delay in 0 30 60 120 240; do
+              sleep "$delay"
+              if docker pull "$REF"; then pulled=1; break; fi
+              echo "::warning title=Task image pull::retrying after ${delay}s backoff"
+            done
+            test "$pulled" = 1
+          fi
+          echo "::notice title=Task image source::${REF%@*}"
+          docker image inspect "$REF" >/dev/null
+          docker tag "$REF" "$SOURCE_IMAGE"
           docker image inspect "$SOURCE_IMAGE" >/dev/null
 
       - name: Stage the verified uv installer for the task container

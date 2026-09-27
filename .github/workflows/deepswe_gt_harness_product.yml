@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   provider-free-product:
@@ -222,6 +223,16 @@ jobs:
             chmod +x .githooks/pre-commit
           fi
 
+      - name: Log in to this account's GHCR image mirror
+        # The DeepSWE images are mirrored by digest (crane copy preserves the
+        # manifest digest) into ghcr.io/<owner>/deepswe-v1-1. Public ECR's
+        # anonymous per-IP rate and data limits are shared by every job on a
+        # GitHub runner IP; the mirror is not. A missing mirror is not fatal.
+        continue-on-error: true
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Restore the exact DeepSWE task image cache
         id: restore-task-image
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
@@ -237,12 +248,16 @@ jobs:
             docker load
           # `docker save` of a digest reference may restore only an image ID.
           # Re-fetch the immutable manifest so Docker binds that cached layer set
-          # to the exact repository digest before any container can start.
-          docker pull \
-            'public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1@sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1'
-          docker image inspect \
-            'public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1@sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1' \
-            >/dev/null
+          # to an exact repository digest before any container can start: the
+          # account's digest mirror first, then public ECR (whose anonymous
+          # limits a shared runner IP may already have exhausted).
+          MIRROR_REF="ghcr.io/${{ github.repository_owner }}/deepswe-v1-1@sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1"
+          if docker pull "$MIRROR_REF"; then
+            docker image inspect "$MIRROR_REF" >/dev/null
+          else
+            docker pull 'public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1@sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1'
+            docker image inspect 'public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1@sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1' >/dev/null
+          fi
 
       - name: Install the frozen provider-free test surface
         run: |
@@ -320,6 +335,8 @@ jobs:
           python -c "import json; from pathlib import Path; p=json.loads(Path('artifacts/a21-preflight/har81-a21-content-measurement.json').read_text()); assert p['schema'] == 'gt.recorded_content_measurement.v3'; assert p['provider_calls'] == 0; assert p['run_count'] == 3; assert p['renderer_provenance_match_count'] == 3; assert p['delivery_count'] == 12; assert p['payload_match_count'] == 12; assert p['historical_adjudication_count'] == 5; assert p['mismatch_count'] == 0; assert p['attestation_match_count'] == p['delivery_count']; assert set(p['mutation_cases'].values()) == {'FAIL_AS_DESIGNED'}; assert p['status'] == 'PASS'"
 
       - name: Run deterministic bare and Groundtruth arms
+        env:
+          GT_IMAGE_MIRROR: ghcr.io/${{ github.repository_owner }}/deepswe-v1-1
         run: |
           set -euo pipefail
           python scripts/gt_product_acceptance.py \
@@ -334,6 +351,9 @@ jobs:
         run: |
           set -euo pipefail
           IMAGE_REF='public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1@sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1'
+          if ! docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
+            IMAGE_REF="ghcr.io/${{ github.repository_owner }}/deepswe-v1-1@sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1"
+          fi
           IMAGE_SIZE="$(docker image inspect --format '{{.Size}}' "${IMAGE_REF}")"
           if [ "${IMAGE_SIZE}" -gt 4000000000 ]; then
             echo "Exact task image exceeds the 4 GB cache safety limit; cache not written."

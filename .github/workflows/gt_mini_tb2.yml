@@ -85,8 +85,57 @@ jobs:
           fi
           echo "tasks=$REST15" >> "$GITHUB_OUTPUT"
 
-  gt_on:
+  mirror:
+    # Readiness (the provider-free product proof every benchmark runs first)
+    # starts one DeepSWE fixture container. Copy that image into this
+    # account's GHCR by digest so readiness never depends on public ECR's
+    # anonymous per-IP limits. Skipped when already mirrored.
     needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1
+            digest: "sha256:3a4d47f5281269305343c83729836ac2f3172811aee72681e472a4196178eda1"
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Mirror the image by digest
+        env:
+          SRC_IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ matrix.digest }}
+          GHCR_TOKEN: ${{ github.token }}
+          MIRROR: ghcr.io/${{ github.repository_owner }}/deepswe-v1-1
+        run: |
+          set -uo pipefail
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/google/go-containerregistry/cmd/crane@v0.20.3
+          crane="$RUNNER_TEMP/bin/crane"
+          "$crane" auth login ghcr.io -u "${{ github.actor }}" -p "$GHCR_TOKEN"
+          if [ "$("$crane" digest "${MIRROR}@${DIGEST}" 2>/dev/null)" = "$DIGEST" ]; then
+            echo "already mirrored: ${MIRROR}@${DIGEST}"; exit 0
+          fi
+          TAG="${SRC_IMAGE##*:}"
+          for delay in 0 60 120 240 480; do
+            sleep "$delay"
+            if "$crane" copy "${SRC_IMAGE}@${DIGEST}" "${MIRROR}:${TAG}"; then
+              got="$("$crane" digest "${MIRROR}@${DIGEST}")"
+              if [ "$got" = "$DIGEST" ]; then echo "mirrored ${MIRROR}@${DIGEST}"; exit 0; fi
+              echo "::error title=Mirror digest::copied ${TAG} but mirror reports ${got}"; exit 1
+            fi
+            echo "::warning title=Mirror copy::${SRC_IMAGE} retry after ${delay}s"
+          done
+          echo "::error title=Mirror copy::${SRC_IMAGE}@${DIGEST} could not be copied"; exit 1
+
+  gt_on:
+    needs: [gate, mirror]
+    # A failed mirror leaves ECR as the fallback; still run.
+    if: ${{ always() && needs.gate.result == 'success' }}
     uses: ./.github/workflows/tb2_miniswe_central.yml
     secrets: inherit
     with:

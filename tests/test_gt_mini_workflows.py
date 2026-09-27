@@ -45,7 +45,8 @@ def test_runs_gt_on_five_at_a_time_through_the_certified_pipeline(name: str) -> 
     job = workflow["jobs"]["gt_on"]
     assert job["uses"] == MINIS[name]
     assert job["secrets"] == "inherit"
-    assert job["needs"] == "gate"
+    needs = job["needs"] if isinstance(job["needs"], list) else [job["needs"]]
+    assert "gate" in needs
     assert job["with"]["max_parallel"] == "5"
     assert "gt_off" not in text
 
@@ -74,3 +75,32 @@ def test_task_sets_resolve_against_the_pinned_catalogs() -> None:
         assert set(first5 + rest15) <= universe, name
     # TB2's subset stage draws only from repair20, and the mini set IS repair20.
     assert set(sum(_sets(_load("gt_mini_tb2.yml")[0]), [])) == repair20
+
+
+def test_deepswe_mirrors_each_stage_image_by_digest_before_running(tmp_path, monkeypatch) -> None:
+    """Public ECR's anonymous per-IP limits ("Data limit exceeded") must not
+    decide a run: the stage's images are copied into the account's GHCR by
+    digest first, and the plan step maps tasks to the exact pinned digests."""
+    import os
+    import subprocess
+    import sys
+
+    text, workflow = _load("gt_mini_deepswe.yml")
+    assert workflow["jobs"]["gt_on"]["needs"] == ["gate", "mirror"]
+    mirror = workflow["jobs"]["mirror"]
+    assert mirror["permissions"]["packages"] == "write"
+    run = mirror["steps"][-1]["run"]
+    assert 'crane" copy "${SRC_IMAGE}@${DIGEST}"' in run
+    assert '[ "$got" = "$DIGEST" ]' in run
+    script = workflow["jobs"]["mirror_plan"]["steps"][-1]["run"]
+    body = script.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    output = tmp_path / "out"
+    first5, _ = _sets(text)
+    env = {**os.environ, "TASKS": ",".join(first5), "GITHUB_OUTPUT": str(output)}
+    subprocess.run([sys.executable, "-c", __import__("textwrap").dedent(body)],
+                   cwd=ROOT, env=env, check=True)
+    matrix = json.loads(output.read_text(encoding="utf-8").split("images=", 1)[1])
+    catalog = {row["task_id"]: row for row in json.loads(
+        (ROOT / "config" / "deepswe_task_catalog_v1.json").read_text(encoding="utf-8"))["tasks"]}
+    expected = {(catalog[t]["container_image"], catalog[t]["container_digest"]) for t in first5}
+    assert {(row["image"], row["digest"]) for row in matrix["include"]} == expected

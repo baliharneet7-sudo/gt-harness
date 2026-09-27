@@ -63,6 +63,46 @@ def test_container_install_reuses_exact_digest_image_without_registry_pull(
     assert not any(command[:2] == ["docker", "pull"] for command in calls)
 
 
+def test_container_install_uses_the_digest_mirror_before_the_public_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A throttled public registry (ECR: toomanyrequests / data limit) must not
+    fail readiness when the account's digest-identical mirror holds the image."""
+    wheel = tmp_path / "dist" / "product.whl"
+    wheel.parent.mkdir()
+    wheel.write_bytes(b"wheel")
+    image = "public.ecr.aws/x/task:fixed"
+    digest = "sha256:" + "c" * 64
+    mirror = "ghcr.io/acct/deepswe-v1-1"
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="no such image")
+        if command == ["docker", "pull", f"{mirror}@{digest}"]:
+            return subprocess.CompletedProcess(command, 0, stdout="pulled", stderr="")
+        if command[:2] == ["docker", "run"]:
+            assert f"{mirror}@{digest}" in command
+            return subprocess.CompletedProcess(command, 0, stdout="installed-product-ok", stderr="")
+        raise AssertionError(f"public registry must not be touched: {command}")
+
+    monkeypatch.setenv("GT_IMAGE_MIRROR", mirror)
+    monkeypatch.setattr("gt_harness.product.subprocess.run", fake_run)
+    proof = _prove_container_install(
+        {
+            "python_wheel": {"filename": wheel.name, "sha256": "b" * 64},
+            "tasks": [{"container_image": image, "container_digest": digest}],
+        },
+        bundle_dir=tmp_path,
+    )
+
+    assert proof["status"] == "VERIFIED"
+    assert proof["image_source"] == "mirror_digest_pull"
+    assert proof["digest"] == digest
+    assert not any(command[:2] == ["docker", "pull"] and command[2].startswith(image) for command in calls)
+
+
 def test_operator_entrypoint_is_direct_script_reachable_outside_checkout(
     tmp_path: Path,
 ) -> None:
