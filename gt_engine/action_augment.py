@@ -296,6 +296,14 @@ class Relocator:
         self._maps[path] = mapping
         return mapping
 
+    def to_indexed(self, path: str, line: int) -> int | None:
+        """Current-file line -> the line of the indexed text (None if rewritten)."""
+        mapping = self._map(path)
+        if mapping is None:
+            return line
+        reverse = {new: old for old, new in mapping.items()}
+        return reverse.get(line)
+
     def rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out = []
         for row in rows:
@@ -572,6 +580,24 @@ class ActionAugmenter:
 
     # -- failing test runs ---------------------------------------------------
 
+    def _resolve(self, conn: sqlite3.Connection, root: Path, path: str, output: str) -> str:
+        """A runner-printed path -> the indexed repo path.
+
+        ``go test`` prints bare file names (``modules_test.go:45``); live
+        DeepSWE abs tasks (run 36348029093) got failure blocks with no
+        location because a bare name never matched the graph. A unique
+        indexed path ending in it wins; among several, the one whose
+        directory the output names (``FAIL github.com/x/y/evaluator``)."""
+        if (root / path).is_file() or "/" in path:
+            return path
+        rows = [r[0] for r in conn.execute(
+            "SELECT file_path FROM file_hashes WHERE file_path = ? OR file_path LIKE ?",
+            (path, "%/" + path))]
+        if len(rows) == 1:
+            return rows[0]
+        named = [row for row in rows if row.rsplit("/", 2)[-2:][0] in output]
+        return named[0] if len(named) == 1 else path
+
     def after_failure(self, command: str, output: str, returncode: int | None,
                       test_outcome: str = "") -> str:
         """``test_outcome`` is the runtime's parsed outcome of the run
@@ -589,8 +615,9 @@ class ActionAugmenter:
             try:
                 lines = ["[GT] about this failure:"]
                 frames = failure_frames(output, self._repo_root())
-                lines += self._location_lines(frames)
-                lines += self._repeat_lines(output, frames)
+                located = self._location_lines(frames, output)
+                lines += located
+                lines += self._repeat_lines(output, frames, bool(located))
             except Exception as exc:  # noqa: BLE001 - enrichment is silent on failure
                 self.metrics.errors += 1
                 self._journal(kind="failure", outcome=f"error:{type(exc).__name__}")
@@ -600,7 +627,7 @@ class ActionAugmenter:
                 self.metrics.failure_hits += 1
             return text
 
-    def _location_lines(self, frames: list[tuple[str, int]]) -> list[str]:
+    def _location_lines(self, frames: list[tuple[str, int]], output: str = "") -> list[str]:
         if not frames:
             return []
         # Failures usually follow edits, and attached delivery leaves the
@@ -614,14 +641,21 @@ class ActionAugmenter:
         root = Path(self._repo_root())
         try:
             located: list[tuple[str, int, str, int, Any]] = []
-            for path, line in frames:
+            relocator = Relocator(conn, root, self._preimages)
+            for printed, line in frames:
+                path = self._resolve(conn, root, printed, output)
                 if _indexed_as_on_disk(conn, root, path):
                     enclosing = _enclosing_function(conn, path, line)
                 elif path.endswith(".py"):
                     found = _python_enclosing(root / path, line)
                     enclosing = (*found, None) if found else None
                 else:
-                    enclosing = None
+                    # An edited non-Python file: find the function on the
+                    # indexed text through the diff; no stored-CFG slice,
+                    # since the persisted CFG describes the old body.
+                    indexed_line = relocator.to_indexed(path, line)
+                    found = _enclosing_function(conn, path, indexed_line) if indexed_line else None
+                    enclosing = (found[0], found[1], None) if found else None
                 if enclosing is not None:
                     located.append((path, line, *enclosing))
             if not located:
@@ -677,7 +711,7 @@ class ActionAugmenter:
         rows = [f"    {path}:{n}: {_source_line(self.session, path, n)}" for n in numbers]
         return [f"  line {line} depends on (backward slice; control + data):", *rows]
 
-    def _repeat_lines(self, output: str, frames: list[tuple[str, int]]) -> list[str]:
+    def _repeat_lines(self, output: str, frames: list[tuple[str, int]], located: bool = True) -> list[str]:
         signature = _failure_signature(output, frames)
         if not signature:
             return []
@@ -687,8 +721,8 @@ class ActionAugmenter:
         if previous is None or previous == epoch:
             return []
         self.metrics.note("F20")
-        return ["  same failure as before your last edit(s): the change did not reach"
-                " this path; re-check the location above"]
+        where = "re-check the location above" if located else "re-check where the failing assertion reads its value"
+        return [f"  same failure as before your last edit(s): the change did not reach this path; {where}"]
 
 
 __all__ = [

@@ -325,3 +325,14 @@ def test_a_name_that_is_not_a_definition_shows_where_it_is_used(polyglot_session
     block = GrepAugmenter(polyglot_session[0]).augment('grep -rn "rate" pyapp')
     assert "rate (not a definition) is used in: apply_tax (pyapp/helpers.py:9, data flow)" in block, block
     assert "next: `gt-impact apply_tax`" in block
+
+
+def test_go_test_output_with_bare_file_names_is_located_and_sliced(polyglot_session):
+    # `go test` prints `main_test.go:15:` without the package directory; live
+    # DeepSWE abs tasks got failure blocks with no location because of it.
+    session, _adapter = polyglot_session
+    output = ("--- FAIL: TestGreet (0.00s)\n"
+              "    main_test.go:16: Greet(ada) = \"hi  ada\", want \"hi ada\"\n"
+              "FAIL\nFAIL\texample.com/gosvc\t0.004s\n")
+    block = ActionAugmenter(session).after_failure("go test ./...", output, 1, "fail")
+    assert "failing test: TestGreet (gosvc/main_test.go:16)" in block, block
