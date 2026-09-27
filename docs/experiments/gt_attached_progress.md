@@ -93,6 +93,16 @@ Evidence: every delivered `[GT]` block parsed from the trajectories (`scripts/de
 - GT infra: aiomonitor startup index failed 3x "producer input superseded before publication" (edits during indexing) -> treatment invalid.
 - Fixed (round 4): non-blocking passive reads (StaleView, hash-verified), edit block on the pre-edit graph + cumulative pre-image mapping, parsed-outcome failure trigger, graph-free Python slice, call-graph sink reach, F11 in the plan, empty plan withheld.
 
+## Round 5: offline replay gate + fixes found with it (b39b0b3c)
+- `scripts/replay_attached.py`: replays a recorded task through current code (no model/container). Pre-launch gate from now on.
+- SWE-Live sitecustomize leaked into the agent's Python (PYTHONPATH inherited): "No module named 'groundtruth'" 18-124x per task on every SWE-Live task of rounds 2-3. Fixed (hook is a no-op outside GT's interpreter).
+- Startup graph discarded as "superseded" when the agent edited during a frozen build (aiomonitor: no graph). Fixed in `_publish_candidate(frozen_input=True)`.
+- Grep fallback for non-definition names from `properties_fts` (F3/F15); resolution mix line (F5/F6/F7 explicit); edit blocks for class-body edits, added definitions, test edits; slices via persisted CFG for non-Python; plan carries F11.
+- DeepSWE image digest gate: backoff on public ECR 429 (run 36345273390 died there).
+- Replay on the round-3 trajectories: features per code task 6-12 -> 6-17; GT time 104-1,121 s -> 2-5 s per task.
+- Full runs relaunched on b39b0b3c: DeepSWE all 36346438031, TB2 full-89 36346440397, SWE-Live 1/2 36346442578, 2/2 36346444850.
+- Open: F6 never reached (callable_value edges rarely touch searched symbols); `_CATALOG_NOISE_RE` drops security requirement lines (shared with the push contract, not changed); startup `initial_index_ready.elapsed_ms` is always 0.
+
 ## Log
 - 2026-09-27: round 3 landed (44af8b6d, pin ee20bb8e) on all three accounts; SWE-Live first5 @5994b3ef 5/5 solved, red only on the cfn-lint amend refusal; stale DeepSWE rest15 @09ae8ff4 (queued for hours) cancelled.
 - 2026-09-27: GT-on on 3 accounts x 3 benchmarks landed (54822a6b); producer 93e2e86e (mcp 2 import) certified + vendored (ab159952, pin 2dcfbb88); pushed to all three accounts.
