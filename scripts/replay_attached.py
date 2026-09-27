@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def _load_events(agent_dir: Path) -> list[dict[str, Any]]:
@@ -66,40 +67,50 @@ def _initial_graph(agent_dir: Path, events: list[dict[str, Any]]) -> Path | None
 
 
 def rebuild_workspace(agent_dir: Path, graph: Path, tx: dict[int, dict[str, Any]], dest: Path) -> dict[str, int]:
-    """Base-revision workspace; returns hash-check counts against the graph."""
-    sources = sorted(agent_dir.glob("gt-state/*/enrichments/*/source"),
-                     key=lambda p: sum(1 for _ in p.rglob("*")), reverse=True)
-    if sources:
-        shutil.copytree(sources[0], dest, dirs_exist_ok=True)
-    dest.mkdir(parents=True, exist_ok=True)
-    restored: set[str] = set()
-    for action in sorted(tx):
-        for change in tx[action]["changes"]:
-            path = str(change["path"])
-            if path in restored:
-                continue
-            restored.add(path)
-            target = dest / path
-            before = _content(change.get("before_content_hex"))
-            if before is None:
-                if target.exists():
-                    target.unlink()
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(before)
+    """Base-revision workspace; returns hash-check counts against the graph.
+
+    Every recorded source snapshot (LSP enrichments are taken at different
+    revisions) and every edit pre-image is a candidate version of a file;
+    for each file the graph indexed, the candidate whose bytes hash to the
+    graph's ``file_hashes`` entry is the base content."""
     conn = sqlite3.connect(graph.resolve().as_uri() + "?mode=ro", uri=True)
-    counts = {"match": 0, "mismatch": 0, "missing": 0}
     try:
-        for path, digest in conn.execute("SELECT file_path, content_hash FROM file_hashes"):
-            target = dest / path
-            if not target.is_file():
-                counts["missing"] += 1
-            elif hashlib.sha256(target.read_bytes()).hexdigest() == digest:
-                counts["match"] += 1
-            else:
-                counts["mismatch"] += 1
+        indexed = dict(conn.execute("SELECT file_path, content_hash FROM file_hashes"))
     finally:
         conn.close()
+    sources = sorted(agent_dir.glob("gt-state/*/enrichments/*/source"), key=lambda p: p.stat().st_mtime)
+    dest.mkdir(parents=True, exist_ok=True)
+    if sources:
+        shutil.copytree(sources[0], dest, dirs_exist_ok=True)
+    preimages: dict[str, list[bytes]] = {}
+    for action in sorted(tx):
+        for change in tx[action]["changes"]:
+            before = _content(change.get("before_content_hex"))
+            if before is not None:
+                preimages.setdefault(str(change["path"]), []).append(before)
+    counts = {"match": 0, "mismatch": 0, "missing": 0}
+    for path, digest in indexed.items():
+        candidates = list(preimages.get(path, []))
+        for source in sources:
+            candidate = source / path
+            if candidate.is_file():
+                candidates.append(candidate.read_bytes())
+        chosen = next((data for data in candidates if hashlib.sha256(data).hexdigest() == digest), None)
+        target = dest / path
+        if chosen is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(chosen)
+            counts["match"] += 1
+        elif target.is_file():
+            counts["mismatch"] += 1
+        else:
+            counts["missing"] += 1
+    # Files the agent created later must not exist at base.
+    created = {str(c["path"]) for t in tx.values() for c in t["changes"]
+               if _content(c.get("before_content_hex")) is None}
+    for path in created:
+        if path not in indexed and (dest / path).is_file():
+            (dest / path).unlink()
     return counts
 
 
@@ -126,7 +137,7 @@ def _actions(agent_dir: Path) -> list[dict[str, Any]]:
     return actions
 
 
-def replay(agent_dir: Path, *, workdir: Path) -> dict[str, Any]:
+def replay(agent_dir: Path, *, workdir: Path, audit: bool = False) -> dict[str, Any]:
     from gt_engine.attached_delivery import ATTACHED, DELIVERY_MODE_ENV, AttachedDelivery
     from gt_engine.engine_state import RuntimeLayout
     from gt_engine.gt_session import GTSession, GTSessionConfig
@@ -167,6 +178,8 @@ def replay(agent_dir: Path, *, workdir: Path) -> dict[str, Any]:
     outcomes = {int(r.get("action_id") or 0): str(r.get("observed_test_outcome") or "")
                 for r in events if r.get("event") == "execution_evidence"}
     slow: list[tuple[int, str, float]] = []
+    from audit_delivered import Audit, audit_output
+    checks = Audit()
     blocks: dict[str, int] = {}
     for index, action in enumerate(_actions(agent_dir), start=1):
         facts: dict[str, Any] = {"returncode": action["returncode"], "output": action["output"],
@@ -197,6 +210,8 @@ def replay(agent_dir: Path, *, workdir: Path) -> dict[str, Any]:
         out = delivery.observe_turn([action["command"]], [{"output": action["output"]}], [facts])
         elapsed = time.perf_counter() - started
         text = str(out[0].get("output") or "")
+        if audit:
+            audit_output(text[len(action['output']):], root, checks)
         for head in ("[GT] task plan", "[GT] graph context", "[GT] after your edit", "[GT] about this failure"):
             if head in text:
                 blocks[head[5:]] = blocks.get(head[5:], 0) + 1
@@ -219,6 +234,7 @@ def replay(agent_dir: Path, *, workdir: Path) -> dict[str, Any]:
         "gt_seconds": round(metrics.get("augment_time_s", 0) + metrics.get("action_augment_time_s", 0), 1),
         "slow_actions": slow[:8],
         "errors": metrics.get("augment_errors", 0) + metrics.get("action_augment_errors", 0),
+        **({"audit": checks.as_dict()} if audit else {}),
     }
 
 
@@ -227,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, action="append", required=True)
     parser.add_argument("--task", default="", help="substring filter on the task directory")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--audit", action="store_true", help="check every delivered claim against the workspace")
     args = parser.parse_args(argv)
     results = []
     for root in args.root:
@@ -236,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             with tempfile.TemporaryDirectory(prefix="gt-replay-", ignore_cleanup_errors=True) as tmp:
                 try:
-                    result = replay(agent_dir, workdir=Path(tmp))
+                    result = replay(agent_dir, workdir=Path(tmp), audit=args.audit)
                 except Exception as exc:  # noqa: BLE001 - one task's failure is reported, not fatal
                     result = {"task": agent_dir.parent.name.split("__")[0],
                               "replay_error": f"{type(exc).__name__}: {exc}"[:300]}

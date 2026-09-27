@@ -250,6 +250,65 @@ def _stored_slice(conn: sqlite3.Connection, path: Path, node_id: Any, name: str,
     except Exception:  # noqa: BLE001 - no persisted CFG / no statement at that line
         return []
 
+class Relocator:
+    """Pre-edit graph lines -> the file as the agent sees it now.
+
+    The edit block reads the graph from before the edit; a caller in a file
+    that changed since (this edit or an earlier one) has shifted. Replay
+    audit of runs 36336*: 11 of 16 "is called by" locations pointed at the
+    wrong line of the just-edited file. Lines map through the diff between
+    the text the graph indexed and the current text; a line that was itself
+    rewritten maps to no line, and the row says "edited since"."""
+
+    def __init__(self, conn: sqlite3.Connection, root: Path,
+                 preimages: Callable[[], Mapping[str, str]]):
+        self.conn = conn
+        self.root = root
+        self._preimages = preimages
+        self._recorded: Mapping[str, str] | None = None
+        self._maps: dict[str, dict[int, int] | None] = {}
+
+    def _map(self, path: str) -> dict[int, int] | None:
+        """None: file unchanged since indexing (identity)."""
+        if path in self._maps:
+            return self._maps[path]
+        import difflib
+
+        row = self.conn.execute("SELECT content_hash FROM file_hashes WHERE file_path = ?", (path,)).fetchone()
+        try:
+            current = (self.root / path).read_bytes()
+        except OSError:
+            current = None
+        if row is None or current is None or row[0] == hashlib.sha256(current).hexdigest():
+            self._maps[path] = None
+            return None
+        if self._recorded is None:
+            self._recorded = self._preimages()
+        baseline = self._recorded.get(path)
+        mapping: dict[int, int] = {}
+        if baseline is not None and hashlib.sha256(baseline.encode("utf-8")).hexdigest() == row[0]:
+            matcher = difflib.SequenceMatcher(
+                a=baseline.splitlines(), b=current.decode("utf-8", "replace").splitlines(), autojunk=False)
+            for tag, i1, i2, j1, _j2 in matcher.get_opcodes():
+                if tag == "equal":
+                    for offset in range(i2 - i1):
+                        mapping[i1 + offset + 1] = j1 + offset + 1
+        self._maps[path] = mapping
+        return mapping
+
+    def rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for row in rows:
+            mapping = self._map(str(row.get("file_path") or ""))
+            if mapping is None:
+                out.append(row)
+                continue
+            key = "call_line" if row.get("call_line") else "line"
+            moved = mapping.get(int(row.get(key) or 0))
+            out.append({**row, key: moved} if moved else {**row, "edited_since": True})
+        return out
+
+
 def _direct_callers(conn: sqlite3.Connection, node_id: Any) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT DISTINCT s.qualified_name, s.name, s.file_path, e.source_line, e.trust_tier FROM edges e"
@@ -306,6 +365,8 @@ def _site(row: Mapping[str, Any]) -> str:
     path, line = row.get("file_path") or "", row.get("call_line") or row.get("line") or ""
     tier = row.get("trust_tier")
     suffix = f" [{tier}]" if tier and tier != "CERTIFIED" else ""
+    if path and row.get("edited_since"):
+        return f"{name} ({path}, edited since){suffix}"
     return f"{name} ({path}:{line}){suffix}" if path else f"{name}{suffix}"
 
 
@@ -410,19 +471,20 @@ class ActionAugmenter:
         lines: list[str] = []
         try:
             changed = _changed_functions(conn, changes, self._preimages)
+            relocate = Relocator(conn, Path(self._repo_root()), self._preimages).rows
             if changed:
                 self.metrics.note("F13")
-                lines.append("  changed: " + _listed(
-                    [{"name": name, "file_path": path, "line": line} for _id, name, path, line in changed],
+                lines.append("  changed: " + _listed(relocate(
+                    [{"name": name, "file_path": path, "line": line} for _id, name, path, line in changed]),
                     MAX_CHANGED_SHOWN))
                 for node_id, name, path, _line in changed[:MAX_CHANGED_SHOWN]:
                     if _TEST_PATH.search(path):
-                        exercised = _exercised(conn, node_id)
+                        exercised = relocate(_exercised(conn, node_id))
                         if exercised:
                             self.metrics.note("F4", "F20")
                             lines.append(f"    test {name} exercises: {_listed(exercised, MAX_CALLERS_SHOWN)}")
                         continue
-                    callers = _direct_callers(conn, node_id)
+                    callers = relocate(_direct_callers(conn, node_id))
                     if callers:
                         self.metrics.note("F4")
                         lines.append(f"    {name} is called by: {_listed(callers, MAX_CALLERS_SHOWN)}")
@@ -436,7 +498,7 @@ class ActionAugmenter:
                 more = len(added) - MAX_CHANGED_SHOWN
                 lines.append(f"  added: {shown}" + (f" (+{more} more)" if more > 0 else "")
                              + " - new, so nothing calls it yet")
-            tests = self._test_lines(conn, [path for path in changes if path])
+            tests = self._test_lines(conn, [path for path in changes if path], relocate)
             sink_lines = self._sink_reach_lines(conn, changed[:MAX_TAINT_CHECKS])
         finally:
             conn.close()
@@ -491,7 +553,9 @@ class ActionAugmenter:
             lines.append(f"    {name} {fact}")
         return lines
 
-    def _test_lines(self, conn: sqlite3.Connection, paths: list[str]) -> list[str]:
+    def _test_lines(self, conn: sqlite3.Connection, paths: list[str],
+                    relocate: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] = lambda rows: rows,
+                    ) -> list[str]:
         from gt_engine.tool_server import _TEST_REACH_DEPTH, _TEST_REACH_LIMIT, _TEST_REACH_QUERY
 
         source = [path for path in paths if not _TEST_PATH.search(path)]
@@ -504,7 +568,7 @@ class ActionAugmenter:
         if not reached:
             return []
         self.metrics.note("F20")
-        return [f"  tests reaching {', '.join(source[:3])}: {_listed(reached, MAX_TESTS_SHOWN)}"]
+        return [f"  tests reaching {', '.join(source[:3])}: {_listed(relocate(reached), MAX_TESTS_SHOWN)}"]
 
     # -- failing test runs ---------------------------------------------------
 
