@@ -67,6 +67,7 @@
         ],
         "handler": "itemsHandler",
         "handler_file": "gosvc/main.go",
+        "handler_kind": "named",
         "handler_line": 40,
         "injections": [],
         "method": null,
@@ -101,6 +102,7 @@
         ],
         "handler": "list_items",
         "handler_file": "pyapp/server.py",
+        "handler_kind": "named",
         "handler_line": 79,
         "injections": [
           {
@@ -141,6 +143,7 @@
         ],
         "handler": "listItems",
         "handler_file": "tsapp/server.ts",
+        "handler_kind": "named",
         "handler_line": 29,
         "injections": [],
         "method": "GET",
@@ -171,6 +174,7 @@
         ],
         "handler": "list",
         "handler_file": "javaapp/OrderController.java",
+        "handler_kind": "named",
         "handler_line": 9,
         "injections": [
           {
@@ -202,6 +206,7 @@
         ],
         "handler": "total",
         "handler_file": "javaapp/OrderController.java",
+        "handler_kind": "named",
         "handler_line": 14,
         "injections": [
           {
@@ -243,6 +248,7 @@
         ],
         "handler": "render_item",
         "handler_file": "pyapp/server.py",
+        "handler_kind": "named",
         "handler_line": 89,
         "injections": [
           {
@@ -303,7 +309,7 @@
     "artifact_id": "<VOLATILE>",
     "configuration_sha256": "<VOLATILE>",
     "coverage": "complete",
-    "direct_answer_json": "{\"route_count\":6,\"routes\":[{\"confidence\":0.7,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\"}],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":0.9,\"file\":\"gosvc/main.go\",\"symbol\":\"Greet\"}],\"handler\":\"itemsHandler\",\"handler_file\":\"gosvc/main.go\",\"handler_line\":40,\"injections\":[],\"method\":null,\"middleware\":[],\"route\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.95,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\"}],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"run_query\"},{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"sanitize\"}],\"handler\":\"list_items\",\"handler_file\":\"pyapp/server.py\",\"handler_line\":79,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"handler\",\"confidence\":0.85,\"declared_type\":\"Store\",\"mechanism\":\"fastapi_depends\",\"provider\":\"get_store\",\"provider_file\":\"pyapp/server.py\",\"trust_tier\":\"CANDIDATE\"}],\"method\":\"GET\",\"middleware\":[],\"route\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.7,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\"}],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":0.5,\"file\":\"tsapp/server.ts\",\"symbol\":\"greet\"}],\"handler\":\"listItems\",\"handler_file\":\"tsapp/server.ts\",\"handler_line\":29,\"injections\":[],\"method\":\"GET\",\"middleware\":[{\"confidence\":0.9,\"file\":\"tsapp/server.ts\",\"line\":27,\"mechanism\":\"express_use\",\"name\":\"audit\",\"route_scope\":null,\"trust_tier\":\"CERTIFIED\"}],\"route\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.95,\"consumers\":[],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":0.6,\"file\":\"javaapp/OrderService.java\",\"symbol\":\"findAll\"}],\"handler\":\"list\",\"handler_file\":\"javaapp/OrderController.java\",\"handler_line\":9,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"class\",\"confidence\":0.9,\"declared_type\":\"OrderService\",\"mechanism\":\"spring_autowired\",\"provider\":\"OrderService\",\"provider_file\":\"javaapp/OrderService.java\",\"trust_tier\":\"CERTIFIED\"}],\"method\":\"GET\",\"middleware\":[],\"route\":\"/api/orders\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.95,\"consumers\":[],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":0.4,\"file\":\"javaapp/OrderService.java\",\"symbol\":\"total\"}],\"handler\":\"total\",\"handler_file\":\"javaapp/OrderController.java\",\"handler_line\":14,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"class\",\"confidence\":0.9,\"declared_type\":\"OrderService\",\"mechanism\":\"spring_autowired\",\"provider\":\"OrderService\",\"provider_file\":\"javaapp/OrderService.java\",\"trust_tier\":\"CERTIFIED\"}],\"method\":\"GET\",\"middleware\":[],\"route\":\"/api/orders/total\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.95,\"consumers\":[],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"JsonRenderer\"},{\"confidence\":0.9,\"file\":\"pyapp/server.py\",\"symbol\":\"fetch\"},{\"confidence\":0.9,\"file\":\"pyapp/server.py\",\"symbol\":\"render\"}],\"handler\":\"render_item\",\"handler_file\":\"pyapp/server.py\",\"handler_line\":89,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"handler\",\"confidence\":0.85,\"declared_type\":\"Store\",\"mechanism\":\"fastapi_depends\",\"provider\":\"get_store\",\"provider_file\":\"pyapp/server.py\",\"trust_tier\":\"CANDIDATE\"}],\"method\":null,\"middleware\":[],\"route\":\"/api/render\",\"route_source\":\"edge_metadata\"}],\"truncated\":false,\"unattached_middleware\":[]}",
+    "direct_answer_json": "{\"route_count\":6,\"routes\":[{\"confidence\":0.7,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\"}],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":0.9,\"file\":\"gosvc/main.go\",\"symbol\":\"Greet\"}],\"handler\":\"itemsHandler\",\"handler_file\":\"gosvc/main.go\",\"handler_kind\":\"named\",\"handler_line\":40,\"injections\":[],\"method\":null,\"middleware\":[],\"route\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.95,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\"}],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"run_query\"},{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"sanitize\"}],\"handler\":\"list_items\",\"handler_file\":\"pyapp/server.py\",\"handler_kind\":\"named\",\"handler_line\":79,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"handler\",\"confidence\":0.85,\"declared_type\":\"Store\",\"mechanism\":\"fastapi_depends\",\"provider\":\"get_store\",\"provider_file\":\"pyapp/server.py\",\"trust_tier\":\"CANDIDATE\"}],\"method\":\"GET\",\"middleware\":[],\"route\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.7,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\"}],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":0.5,\"file\":\"tsapp/server.ts\",\"symbol\":\"greet\"}],\"handler\":\"listItems\",\"handler_file\":\"tsapp/server.ts\",\"handler_kind\":\"named\",\"handler_line\":29,\"injections\":[],\"method\":\"GET\",\"middleware\":[{\"confidence\":0.9,\"file\":\"tsapp/server.ts\",\"line\":27,\"mechanism\":\"express_use\",\"name\":\"audit\",\"route_scope\":null,\"trust_tier\":\"CERTIFIED\"}],\"route\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.95,\"consumers\":[],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":0.6,\"file\":\"javaapp/OrderService.java\",\"symbol\":\"findAll\"}],\"handler\":\"list\",\"handler_file\":\"javaapp/OrderController.java\",\"handler_kind\":\"named\",\"handler_line\":9,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"class\",\"confidence\":0.9,\"declared_type\":\"OrderService\",\"mechanism\":\"spring_autowired\",\"provider\":\"OrderService\",\"provider_file\":\"javaapp/OrderService.java\",\"trust_tier\":\"CERTIFIED\"}],\"method\":\"GET\",\"middleware\":[],\"route\":\"/api/orders\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.95,\"consumers\":[],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":0.4,\"file\":\"javaapp/OrderService.java\",\"symbol\":\"total\"}],\"handler\":\"total\",\"handler_file\":\"javaapp/OrderController.java\",\"handler_kind\":\"named\",\"handler_line\":14,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"class\",\"confidence\":0.9,\"declared_type\":\"OrderService\",\"mechanism\":\"spring_autowired\",\"provider\":\"OrderService\",\"provider_file\":\"javaapp/OrderService.java\",\"trust_tier\":\"CERTIFIED\"}],\"method\":\"GET\",\"middleware\":[],\"route\":\"/api/orders/total\",\"route_source\":\"edge_metadata\"},{\"confidence\":0.95,\"consumers\":[],\"discovered_via\":\"handles_route\",\"downstream_calls\":[{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"JsonRenderer\"},{\"confidence\":0.9,\"file\":\"pyapp/server.py\",\"symbol\":\"fetch\"},{\"confidence\":0.9,\"file\":\"pyapp/server.py\",\"symbol\":\"render\"}],\"handler\":\"render_item\",\"handler_file\":\"pyapp/server.py\",\"handler_kind\":\"named\",\"handler_line\":89,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"handler\",\"confidence\":0.85,\"declared_type\":\"Store\",\"mechanism\":\"fastapi_depends\",\"provider\":\"get_store\",\"provider_file\":\"pyapp/server.py\",\"trust_tier\":\"CANDIDATE\"}],\"method\":null,\"middleware\":[],\"route\":\"/api/render\",\"route_source\":\"edge_metadata\"}],\"truncated\":false,\"unattached_middleware\":[]}",
     "envelope_sha256": "<VOLATILE>",
     "omissions": [
       "certified_semantics:partial"
@@ -347,6 +353,7 @@
           ],
           "handler": "itemsHandler",
           "handler_file": "gosvc/main.go",
+          "handler_kind": "named",
           "handler_line": 40,
           "injections": [],
           "method": null,
@@ -381,6 +388,7 @@
           ],
           "handler": "list_items",
           "handler_file": "pyapp/server.py",
+          "handler_kind": "named",
           "handler_line": 79,
           "injections": [
             {
@@ -421,6 +429,7 @@
           ],
           "handler": "listItems",
           "handler_file": "tsapp/server.ts",
+          "handler_kind": "named",
           "handler_line": 29,
           "injections": [],
           "method": "GET",
@@ -451,6 +460,7 @@
           ],
           "handler": "list",
           "handler_file": "javaapp/OrderController.java",
+          "handler_kind": "named",
           "handler_line": 9,
           "injections": [
             {
@@ -482,6 +492,7 @@
           ],
           "handler": "total",
           "handler_file": "javaapp/OrderController.java",
+          "handler_kind": "named",
           "handler_line": 14,
           "injections": [
             {
@@ -523,6 +534,7 @@
           ],
           "handler": "render_item",
           "handler_file": "pyapp/server.py",
+          "handler_kind": "named",
           "handler_line": 89,
           "injections": [
             {

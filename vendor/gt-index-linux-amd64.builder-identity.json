@@ -5,9 +5,9 @@
  "certification": "certified_route_b_source_bound",
  "docker_pinned_image": true,
  "go": "go1.22.5",
- "run_id": "35969660322",
- "run_url": "https://github.com/harneet2512/groundtruth/actions/runs/35969660322",
- "source_commit": "1e83ea687bf2df5d9a168b2bc2c77ea3fd990307",
- "trigger_branch": "final_hardening/har90-producer-certify",
+ "run_id": "36290313967",
+ "run_url": "https://github.com/harneet2512/groundtruth/actions/runs/36290313967",
+ "source_commit": "ec587cccf275d9c86dedf8962971afa5d6f4c972",
+ "trigger_branch": "final_hardening/gt-attached-producer",
  "workflow": ".github/workflows/build_producer_linux.yml"
 }
