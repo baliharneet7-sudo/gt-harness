@@ -71,7 +71,22 @@ Accounts: harneet2512, hbali-stack, baliharneet7-sudo (each `<acct>/gt-harness`)
 - Canonical `submitted_unverified` exits 0; the embed-bakeoff "exit 5 with a patch" is specific to its `gt_central_agent`.
 - The 20-task product bundle cannot run a matched control or the full 113 — hence the catalog.
 
+## Round 3: GT on the agent's own actions (44af8b6d, pin ee20bb8e)
+Measured before (28 fixed-code tasks): 8/21 features reached the agent; 16 tool calls total; augment carried symbol context only.
+- [x] grep block: F3 refs, F5/F6 resolution, F7 overrides (graph edges + name-level hierarchy fallback for Python/TS), F8/F18 routes/middleware/DI, F10 module, F13 co-change
+- [x] edit block: changed functions + callers (F13/F4), tests reaching (F20), parse errors (F1), reached sinks (F19, 5 s budget), handled routes (F18)
+- [x] failure block: failing test, innermost source frame's function, backward slice (F14-F17), repeated-failure note (F20)
+- [x] attached task plan (not one of the 21): ledger + graph anchors + reaching tests, no provider call/baseline/gate; shown once, `gt-plan`
+- [x] per-delivery feature tags; observer credits only carried features
+- [x] F14/F15/F16 oracle tests (Go); Python persisted CFG strict xfail
+- [ ] first5 x 3 benchmarks on ee20bb8e: TB2 36336290322, DeepSWE 36336203906, SWE-Live 36336250729
+Found, not fixed:
+- `_CATALOG_NOISE_RE` (task_contract.py) drops any requirement line containing sanitize/escape/injection as a CWE catalog row - hits the contract and the plan on security fixes.
+- cfn-lint (SWE-Live 36322976462, solved): batch amend needs 3.35 GB vs 0.94 GB cgroup headroom (8 GiB max, 7.86 GB current), incremental fallback uncoverable -> graph stale after edits; attest fails the run on GT_GRAPH_REFRESH_FAILED.
+- Local Windows producer (C:\gt-smoke-a6) fails 3 oracle tests (F1 nested defs x2, F18 routes) that pass on the vendored Linux producer.
+
 ## Log
+- 2026-09-27: round 3 landed (44af8b6d, pin ee20bb8e) on all three accounts; SWE-Live first5 @5994b3ef 5/5 solved, red only on the cfn-lint amend refusal; stale DeepSWE rest15 @09ae8ff4 (queued for hours) cancelled.
 - 2026-09-27: GT-on on 3 accounts x 3 benchmarks landed (54822a6b); producer 93e2e86e (mcp 2 import) certified + vendored (ab159952, pin 2dcfbb88); pushed to all three accounts.
 - 2026-09-27: producer ec587ccc certified + vendored (70969751); import pin re-derived (98d2c332); producer CI profile identical to certified 1e83ea68 (pre-existing lint + 60 s Go-build fixture timeouts on ubuntu-3.11/windows), the one real regression fixed.
 - 2026-09-26: committed a609ee28 (W2 core, routing, resolver, catalog, A/B workflow); extended catalog + lazy freshness + gt-calls; real-repo smoke running.
