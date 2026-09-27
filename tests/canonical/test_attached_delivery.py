@@ -44,6 +44,7 @@ def test_grep_augmentation_is_anchored_to_the_agents_pattern(polyglot_session):
     block = augmenter.augment('grep -rn "def execute" pyapp/')
     assert block.startswith("[GT] graph context for your search:")
     assert "execute" in block and "called by: run_query" in block
+    assert "next: `gt-impact execute`" in block
     assert len(block.encode("utf-8")) <= augmenter.max_bytes
     assert augmenter.augment("grep -rn no_such_symbol_zz .") == ""
     assert augmenter.augment("ls -la") == ""

@@ -229,12 +229,14 @@ class GrepAugmenter:
                 with snapshot_scope(scope):
                     symbol_results = [(symbol, structure.symbol_context(self.session, symbol))
                                       for symbol in symbols]
+                hit_symbols: list[str] = []
                 for symbol, result in symbol_results:
                     if result.status in ("unavailable", "error", "abstain"):
                         continue
                     block = render_symbol_block(symbol, result.answer)
                     if block:
                         blocks.append(block)
+                        hit_symbols.append(symbol)
             except Exception as exc:  # noqa: BLE001 - enrichment is silent on failure
                 self.metrics.errors += 1
                 self._journal(pattern=pattern[:200], outcome=f"error:{type(exc).__name__}")
@@ -244,8 +246,14 @@ class GrepAugmenter:
             if not blocks:
                 self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="silent")
                 return ""
+            # One pointer to the tool that answers the natural next question
+            # about the symbol the agent is looking at. Offered, not enforced:
+            # the first live runs made almost no gt-* calls, so every feature
+            # only a tool serves never reached the agent.
+            hint = (f"  next: `gt-impact {hit_symbols[0]}` (what breaks if it changes), "
+                    "`gt-tests <file>` (tests to run)")
             text = cap_text(
-                "[GT] graph context for your search:\n" + "\n".join(blocks),
+                "[GT] graph context for your search:\n" + "\n".join(blocks) + "\n" + hint,
                 self.max_bytes,
             )
             self.metrics.hits += 1
