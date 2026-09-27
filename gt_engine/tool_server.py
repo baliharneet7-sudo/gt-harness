@@ -896,7 +896,32 @@ def repo_relative_args(session: "GTSession", args: list[str]) -> list[str]:
     return normalized
 
 
-def refresh_if_stale(session: "GTSession") -> None:
+#: A passive read (an augmentation GT attaches on its own) never waits for
+#: an amend predicted to take longer than this. Round 2 SWE-Live (run
+#: 36322976462) spent 1,214 s of cfn-lint's and 1,023 s of beancount's
+#: clock inside grep-triggered amends (~150 s and ~500 s each): the batch
+#: amend reruns nearly the whole pipeline, so its cost is the build's.
+PASSIVE_REFRESH_BUDGET_MS = 20_000
+#: Before any amend has been measured the graph's size predicts one: across
+#: runs 3632*/3633* graphs <=100 MB amended in 2-12 s, graphs >=250 MB in
+#: 42-522 s. The startup receipt's elapsed_ms is 0 in every task, so it
+#: cannot stand in.
+EXPENSIVE_GRAPH_BYTES = 150 << 20
+
+
+def _predicted_refresh_ms(adapter: Any) -> int:
+    measured = int(getattr(adapter, "_last_graph_build_ms", 0) or 0)
+    if measured:
+        return measured
+    path = str(getattr(getattr(adapter, "engine_state", None), "graph_path", "") or "")
+    try:
+        size = Path(path).stat().st_size if path else 0
+    except OSError:
+        size = 0
+    return PASSIVE_REFRESH_BUDGET_MS + 1 if size > EXPENSIVE_GRAPH_BYTES else 0
+
+
+def refresh_if_stale(session: "GTSession", *, passive: bool = False) -> None:
     """Pay-per-intent freshness: amend a stale graph before a graph read.
 
     Attached delivery does no per-action refresh, so every read surface - a
@@ -933,6 +958,20 @@ def refresh_if_stale(session: "GTSession") -> None:
             if not has_graph:
                 schedule()
                 return
+        predicted = _predicted_refresh_ms(adapter)
+        if passive and predicted > PASSIVE_REFRESH_BUDGET_MS:
+            # The agent did not ask for this read; answer from the part
+            # of the adopted graph that is verifiably unchanged instead
+            # (grep_augment stale-verified path). An explicit gt-* call
+            # still pays for currency - that is the agent's own intent.
+            epoch = getattr(adapter, "_edit_epoch", 0)
+            if getattr(adapter, "_passive_refresh_deferred_epoch", None) != epoch:
+                adapter._passive_refresh_deferred_epoch = epoch
+                store = getattr(adapter, "store", None)
+                if store is not None:
+                    store.append("passive_refresh_deferred", predicted_ms=predicted,
+                                 budget_ms=PASSIVE_REFRESH_BUDGET_MS)
+            return
         adapter.refresh_graph(phase="graph_query")
 
 
@@ -967,7 +1006,7 @@ class ToolDispatcher:
         spec = TOOLS[name]
         with self._lock:
             if spec.reads_graph:
-                self._refresh_if_stale()
+                refresh_if_stale(self.session, passive=True)
             with snapshot_scope(self._scope_key()):
                 result = spec.run(self.session, list(args))
             text, has_answer = render_result(

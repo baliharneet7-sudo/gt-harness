@@ -105,6 +105,8 @@ def test_feature_reaches_the_agent(polyglot_session, feature):
             answered.append(code == EXIT_ANSWER)
         elif surface == "augment":
             answered.append(bool(GrepAugmenter(session).augment('grep -rn "def execute" .')))
+        elif surface == "plan":
+            answered.append(False)  # needs issue text; covered in test_action_augment
         elif surface in ("edit-augment", "failure-augment"):
             answered.append(feature.split()[0] in _action_features(session, surface))
         else:
@@ -133,3 +135,27 @@ def test_attached_edits_defer_the_amend_until_a_tool_reads_the_graph(
     changed, code = ToolDispatcher(ws.session).dispatch("gt-changes", [])
     assert code in (EXIT_ANSWER, EXIT_NO_ANSWER), changed
     assert "internal_error" not in changed
+
+
+def test_passive_reads_skip_an_expensive_amend_and_answer_from_unchanged_files(
+    runtime_workspace, monkeypatch
+):
+    monkeypatch.setenv(DELIVERY_MODE_ENV, ATTACHED)
+    ws = runtime_workspace("attached-stale-verified")
+    _transact_edit(ws)  # pyapp/server.py changes; pyapp/helpers.py does not
+    ws.adapter._last_graph_build_ms = 60_000  # an amend here would cost a minute
+
+    augmenter = GrepAugmenter(ws.session)
+    block = augmenter.augment('grep -rn "def apply_tax" pyapp')
+    assert ws.adapter.engine_state.graph_current is False  # nothing amended
+    assert ws.journal_event("passive_refresh_deferred") is not None
+    assert "graph from before your latest edits" in block, block
+    assert "apply_tax (Function) pyapp/helpers.py" in block
+    assert "called by: format_total" in block and "calls: round_price" in block
+    # A symbol defined in the edited file is never answered from the stale graph.
+    assert augmenter.augment('grep -rn "def sanitize" pyapp') == ""
+
+    # An explicit tool call is the agent's intent: it still pays for currency.
+    text, code = ToolDispatcher(ws.session).dispatch("gt-callers", ["sanitize"])
+    assert code == EXIT_ANSWER, text
+    assert ws.adapter.engine_state.graph_current is True

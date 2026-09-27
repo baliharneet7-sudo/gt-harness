@@ -518,6 +518,9 @@ class MiniSweAdapter(GroundtruthController):
         # own startup builder); set by the runner, used by attached reads.
         self._background_graph_builder: Any | None = None
         self._background_build_count = 0
+        # Wall time of the last graph the engine built or amended; an amend
+        # reruns nearly the whole pipeline, so it predicts the next one.
+        self._last_graph_build_ms = 0
         self._unadopted_graph: tuple[str, str] = ("", "")
         # Consecutive amend_failed:* refusals, keyed on the parent path they
         # failed against. Only the serving-boundary amend escalates them; the
@@ -3429,6 +3432,7 @@ class MiniSweAdapter(GroundtruthController):
                     str(receipt.graph_db or ""),
                     success=True, adopted=adopted,
                 )
+                self._last_graph_build_ms = int(getattr(receipt, "elapsed_ms", 0) or 0)
                 self.store.append(
                     "initial_index_ready",
                     adopted=adopted,
@@ -3757,6 +3761,7 @@ class MiniSweAdapter(GroundtruthController):
             embedding_budget_seconds=self.REBUILD_EMBEDDING_BUDGET_SECONDS,
             layout=layout, build_mode="incremental", incremental_results=results,
         )
+        self._last_graph_build_ms = elapsed_ms
         self._adopt_graph_receipt(
             receipt, event="graph_boundary_amend", dirty_paths=list(dirty),
             parent_graph=str(parent), elapsed_ms=elapsed_ms,

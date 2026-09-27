@@ -85,6 +85,14 @@ Found, not fixed:
 - cfn-lint (SWE-Live 36322976462, solved): batch amend needs 3.35 GB vs 0.94 GB cgroup headroom (8 GiB max, 7.86 GB current), incremental fallback uncoverable -> graph stale after edits; attest fails the run on GT_GRAPH_REFRESH_FAILED.
 - Local Windows producer (C:\gt-smoke-a6) fails 3 oracle tests (F1 nested defs x2, F18 routes) that pass on the vendored Linux producer.
 
+## Round 4: feature-reach audit of runs 36336290322 / 36336203906 / 36336250729 (ee20bb8e)
+Evidence: every delivered `[GT]` block parsed from the trajectories (`scripts/delivered_gt_evidence.py`), each shown caller/callee traced to its CALLS edge provenance, journal quiet traces, per-task graph applicability (`scripts/classify_feature_reach.py`).
+- Reached (9 code tasks): F1/F21 substrate 9, F2 9, F4 9, F12 9, F13 9, F20 8 (tests reaching), F10 7, F3 6, F5 9 (meshed: 58% of 206 traced rows import/same_file/verified_unique), F7 3 (meshed type_flow/impl_method; aiogram 36/53 rows), F9 3, F8 1.
+- Never reached: F6 (callable_value edges + VTA facts computed, no consumer), F11 (shadow-only, 30-104 computations/task), F14-F17 (failure trigger used shell rc; 26/30 failing runs exited 0 through `| tail`), F19 (taint budget eaten by the forced refresh), F18 (not in these repos).
+- Cost: blocking amends 104-1,121 s per task (edit block forced refresh; grep refresh already in round 2).
+- GT infra: aiomonitor startup index failed 3x "producer input superseded before publication" (edits during indexing) -> treatment invalid.
+- Fixed (round 4): non-blocking passive reads (StaleView, hash-verified), edit block on the pre-edit graph + cumulative pre-image mapping, parsed-outcome failure trigger, graph-free Python slice, call-graph sink reach, F11 in the plan, empty plan withheld.
+
 ## Log
 - 2026-09-27: round 3 landed (44af8b6d, pin ee20bb8e) on all three accounts; SWE-Live first5 @5994b3ef 5/5 solved, red only on the cfn-lint amend refusal; stale DeepSWE rest15 @09ae8ff4 (queued for hours) cancelled.
 - 2026-09-27: GT-on on 3 accounts x 3 benchmarks landed (54822a6b); producer 93e2e86e (mcp 2 import) certified + vendored (ab159952, pin 2dcfbb88); pushed to all three accounts.

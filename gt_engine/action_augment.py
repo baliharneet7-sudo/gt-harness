@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterable, Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 from gt_engine.tool_render import AUGMENT_OUTPUT_BYTES, cap_text
 
@@ -87,13 +89,183 @@ def failure_frames(output: str, repo_root: str) -> list[tuple[str, int]]:
     return out
 
 
-def _enclosing_function(conn: Any, path: str, line: int) -> tuple[str, int] | None:
+def _enclosing_function(conn: Any, path: str, line: int) -> tuple[str, int, Any] | None:
     row = conn.execute(
-        "SELECT name, start_line FROM nodes WHERE file_path = ? AND label IN ('Function', 'Method')"
+        "SELECT name, start_line, id FROM nodes WHERE file_path = ? AND label IN ('Function', 'Method')"
         " AND start_line <= ? AND end_line >= ? ORDER BY end_line - start_line LIMIT 1",
         (path, line, line)).fetchone()
-    return (row[0], int(row[1])) if row else None
+    return (row[0], int(row[1]), row[2]) if row else None
 
+
+def _changed_line_ranges_before(before: str, after: str) -> list[tuple[int, int]]:
+    """1-based line ranges of ``before`` that the edit replaced or deleted
+    (an insertion maps to the line it lands after)."""
+    import difflib
+
+    ranges = []
+    matcher = difflib.SequenceMatcher(a=before.splitlines(), b=after.splitlines(), autojunk=False)
+    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+        if tag != "equal":
+            ranges.append((max(i1, 1), max(i2, i1 + 1)))
+    return ranges
+
+
+def _changed_functions(conn: sqlite3.Connection,
+                       changes: Mapping[str, tuple[str | None, str | None]],
+                       preimages: Callable[[], Mapping[str, str]] | None = None,
+                       ) -> list[tuple[Any, str, str, int]]:
+    """(node id, name, path, line) of the innermost function around each
+    changed range, for files whose baseline text is exactly what the graph
+    indexed. The baseline is the edit's own pre-image, or - when an earlier
+    edit already moved the file past the graph - the file before the agent
+    first touched it, so the answer is every function changed since."""
+    out: list[tuple[Any, str, str, int]] = []
+    recorded: Mapping[str, str] | None = None
+    for path, (before, after) in changes.items():
+        row = conn.execute("SELECT content_hash FROM file_hashes WHERE file_path = ?", (path,)).fetchone()
+        if row is None:
+            continue
+        if before is None or row[0] != hashlib.sha256(before.encode("utf-8")).hexdigest():
+            if recorded is None:
+                recorded = preimages() if preimages is not None else {}
+            before = recorded.get(path)
+            if before is None or row[0] != hashlib.sha256(before.encode("utf-8")).hexdigest():
+                continue
+        for start, end in _changed_line_ranges_before(before, after or ""):
+            # A function around the change; else the class whose body it is in
+            # (a new method, a class attribute) - its constructor callers and
+            # users are what the edit can break.
+            hit = conn.execute(
+                "SELECT id, name, start_line FROM nodes WHERE file_path = ?"
+                " AND label IN ('Function', 'Method', 'Class', 'Interface')"
+                " AND start_line <= ? AND end_line >= ?"
+                " ORDER BY label IN ('Class', 'Interface'), end_line - start_line LIMIT 1",
+                (path, end, start)).fetchone()
+            if hit and all(hit[0] != seen[0] for seen in out):
+                out.append((hit[0], hit[1], path, int(hit[2])))
+    return out
+
+
+_NEW_DEFINITION = re.compile(
+    r"^\s*(?:export\s+)?(?:async\s+)?(?:def|class|function|func|fn|interface|struct)\s+"
+    r"(?:\([^)]*\)\s*)?([A-Za-z_$][\w$]*)")
+
+
+def _added_definitions(changes: Mapping[str, tuple[str | None, str | None]]) -> list[tuple[str, str]]:
+    """(name, path) of definitions the edit introduced."""
+    import difflib
+
+    added: list[tuple[str, str]] = []
+    for path, (before, after) in changes.items():
+        old = (before or "").splitlines()
+        new = (after or "").splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        existing = {m.group(1) for m in map(_NEW_DEFINITION.match, old) if m}
+        for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+            if tag in ("insert", "replace"):
+                for line in new[j1:j2]:
+                    match = _NEW_DEFINITION.match(line)
+                    if match and match.group(1) not in existing and (match.group(1), path) not in added:
+                        added.append((match.group(1), path))
+    return added
+
+
+def _exercised(conn: sqlite3.Connection, node_id: Any) -> list[dict[str, Any]]:
+    """Non-test code a test function calls directly."""
+    rows = conn.execute(
+        "SELECT DISTINCT t.qualified_name, t.name, t.file_path, t.start_line, e.trust_tier FROM edges e"
+        " JOIN nodes t ON t.id = e.target_id WHERE e.source_id = ? AND e.type = 'CALLS'"
+        " AND COALESCE(t.is_test, 0) = 0 ORDER BY t.file_path, t.start_line LIMIT 25", (node_id,)).fetchall()
+    return [{"qualified_name": q, "name": n, "file_path": p, "line": l, "trust_tier": tier}
+            for q, n, p, l, tier in rows]
+
+
+# The taint engine's sink-name markers, restricted to the unambiguous ones:
+# "run", "write", "open", "send" and the like name half of every codebase.
+_STRONG_SINK_MARKERS = frozenset({
+    "eval", "exec", "system", "popen", "spawn", "subprocess", "check_output",
+    "execute", "executemany", "shell", "pickle", "deserialize", "raw",
+})
+_SINK_REACH_DEPTH = 3
+
+
+def _reached_sinks(conn: sqlite3.Connection, node_id: Any) -> list[str]:
+    """Sink-like callees within a few CALLS hops of ``node_id``: resolved
+    targets by name, unresolved call sites by their callee lexeme."""
+    rows = conn.execute(
+        "WITH RECURSIVE reach(id, depth) AS (SELECT ?, 0"
+        " UNION SELECT e.target_id, r.depth + 1 FROM edges e JOIN reach r ON e.source_id = r.id"
+        " WHERE e.type = 'CALLS' AND r.depth < ?)"
+        " SELECT n.name FROM reach r JOIN nodes n ON n.id = r.id WHERE r.depth > 0"
+        " UNION SELECT c.callee_lexeme FROM reach r JOIN edges h ON h.source_id = r.id"
+        " AND h.type = 'HAS_CALLSITE' JOIN nodes c ON c.id = h.target_id",
+        (node_id, _SINK_REACH_DEPTH)).fetchall()
+    found = []
+    for (name,) in rows:
+        parts = [part.lower() for part in re.split(r"[.:]+", str(name or "")) if part]
+        if parts and any(part in _STRONG_SINK_MARKERS for part in parts) and name not in found:
+            found.append(str(name))
+    return sorted(found)[:4]
+
+
+def _python_enclosing(path: Path, line: int) -> tuple[str, int] | None:
+    """Innermost function containing ``line`` in the file as it is now."""
+    import ast
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return None
+    best: tuple[str, int] | None = None
+    best_span = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            end = getattr(node, "end_lineno", node.lineno)
+            if node.lineno <= line <= end and (best_span is None or end - node.lineno < best_span):
+                best, best_span = (node.name, node.lineno), end - node.lineno
+    return best
+
+
+def _python_slice(path: Path, function: str, line: int) -> list[int]:
+    """Backward slice on the current source with the runtime CFG (the wheel's
+    ``slice_at_line``): no graph involved, so it is exact after edits."""
+    try:
+        from groundtruth.runtime.cfg_analysis import slice_at_line
+
+        result = slice_at_line(path.read_text(encoding="utf-8", errors="replace"), function, line)
+    except Exception:  # noqa: BLE001 - a slice the CFG cannot build is absent
+        return []
+    return [int(n) for n in result.get("lines") or []]
+
+
+def _stored_slice(conn: sqlite3.Connection, path: Path, node_id: Any, name: str, line: int) -> list[int]:
+    """Backward slice over the producer's persisted CFG (JS/TS/Go/Java)."""
+    try:
+        from groundtruth.runtime.cfg_store import analyze_stored
+
+        language = conn.execute("SELECT language FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        analysis = analyze_stored(conn, int(node_id), source=path.read_text(encoding="utf-8", errors="replace"),
+                                  function_name=name, language=str((language or [""])[0] or ""))
+        return sorted(int(n) for n in analysis.backward_slice(line))
+    except Exception:  # noqa: BLE001 - no persisted CFG / no statement at that line
+        return []
+
+def _direct_callers(conn: sqlite3.Connection, node_id: Any) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT DISTINCT s.qualified_name, s.name, s.file_path, e.source_line, e.trust_tier FROM edges e"
+        " JOIN nodes s ON s.id = e.source_id WHERE e.target_id = ? AND e.type = 'CALLS'"
+        " ORDER BY s.file_path, e.source_line LIMIT 25", (node_id,)).fetchall()
+    return [{"qualified_name": qualified, "name": name, "file_path": path, "line": line, "trust_tier": tier}
+            for qualified, name, path, line, tier in rows]
+
+
+def _indexed_as_on_disk(conn: sqlite3.Connection, root: Path, path: str) -> bool:
+    row = conn.execute("SELECT content_hash FROM file_hashes WHERE file_path = ?", (path,)).fetchone()
+    try:
+        data = (root / path).read_bytes()
+    except OSError:
+        return False
+    return row is not None and row[0] == hashlib.sha256(data).hexdigest()
 
 def _failure_signature(output: str, frames: list[tuple[str, int]]) -> str:
     errors = _ERROR_LINE.findall(output)
@@ -179,8 +351,17 @@ class ActionAugmenter:
     # -- edits ---------------------------------------------------------------
 
     def after_edit(self, changes: Mapping[str, tuple[str | None, str | None]],
-                   syntax: Iterable[Mapping[str, Any]] = ()) -> str:
-        """``changes`` maps each edited path to its (before, after) text."""
+                   syntax: Iterable[Mapping[str, Any]] = (), pre_edit_graph: str = "") -> str:
+        """``changes`` maps each edited path to its (before, after) text;
+        ``pre_edit_graph`` is the graph the engine held when the edit began.
+
+        The block reads that graph as it stands and NEVER amends it: forcing
+        a refresh here cost aiogram (run 36336250729) an ~84 s synchronous
+        batch amend on each of four edits. The pre-edit graph describes the
+        pre-edit code exactly, so changed lines are mapped in pre-edit
+        coordinates, and only for files whose pre-edit text is byte-identical
+        to what the graph indexed (``file_hashes``) - a graph older than the
+        file is never used to name what changed."""
         paths = [path for path in changes if path]
         if not paths:
             return ""
@@ -188,10 +369,9 @@ class ActionAugmenter:
             self.metrics.edit_calls += 1
             started = time.perf_counter()
             try:
-                lines = ["[GT] after your edit (graph updated):"]
+                lines = ["[GT] after your edit (from the graph before it):"]
                 lines += self._syntax_lines(syntax)
-                lines += self._impact_lines(changes)
-                lines += self._test_lines(paths)
+                lines += self._graph_lines(changes, pre_edit_graph, started)
             except Exception as exc:  # noqa: BLE001 - enrichment is silent on failure
                 self.metrics.errors += 1
                 self._journal(kind="edit", outcome=f"error:{type(exc).__name__}")
@@ -211,37 +391,86 @@ class ActionAugmenter:
                 + f" ({row.get('error') or ', '.join(row.get('diagnostics') or ()) or 'syntax'})"
                 for row in broken]
 
-    def _impact_lines(self, changes: Mapping[str, tuple[str | None, str | None]]) -> list[str]:
-        started = time.perf_counter()
-        from gt_engine.tool_server import _impact_of_edits, refresh_if_stale
+    def _open_graph(self, pre_edit_graph: str) -> sqlite3.Connection | None:
+        from gt_engine.capabilities._query import graph_conn
 
-        refresh_if_stale(self.session)
-        edited = {path: {"before": before or "", "after": after or ""}
-                  for path, (before, after) in changes.items()}
-        impact = _impact_of_edits(self.session, edited)
-        changed = impact.get("changed functions") or []
-        if not changed:
+        if pre_edit_graph and Path(pre_edit_graph).is_file():
+            try:
+                return sqlite3.connect(Path(pre_edit_graph).resolve().as_uri() + "?mode=ro", uri=True)
+            except sqlite3.Error:
+                return None
+        return graph_conn(self.session)
+
+    def _graph_lines(self, changes: Mapping[str, tuple[str | None, str | None]],
+                     pre_edit_graph: str, started: float) -> list[str]:
+        conn = self._open_graph(pre_edit_graph)
+        if conn is None:
+            self._journal(kind="edit", skipped="no_graph")
             return []
-        self.metrics.note("F13")
-        lines = [f"  changed: {_listed(changed, MAX_CHANGED_SHOWN)}"]
-        for row in changed[:MAX_CHANGED_SHOWN]:
-            name = row.get("name")
-            callers = impact.get(f"callers of {name}") or []
-            if callers:
-                self.metrics.note("F4")
-                lines.append(f"    {name} is called by: {_listed(callers, MAX_CALLERS_SHOWN)}")
-            else:
-                lines.append(f"    {name}: no callers in the graph")
-        lines += self._route_lines(changed[:MAX_CHANGED_SHOWN])
-        if time.perf_counter() - started < EDIT_OPTIONAL_BUDGET_SECONDS:
-            lines += self._taint_lines([str(row.get("name")) for row in changed[:MAX_TAINT_CHECKS]])
-        else:
-            self._journal(kind="edit", skipped="taint_over_budget")
+        lines: list[str] = []
+        try:
+            changed = _changed_functions(conn, changes, self._preimages)
+            if changed:
+                self.metrics.note("F13")
+                lines.append("  changed: " + _listed(
+                    [{"name": name, "file_path": path, "line": line} for _id, name, path, line in changed],
+                    MAX_CHANGED_SHOWN))
+                for node_id, name, path, _line in changed[:MAX_CHANGED_SHOWN]:
+                    if _TEST_PATH.search(path):
+                        exercised = _exercised(conn, node_id)
+                        if exercised:
+                            self.metrics.note("F4", "F20")
+                            lines.append(f"    test {name} exercises: {_listed(exercised, MAX_CALLERS_SHOWN)}")
+                        continue
+                    callers = _direct_callers(conn, node_id)
+                    if callers:
+                        self.metrics.note("F4")
+                        lines.append(f"    {name} is called by: {_listed(callers, MAX_CALLERS_SHOWN)}")
+                    else:
+                        lines.append(f"    {name}: no callers in the graph")
+                    lines += self._route_lines(conn, node_id, name)
+            added = _added_definitions(changes)
+            if added:
+                self.metrics.note("F1")
+                shown = ", ".join(f"{name} ({path})" for name, path in added[:MAX_CHANGED_SHOWN])
+                more = len(added) - MAX_CHANGED_SHOWN
+                lines.append(f"  added: {shown}" + (f" (+{more} more)" if more > 0 else "")
+                             + " - new, so nothing calls it yet")
+            tests = self._test_lines(conn, [path for path in changes if path])
+            sink_lines = self._sink_reach_lines(conn, changed[:MAX_TAINT_CHECKS])
+        finally:
+            conn.close()
+        # The typed taint query needs the CURRENT graph; when it is current
+        # and the block is still cheap it gives the exact path, otherwise the
+        # pre-edit call graph's reach into sink-like APIs stands in.
+        typed = []
+        if changed and time.perf_counter() - started < EDIT_OPTIONAL_BUDGET_SECONDS:
+            typed = self._taint_lines([name for _id, name, _p, _l in changed[:MAX_TAINT_CHECKS]])
+        return lines + (typed or sink_lines) + tests
+
+    def _preimages(self) -> dict[str, str]:
+        """Each edited file's text before the agent first touched it."""
+        from gt_engine.tool_server import _edit_preimages
+
+        return _edit_preimages(self.session)
+
+    def _sink_reach_lines(self, conn: sqlite3.Connection,
+                          changed: list[tuple[Any, str, str, int]]) -> list[str]:
+        lines = []
+        for node_id, name, _path, _line in changed:
+            sinks = _reached_sinks(conn, node_id)
+            if sinks:
+                self.metrics.note("F19")
+                lines.append(f"    {name} reaches sink-like call(s): {', '.join(sinks)}"
+                             f" (call graph; `gt-taint {name}` for the data path)")
         return lines
 
     def _taint_lines(self, names: list[str]) -> list[str]:
         from gt_engine.capabilities import analysis
+        from gt_engine.capabilities._query import graph_db_path
 
+        if not graph_db_path(self.session):
+            return []
         lines = []
         for name in names:
             result = analysis.taint(self.session, name)
@@ -253,35 +482,25 @@ class ActionAugmenter:
                              f" (`gt-taint {name}` for the path)")
         return lines
 
-    def _route_lines(self, changed: list[Mapping[str, Any]]) -> list[str]:
-        from gt_engine.capabilities._query import graph_conn
+    def _route_lines(self, conn: sqlite3.Connection, node_id: Any, name: str) -> list[str]:
         from gt_engine.graph_facts import _framework, _guarded
 
-        conn = graph_conn(self.session)
-        if conn is None:
-            return []
         lines = []
-        try:
-            for row in changed:
-                node = conn.execute(
-                    "SELECT id FROM nodes WHERE file_path = ? AND name = ? AND start_line = ?"
-                    " AND label IN ('Function', 'Method') LIMIT 1",
-                    (row.get("file_path"), row.get("name"), row.get("line"))).fetchone()
-                facts = _guarded(lambda: _framework(conn, node[0])) if node else None
-                for fact in facts or ():
-                    self.metrics.note(*(("F8", "F18") if fact.startswith("handles route") else ("F8",)))
-                    lines.append(f"    {row.get('name')} {fact}")
-        finally:
-            conn.close()
+        for fact in _guarded(lambda: _framework(conn, node_id)) or ():
+            self.metrics.note(*(("F8", "F18") if fact.startswith("handles route") else ("F8",)))
+            lines.append(f"    {name} {fact}")
         return lines
 
-    def _test_lines(self, paths: list[str]) -> list[str]:
-        from gt_engine.tool_server import _tests_by_reachability
+    def _test_lines(self, conn: sqlite3.Connection, paths: list[str]) -> list[str]:
+        from gt_engine.tool_server import _TEST_REACH_DEPTH, _TEST_REACH_LIMIT, _TEST_REACH_QUERY
 
         source = [path for path in paths if not _TEST_PATH.search(path)]
-        if not source:
-            return []
-        reached = _tests_by_reachability(self.session, source)
+        reached: list[dict[str, Any]] = []
+        for path in source:
+            for file_path, qualified, name, line, depth in conn.execute(
+                    _TEST_REACH_QUERY, (path, _TEST_REACH_DEPTH, _TEST_REACH_LIMIT)):
+                reached.append({"file_path": file_path, "line": line,
+                                "name": f"{qualified or name} ({depth} call hop(s) away)"})
         if not reached:
             return []
         self.metrics.note("F20")
@@ -289,8 +508,16 @@ class ActionAugmenter:
 
     # -- failing test runs ---------------------------------------------------
 
-    def after_failure(self, command: str, output: str, returncode: int | None) -> str:
-        if returncode in (None, 0) or not is_test_command(command):
+    def after_failure(self, command: str, output: str, returncode: int | None,
+                      test_outcome: str = "") -> str:
+        """``test_outcome`` is the runtime's parsed outcome of the run
+        (``execution_evidence.observed_test_outcome``). It decides first:
+        on runs 36336203906/36336250729, 26 of 30 failing test runs exited 0
+        because the agent piped the suite through ``tail``/``head``, and a
+        return-code trigger produced 2 failure blocks in 8 tasks."""
+        failed = test_outcome in ("fail", "env_fail") or (
+            returncode not in (None, 0) and is_test_command(command))
+        if not failed:
             return ""
         with self._lock:
             self.metrics.failure_calls += 1
@@ -310,52 +537,81 @@ class ActionAugmenter:
             return text
 
     def _location_lines(self, frames: list[tuple[str, int]]) -> list[str]:
-        from gt_engine.capabilities._query import graph_conn
-
         if not frames:
             return []
-        conn = graph_conn(self.session)
+        # Failures usually follow edits, and attached delivery leaves the
+        # graph stale until something reads it; the adopted graph is still
+        # exact for every file whose content is what it indexed, and a Python
+        # file is resolved on its current text.
+        engine = getattr(self.session, "_engine", None)
+        conn = self._open_graph(str(getattr(getattr(engine, "engine_state", None), "graph_path", "") or ""))
         if conn is None:
             return []
-        located: list[tuple[str, int, str, int]] = []
+        root = Path(self._repo_root())
         try:
+            located: list[tuple[str, int, str, int, Any]] = []
             for path, line in frames:
-                enclosing = _enclosing_function(conn, path, line)
+                if _indexed_as_on_disk(conn, root, path):
+                    enclosing = _enclosing_function(conn, path, line)
+                elif path.endswith(".py"):
+                    found = _python_enclosing(root / path, line)
+                    enclosing = (*found, None) if found else None
+                else:
+                    enclosing = None
                 if enclosing is not None:
                     located.append((path, line, *enclosing))
+            if not located:
+                return []
+            # The innermost non-test frame is where the wrong value surfaced;
+            # the innermost test frame is the assertion that noticed it. When
+            # the output names only the test (Go, JS runners), the assertion's
+            # own dependencies are the slice worth showing.
+            source = [row for row in located if not _TEST_PATH.search(row[0])]
+            tests = [row for row in located if _TEST_PATH.search(row[0])]
+            lines: list[str] = []
+            if tests:
+                path, line, name, _start, _node = tests[-1]
+                lines.append(f"  failing test: {name} ({path}:{line})")
+                self.metrics.note("F20")
+            target = source[-1] if source else tests[-1] if tests else None
+            if source:
+                path, line, name, _start, _node = source[-1]
+                lines.append(f"  failure surfaced in: {name} ({path}:{line})")
+            if target is not None:
+                lines += self._slice_lines(conn, *target)
+            return lines
         finally:
             conn.close()
-        if not located:
-            return []
-        # The innermost non-test frame is where the wrong value surfaced; the
-        # innermost test frame is the assertion that noticed it.
-        source = [row for row in located if not _TEST_PATH.search(row[0])]
-        tests = [row for row in located if _TEST_PATH.search(row[0])]
-        lines = []
-        if tests:
-            path, line, name, _start = tests[-1]
-            lines.append(f"  failing test: {name} ({path}:{line})")
-            self.metrics.note("F20")
-        if source:
-            path, line, name, _start = source[-1]
-            lines.append(f"  failure surfaced in: {name} ({path}:{line})")
-            lines += self._slice_lines(name, path, line)
-        return lines
 
-    def _slice_lines(self, name: str, path: str, line: int) -> list[str]:
+    def _slice_lines(self, conn: sqlite3.Connection, path: str, line: int, name: str,
+                     _start: int, node_id: Any) -> list[str]:
+        """Backward slice of the failing line: control + data dependencies.
+
+        Python: the runtime CFG on the file as it is now. Other languages:
+        the producer's persisted CFG on the hash-verified graph (exact for an
+        unchanged file). Else the typed slice on a current graph."""
         from gt_engine.capabilities import analysis
         from gt_engine.tool_server import _source_line
 
-        result = analysis.slice(self.session, name, line, "backward", path=path)
-        answer = result.answer if isinstance(result.answer, dict) else {}
-        for item in answer.get("slices") or []:
-            numbers = [n for n in (item.get("slice_lines") or []) if n != line][-MAX_SLICE_LINES:]
-            if not numbers:
-                continue
-            self.metrics.note("F14", "F15", "F16", "F17")
-            rows = [f"    {path}:{n}: {_source_line(self.session, path, n)}" for n in numbers]
-            return [f"  line {line} depends on (backward slice; control + data):", *rows]
-        return []
+        root = Path(self._repo_root())
+        numbers: list[int] = []
+        if path.endswith(".py"):
+            numbers = _python_slice(root / path, name, line)
+        if not numbers and node_id is not None:
+            numbers = _stored_slice(conn, root / path, node_id, name, line)
+        if not numbers:
+            result = analysis.slice(self.session, name, line, "backward", path=path)
+            answer = result.answer if isinstance(result.answer, dict) else {}
+            for item in answer.get("slices") or []:
+                numbers = [int(n) for n in item.get("slice_lines") or []]
+                if numbers:
+                    break
+        numbers = [n for n in numbers if n != line][-MAX_SLICE_LINES:]
+        if not numbers:
+            return []
+        self.metrics.note("F14", "F15", "F16", "F17")
+        rows = [f"    {path}:{n}: {_source_line(self.session, path, n)}" for n in numbers]
+        return [f"  line {line} depends on (backward slice; control + data):", *rows]
 
     def _repeat_lines(self, output: str, frames: list[tuple[str, int]]) -> list[str]:
         signature = _failure_signature(output, frames)

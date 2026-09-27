@@ -8,11 +8,14 @@ so they carry the same freshness and certification rules as the typed path.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import shlex
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from gt_engine.tool_render import AUGMENT_OUTPUT_BYTES, cap_text
@@ -189,6 +192,97 @@ def block_features(answer: Any, facts: tuple[tuple[str, str], ...]) -> set[str]:
     return features
 
 
+_STALE_DEFINITION_LABELS = ("Function", "Method", "Class", "Interface")
+_STALE_DEFINITIONS_SEEN = 5
+_STALE_NEIGHBOURS = 25
+
+
+class StaleView:
+    """The adopted graph read while it is stale, restricted to rows whose
+    files still hash to what it indexed (``file_hashes``).
+
+    A stale graph is exact for every unchanged file, so a definition, caller
+    or callee in such a file is as true as on a current graph; a row in a
+    file the agent changed is left out and counted, never shown. This is what
+    lets a passive read skip a whole-pipeline amend (see
+    ``tool_server.PASSIVE_REFRESH_BUDGET_MS``) without serving a stale fact.
+    """
+
+    def __init__(self, session: "GTSession", conn: sqlite3.Connection, root: Path):
+        self.session = session
+        self.conn = conn
+        self.root = root
+        self._verified: dict[str, bool] = {}
+
+    @classmethod
+    def open(cls, session: "GTSession") -> "StaleView | None":
+        engine = getattr(session, "_engine", None)
+        graph = str(getattr(getattr(engine, "engine_state", None), "graph_path", "") or "")
+        root = str(getattr(engine, "repo_root", "") or "")
+        if not graph or not root or not Path(graph).is_file():
+            return None
+        try:
+            conn = sqlite3.connect(Path(graph).resolve().as_uri() + "?mode=ro", uri=True)
+        except sqlite3.Error:
+            return None
+        return cls(session, conn, Path(root))
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def verified(self, path: str) -> bool:
+        if path not in self._verified:
+            row = self.conn.execute(
+                "SELECT content_hash FROM file_hashes WHERE file_path = ?", (path,)).fetchone()
+            try:
+                digest = hashlib.sha256((self.root / path).read_bytes()).hexdigest()
+            except OSError:
+                digest = ""
+            self._verified[path] = row is not None and row[0] == digest
+        return self._verified[path]
+
+    def symbol(self, symbol: str) -> tuple[dict[str, Any] | None, tuple[tuple[str, str], ...]]:
+        from gt_engine.graph_facts import symbol_facts
+
+        rows = self.conn.execute(
+            "SELECT id, name, qualified_name, label, file_path, start_line FROM nodes WHERE name = ?"
+            f" AND label IN ({','.join('?' * len(_STALE_DEFINITION_LABELS))})"
+            " ORDER BY is_test, file_path, start_line LIMIT ?",
+            (symbol, *_STALE_DEFINITION_LABELS, _STALE_DEFINITIONS_SEEN)).fetchall()
+        rows = [row for row in rows if self.verified(row[4])]
+        if not rows:
+            return None, ()
+        node_id, name, qualified, label, path, line = rows[0]
+        callers, callers_hidden = self._neighbours(
+            "SELECT s.qualified_name, s.name, s.file_path, e.source_line, e.trust_tier FROM edges e"
+            " JOIN nodes s ON s.id = e.source_id WHERE e.target_id = ? AND e.type = 'CALLS'"
+            " ORDER BY s.file_path, e.source_line LIMIT ?", node_id, "call_line")
+        callees, callees_hidden = self._neighbours(
+            "SELECT t.qualified_name, t.name, t.file_path, t.start_line, e.trust_tier FROM edges e"
+            " JOIN nodes t ON t.id = e.target_id WHERE e.source_id = ? AND e.type = 'CALLS'"
+            " ORDER BY t.file_path, t.start_line LIMIT ?", node_id, "line")
+        definition = {"id": node_id, "name": name, "qualified_name": qualified, "kind": label,
+                      "label": label, "file_path": path, "start_line": line}
+        answer = {"definition": definition, "additional_definitions": len(rows) - 1,
+                  "callers": callers, "callees": callees}
+        facts = tuple(symbol_facts(self.session, definition, conn=self.conn))
+        hidden = callers_hidden + callees_hidden
+        if hidden:
+            facts += (("", f"{hidden} caller/callee row(s) in files you changed left out"),)
+        return answer, facts
+
+    def _neighbours(self, sql: str, node_id: Any, line_key: str) -> tuple[list[dict[str, Any]], int]:
+        shown: list[dict[str, Any]] = []
+        hidden = 0
+        for qualified, name, path, line, tier in self.conn.execute(sql, (node_id, _STALE_NEIGHBOURS)):
+            if not self.verified(path):
+                hidden += 1
+                continue
+            shown.append({"qualified_name": qualified, "name": name, "file_path": path,
+                          line_key: line, "trust_tier": tier})
+        return shown, hidden
+
+
 @dataclass
 class AugmentMetrics:
     calls: int = 0
@@ -229,6 +323,51 @@ class GrepAugmenter:
             except Exception:  # noqa: BLE001 - journaling never fails the action
                 pass
 
+    def _stale_verified(self, pattern: str, symbols: tuple[str, ...]) -> str:
+        """Answer from the adopted graph while it is stale, using only rows
+        whose files still hash to what the graph indexed (``StaleView``).
+        Called under the lock by ``augment``; timing is closed there."""
+        view = StaleView.open(self.session)
+        if view is None:
+            self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="silent_stale")
+            return ""
+        blocks: list[str] = []
+        hit_symbols: list[str] = []
+        hit_features: set[str] = set()
+        try:
+            for symbol in symbols:
+                answer, facts = view.symbol(symbol)
+                if answer is None:
+                    continue
+                block = render_symbol_block(symbol, answer, tuple(line for _ids, line in facts))
+                if block:
+                    blocks.append(block)
+                    hit_symbols.append(symbol)
+                    hit_features |= block_features(answer, facts)
+        finally:
+            view.close()
+        if not blocks:
+            self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="silent_stale")
+            return ""
+        return self._deliver(pattern, symbols, blocks, hit_symbols, hit_features,
+                             header="[GT] graph context for your search (graph from before your "
+                                    "latest edits; rows from files you changed are left out):")
+
+    def _deliver(self, pattern: str, symbols: tuple[str, ...], blocks: list[str],
+                 hit_symbols: list[str], hit_features: set[str], *,
+                 header: str = "[GT] graph context for your search:") -> str:
+        hint = (f"  next: `gt-impact {hit_symbols[0]}` (what breaks if it changes), "
+                "`gt-tests <file>` (tests to run)")
+        text = cap_text(header + "\n" + "\n".join(blocks) + "\n" + hint, self.max_bytes)
+        self.metrics.hits += 1
+        for feature in hit_features:
+            self.metrics.features[feature] = self.metrics.features.get(feature, 0) + 1
+        self.metrics.bytes_delivered += len(text.encode("utf-8"))
+        self.delivered_texts.append(text)
+        self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="hit",
+                      bytes=len(text.encode("utf-8")))
+        return text
+
     def augment(self, command: str) -> str:
         """Return the block to append ('' when there is nothing to add)."""
         pattern = extract_search_pattern(command)
@@ -251,7 +390,11 @@ class GrepAugmenter:
             try:
                 from gt_engine.tool_server import refresh_if_stale
 
-                refresh_if_stale(self.session)
+                refresh_if_stale(self.session, passive=True)
+                from gt_engine.capabilities._query import graph_db_path
+
+                if not graph_db_path(self.session):
+                    return self._stale_verified(pattern, symbols)
                 with snapshot_scope(scope):
                     symbol_results = [(symbol, structure.symbol_context(self.session, symbol))
                                       for symbol in symbols]
@@ -275,24 +418,7 @@ class GrepAugmenter:
             if not blocks:
                 self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="silent")
                 return ""
-            # One pointer to the tool that answers the natural next question
-            # about the symbol the agent is looking at. Offered, not enforced:
-            # the first live runs made almost no gt-* calls, so every feature
-            # only a tool serves never reached the agent.
-            hint = (f"  next: `gt-impact {hit_symbols[0]}` (what breaks if it changes), "
-                    "`gt-tests <file>` (tests to run)")
-            text = cap_text(
-                "[GT] graph context for your search:\n" + "\n".join(blocks) + "\n" + hint,
-                self.max_bytes,
-            )
-            self.metrics.hits += 1
-            for feature in hit_features:
-                self.metrics.features[feature] = self.metrics.features.get(feature, 0) + 1
-            self.metrics.bytes_delivered += len(text.encode("utf-8"))
-            self.delivered_texts.append(text)
-            self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="hit",
-                          bytes=len(text.encode("utf-8")))
-            return text
+            return self._deliver(pattern, symbols, blocks, hit_symbols, hit_features)
 
 
 __all__ = [

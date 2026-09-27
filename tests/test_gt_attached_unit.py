@@ -330,7 +330,7 @@ def test_every_feature_has_a_registered_attached_surface():
     assert len(FEATURE_SURFACES) == 21
     for feature, surfaces in FEATURE_SURFACES.items():
         for surface in surfaces:
-            assert (surface in ("substrate", "augment", "edit-augment", "failure-augment")
+            assert (surface in ("substrate", "augment", "edit-augment", "failure-augment", "plan")
                     or surface in TOOLS), (feature, surface)
 
 

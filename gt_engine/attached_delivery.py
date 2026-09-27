@@ -140,6 +140,7 @@ class AttachedDelivery:
             self.server = None
 
     plan_bytes_delivered: int = 0
+    plan_features: tuple[str, ...] = ()
 
     #: Turns between delivery checkpoints into the metrics file (see
     #: scripts/miniswe_gt_run.py _checkpoint_report).
@@ -196,12 +197,19 @@ class AttachedDelivery:
         if holder.delivered or holder.failed:
             return outputs
         index = next((i for i, command in enumerate(commands) if command is not None), None)
-        if index is None or index >= len(outputs) or holder.get() is None:
+        plan = holder.get() if index is not None and index < len(outputs) else None
+        if plan is None:
+            return outputs
+        holder.delivered = True
+        if not plan.worth_showing:
+            store = getattr(getattr(self.session, "_engine", None), "store", None)
+            if store is not None:
+                store.append("attached_plan_withheld", reason="no_requirement_anchored_and_no_related_code")
             return outputs
         text, code = self.dispatcher.render("gt-plan", [])
-        holder.delivered = True
         if code != EXIT_ANSWER:
             return outputs
+        self.plan_features = plan.features
         self.plan_bytes_delivered = len(text.encode("utf-8"))
         self.uptake.register(text, "")
         result = dict(outputs[index])
@@ -214,9 +222,11 @@ class AttachedDelivery:
         blocks = [self.augmenter.augment(command)]
         if facts:
             if facts.get("changes"):
-                blocks.append(self.action_augmenter.after_edit(facts["changes"], facts.get("syntax") or ()))
+                blocks.append(self.action_augmenter.after_edit(
+                    facts["changes"], facts.get("syntax") or (), str(facts.get("pre_edit_graph") or "")))
             blocks.append(self.action_augmenter.after_failure(
-                command, str(facts.get("output") or ""), facts.get("returncode")))
+                command, str(facts.get("output") or ""), facts.get("returncode"),
+                str(facts.get("test_outcome") or "")))
         return "\n\n".join(block for block in blocks if block)
 
     def metrics(self) -> dict[str, Any]:
@@ -230,6 +240,7 @@ class AttachedDelivery:
             **actions,
             "gt_plan_delivered": plan_holder_delivered(self.session),
             "gt_plan_bytes_delivered": self.plan_bytes_delivered,
+            "gt_plan_features": list(self.plan_features),
             "gt_search_commands": self.augmenter.search_commands,
             "gt_bytes_delivered": (tools["gt_tool_bytes_delivered"] + augment["augment_bytes_delivered"]
                                    + actions["action_augment_bytes_delivered"] + self.plan_bytes_delivered),
@@ -256,7 +267,7 @@ FEATURE_SURFACES: dict[str, tuple[str, ...]] = {
     "F8 framework/DI/middleware": ("gt-routes", "augment"),
     "F9 processes": ("gt-flows", "augment"),
     "F10 communities": ("gt-module", "augment"),
-    "F11 hybrid retrieval": ("gt-query",),
+    "F11 hybrid retrieval": ("gt-query", "plan"),
     "F12 symbol context": ("gt-context", "augment"),
     "F13 patch impact / co-change": ("gt-changes", "gt-impact", "gt-cochange", "augment", "edit-augment"),
     "F14 CFG": ("gt-slice", "failure-augment"),

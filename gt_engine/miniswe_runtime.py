@@ -2239,6 +2239,9 @@ def install_runtime_hooks(
                 # that captured no pre-action snapshot.
                 pre_graph_snapshot = None
                 transaction_artifacts: dict | None = None
+                # The graph adopted before this action's edit, stale or not;
+                # attached edit blocks read it without amending (action_augment).
+                pre_edit_graph = str(getattr(adapter.engine_state, "graph_path", "") or "")
                 if pre_snapshot is not None:
                     post_snapshot = capture_workspace(
                         adapter.repo_root,
@@ -2298,12 +2301,6 @@ def install_runtime_hooks(
                         adapter.begin_implement()
                     adapter.note_edit(changed_files)
                 _refresh_native_graph(adapter, session)
-                attached_facts[action_index] = {
-                    "changes": dict(edit_before_after) if edit_before_after else {},
-                    "syntax": tuple((transaction_artifacts or {}).get("syntax") or ()),
-                    "returncode": semantic_returncode,
-                    "output": output,
-                }
                 if returncode not in (None, 0):
                     adapter.record_episode_failure(
                         command=command,
@@ -2371,6 +2368,14 @@ def install_runtime_hooks(
                         if (result.get("extra") or {}).get("output_artifact") else ""
                     ),
                 )
+                attached_facts[action_index] = {
+                    "changes": dict(edit_before_after) if edit_before_after else {},
+                    "syntax": tuple((transaction_artifacts or {}).get("syntax") or ()),
+                    "pre_edit_graph": pre_edit_graph,
+                    "returncode": semantic_returncode,
+                    "test_outcome": str(getattr(execution, "observed_test_outcome", "") or ""),
+                    "output": output,
+                }
                 if (
                     execution is not None
                     and session.capability_active("execution_evidence")

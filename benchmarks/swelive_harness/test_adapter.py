@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import importlib.util
 from pathlib import Path
 
@@ -195,3 +196,22 @@ def test_a_missed_dense_budget_or_graph_never_costs_the_task(tmp_path, monkeypat
         written = json.loads(receipt_path.read_text(encoding="utf-8"))
         assert written["status"] == expected
         assert written["dense_ready_before_provider"] is (embedding == "refreshed")
+
+
+def test_hook_is_silent_in_an_interpreter_without_groundtruth(tmp_path):
+    # The agent's shell inherits the runner's PYTHONPATH, so the task's own
+    # Python loads this hook too; it must not print or fail there.
+    import subprocess
+    import sys
+
+    hook_dir = ROOT / "benchmarks/swelive_harness"
+    blocker = tmp_path / "groundtruth"
+    blocker.mkdir()
+    (blocker / "__init__.py").write_text("raise ImportError('no groundtruth here')\n", encoding="utf-8")
+    env = {"PYTHONPATH": f"{tmp_path}{os.pathsep}{hook_dir}", "PATH": os.environ.get("PATH", ""),
+           "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
+    done = subprocess.run([sys.executable, "-c", "print('ok')"], env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0
+    assert done.stdout.strip() == "ok"
+    assert "sitecustomize" not in done.stderr and "groundtruth" not in done.stderr, done.stderr

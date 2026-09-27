@@ -38,10 +38,31 @@ class AttachedPlan:
     rows_total: int
     anchored_rows: int
     graph_revision: str
+    # F11: the hybrid (lexical + dense) rank of the code for the issue text.
+    # Attached runs computed it on every turn in shadow (runs 3633*: 30-104
+    # shadow_task_start_localization rows per task) and never showed it.
+    related: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def features(self) -> tuple[str, ...]:
+        found = ["F2", "F4"] if self.anchored_rows else []
+        if self.related:
+            found.append("F11")
+        if self.tests:
+            found.append("F20")
+        return tuple(found)
+
+    @property
+    def worth_showing(self) -> bool:
+        """A plan whose requirements name no code is the issue text again
+        (TB2 extract-elf: six rows, every one "no code anchor")."""
+        return bool(self.anchored_rows or self.related)
 
     def as_answer(self) -> dict[str, Any]:
         answer: dict[str, Any] = {"requirements (from the issue, in suggested edit order)":
                                   list(self.requirements)}
+        if self.related:
+            answer["code most related to the issue (hybrid lexical + semantic rank)"] = list(self.related)
         if self.tests:
             answer["tests reaching the anchored code"] = list(self.tests)
         return answer
@@ -98,7 +119,27 @@ def build_attached_plan(session: "GTSession", issue_text: str) -> AttachedPlan |
         rows_total=len(ledger.rows),
         anchored_rows=anchors.anchored_rows(),
         graph_revision=str(getattr(getattr(engine, "engine_state", None), "graph_source_revision", "") or ""),
+        related=_related_code(session, issue_text),
     )
+
+
+MAX_RELATED_SHOWN = 6
+_RELATED_QUERY_CHARS = 1_000
+
+
+def _related_code(session: "GTSession", issue_text: str) -> tuple[dict[str, Any], ...]:
+    """Top non-test code for the issue from the certified hybrid rank."""
+    from gt_engine.capabilities import localization
+    from gt_engine.tool_server import _QUERY_CANDIDATES, _shape_query
+
+    try:
+        result = localization.hybrid_rank(session, " ".join(issue_text.split())[:_RELATED_QUERY_CHARS],
+                                          k=_QUERY_CANDIDATES)
+    except Exception:  # noqa: BLE001 - the rank is advisory
+        return ()
+    shaped = _shape_query(result.answer, [])
+    rows = shaped.get("1 source") if isinstance(shaped, dict) else None
+    return tuple(row for row in rows or () if row.get("file_path"))[:MAX_RELATED_SHOWN]
 
 
 class AttachedPlanHolder:

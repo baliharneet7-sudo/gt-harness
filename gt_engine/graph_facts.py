@@ -73,6 +73,40 @@ def _resolution(conn: sqlite3.Connection, node_id: Any) -> str | None:
     return "call sites: " + ", ".join(parts)
 
 
+# CALLS.resolution_method -> (feature, words). Values from the producer's
+# resolver (resolver.go; closure.go:78) and the wheel's LSP promotion.
+_RESOLUTION_KINDS: dict[str, tuple[str, str]] = {
+    "same_file": ("F5", "direct"), "import": ("F5", "direct"), "import_type": ("F5", "direct"),
+    "verified_unique": ("F5", "direct"), "lsp": ("F5", "language server"),
+    "lsp_verified": ("F5", "language server"), "lsp_external": ("F5", "language server"),
+    "callable_value": ("F6", "passed/stored as a function value"),
+    "type_flow": ("F7", "receiver type"), "return_type": ("F7", "receiver type"),
+    "inherited": ("F7", "inheritance"), "impl_method": ("F7", "interface implementation"),
+    "unique_method": ("F7", "unique method name"),
+    "name_match": ("", "name match only (unproven)"),
+}
+
+
+def _resolution_mix(conn: sqlite3.Connection, node_id: Any) -> tuple[str, str] | None:
+    """(features, line): how the symbol's callers were resolved."""
+    rows = conn.execute(
+        "SELECT resolution_method, COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'"
+        " GROUP BY resolution_method ORDER BY 2 DESC", (node_id,)).fetchall()
+    if not rows:
+        return None
+    words: dict[str, int] = {}
+    features: set[str] = set()
+    for method, count in rows:
+        feature, word = _RESOLUTION_KINDS.get(str(method), ("", str(method)))
+        words[word] = words.get(word, 0) + int(count)
+        if feature:
+            features.add(feature)
+    if not features and set(words) == {"direct"}:
+        return None
+    text = ", ".join(f"{count} {word}" for word, count in words.items())
+    return " ".join(sorted(features)), f"callers resolved by: {text}"
+
+
 def _dispatch(conn: sqlite3.Connection, node_id: Any, label: str) -> list[str]:
     """F7: overriding methods, the method it overrides, and implementations."""
     lines: list[str] = []
@@ -196,7 +230,8 @@ def _guarded(fact: Callable[[], Any]) -> Any:
         return None
 
 
-def symbol_facts(session: "GTSession", definition: dict[str, Any]) -> list[tuple[str, str]]:
+def symbol_facts(session: "GTSession", definition: dict[str, Any],
+                 conn: sqlite3.Connection | None = None) -> list[tuple[str, str]]:
     """(feature ids, fact line) pairs for one resolved definition; empty when
     none apply. Feature ids are space-separated (``"F5 F6"``) so a delivery
     is credited only to the features whose facts it actually carried."""
@@ -205,7 +240,8 @@ def symbol_facts(session: "GTSession", definition: dict[str, Any]) -> list[tuple
     node_id = definition.get("id")
     if node_id is None:
         return []
-    conn = graph_conn(session)
+    owned = conn is None
+    conn = graph_conn(session) if owned else conn
     if conn is None:
         return []
     path = str(definition.get("file_path") or "")
@@ -218,6 +254,9 @@ def symbol_facts(session: "GTSession", definition: dict[str, Any]) -> list[tuple
         resolution = _guarded(lambda: _resolution(conn, node_id))
         if resolution:
             facts.append(("F5 F6" if "function value" in resolution else "F5", resolution))
+        mix = _guarded(lambda: _resolution_mix(conn, node_id))
+        if mix and mix[0]:
+            facts.append(mix)
         facts += [("F7", line) for line in _guarded(lambda: _dispatch(conn, node_id, label)) or ()]
         facts += [("F8 F18" if line.startswith("handles route") else "F8", line)
                   for line in _guarded(lambda: _framework(conn, node_id)) or ()]
@@ -228,7 +267,8 @@ def symbol_facts(session: "GTSession", definition: dict[str, Any]) -> list[tuple
         if cochange:
             facts.append(("F13", cochange))
     finally:
-        conn.close()
+        if owned:
+            conn.close()
     return facts
 
 
