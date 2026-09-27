@@ -1908,6 +1908,37 @@ def main() -> int:
     exception: BaseException | None = None
     gt_state: dict | None = None
     terminal = "internal_error"
+    # Checkpoint the step limit and the delivery into the metrics file now and
+    # every few attached turns. A run the supervisor kills at its deadline is
+    # sealed from THIS file (conserve_failure merges into it), so without the
+    # checkpoint a timed-out task reported no step limit and no delivery and
+    # read as a step-limit and wrong-arm violation (DeepSWE rest15, run
+    # 36312794672: arktype, boa, happy-dom).
+    def _checkpoint_report() -> None:
+        if not args.metrics:
+            return
+        partial = {
+            "requested_step_limit": args.step_limit,
+            "effective_step_limit": int(
+                getattr(getattr(agent, "config", None), "step_limit", args.step_limit)
+            ),
+        }
+        if not args.gt_off and args.gt_mode != "off" and adapter is not None:
+            from gt_engine.attached_delivery import delivery_report
+
+            partial["gt_delivery"] = {**delivery_report(adapter), "report_source": "checkpoint"}
+        try:
+            path = Path(args.metrics)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            current = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            path.write_text(json.dumps({**current, **partial}, sort_keys=True), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+    _checkpoint_report()
+    attached_for_checkpoint = getattr(adapter, "attached_delivery", None) if (not args.gt_off and args.gt_mode != "off" and adapter is not None) else None
+    if attached_for_checkpoint is not None:
+        attached_for_checkpoint.on_turn = _checkpoint_report
     restore_termination_handler = _install_termination_guard()
     try:
         result = agent.run(args.task)

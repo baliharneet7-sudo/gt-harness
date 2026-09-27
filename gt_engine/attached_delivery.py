@@ -136,6 +136,12 @@ class AttachedDelivery:
             self.server.stop()
             self.server = None
 
+    #: Turns between delivery checkpoints into the metrics file (see
+    #: scripts/miniswe_gt_run.py _checkpoint_report).
+    CHECKPOINT_EVERY_TURNS = 5
+    on_turn: Any = None
+    _turns: int = 0
+
     def observe_turn(self, commands: Iterable[str | None], outputs: list[dict]) -> list[dict]:
         """Account uptake and append ``[GT]`` blocks to search observations.
 
@@ -159,6 +165,12 @@ class AttachedDelivery:
             original = str(result.get("output") or "")
             result["output"] = f"{original}\n\n{block}" if original else block
             augmented[index] = result
+        self._turns += 1
+        if self.on_turn is not None and self._turns % self.CHECKPOINT_EVERY_TURNS == 0:
+            try:
+                self.on_turn()
+            except Exception:  # noqa: BLE001 - a checkpoint never costs a turn
+                pass
         return augmented
 
     def metrics(self) -> dict[str, Any]:
