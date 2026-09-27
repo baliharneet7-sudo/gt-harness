@@ -190,6 +190,8 @@ class ScriptedTransitionTransport(BaseHTTPRequestHandler):
     waits_served: int = 0
     post_check_served: bool = False
     publication_baseline: int = 0
+    startup_waits_served: int = 0
+    edit_served: bool = False
 
     def _publication_count(self) -> int:
         """graph_publication rows the run has already journaled.
@@ -210,6 +212,22 @@ class ScriptedTransitionTransport(BaseHTTPRequestHandler):
         except OSError:
             return 0
 
+    def _startup_settled(self) -> bool:
+        """The startup index has landed or definitively failed.
+
+        No journal at all means no runner is producing one (a transport
+        exercised on its own), so there is nothing to wait for.
+        """
+        try:
+            with open(self.journal_path, encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError:
+            return True
+        return any(
+            marker in text
+            for marker in ('"initial_index_ready"', '"graph_publication"', '"index_unavailable"')
+        )
+
     def _next_command(self, ordinal: int) -> str:
         # Scenario state lives on the handler CLASS, not the instance: the
         # server constructs a fresh handler object per request, so assigning
@@ -217,11 +235,21 @@ class ScriptedTransitionTransport(BaseHTTPRequestHandler):
         cls = type(self)
         if ordinal == 0:
             return cls.pre_check
-        if ordinal == 1:
+        if not cls.edit_served:
+            # The transition is "task-start graph, then an edit, then the
+            # rebuild's adoption". Editing while the startup index is still
+            # building supersedes it - the revision gate rightly refuses a
+            # graph of a tree that changed under the producer - and the run
+            # then measures a recovery, not the transition. Let the startup
+            # index settle (bounded by the same wait budget) before editing.
+            if not self._startup_settled() and cls.startup_waits_served < cls.max_waits:
+                cls.startup_waits_served += 1
+                return cls.wait_command
             # Snapshot the publication count BEFORE the edit lands: the wait
             # phase then ends on the first publication past this point, i.e.
             # the one adopting the rebuild of the edited tree.
             cls.publication_baseline = self._publication_count()
+            cls.edit_served = True
             return cls.edit_command
         if not cls.post_check_served:
             if (
@@ -462,6 +490,9 @@ def drive_transition(
     environment.update({
         "OPENAI_BASE_URL": transport_url,
         "OPENAI_API_KEY": "synthetic-transport-only",
+        # A gateway run must state its routing (the runner fails closed on an
+        # absent lock). The loopback transport has no providers to choose.
+        "GT_PROVIDER_ROUTING_JSON": "{}",
         "LITELLM_LOCAL_MODEL_COST_MAP": "True",
         "MSWEA_COST_TRACKING": "ignore_errors",
         # The admission boundary computes its budget from these three; the

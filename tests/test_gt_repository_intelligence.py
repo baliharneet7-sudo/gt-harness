@@ -394,14 +394,18 @@ def _observe_gt_index() -> list[dict[str, object]]:
     observed: list[dict[str, object]] = []
     original_run = indexer._run_index_bounded
 
-    def run_and_record(root, output, log_dir):
-        result = original_run(root, output, log_dir)
+    # Mirrors the real signature, command_factory included: a wrapper that
+    # lags it raises TypeError inside the indexer, which reads as a producer
+    # build failure (Linux only - Windows skips before the build).
+    def run_and_record(root, output, log_dir, *, command_factory=None):
+        result = original_run(root, output, log_dir, command_factory=command_factory)
+        build_command = command_factory or indexer._index_command
         observed.append(
             {
                 "command": tuple(
                     map(
                         str,
-                        indexer._index_command(
+                        build_command(
                             indexer._resolved_binary_path(), root, str(output)
                         ),
                     )

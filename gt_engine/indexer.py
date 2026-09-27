@@ -3737,9 +3737,10 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                 "root; nothing to build a graph from"
             ),
         )
+    diagnostics: list[str] = []
     try:
         graph = ensure_index(str(root_path), state_dir=str(state_dir) if state_dir else None,
-                             reclaim=reclaim,
+                             reclaim=reclaim, diagnostics=diagnostics,
                              **({"excluded_roots": excluded_roots} if excluded_roots else {}),
                              **({"layout": layout} if layout is not None else {}),
                              **({"source_revision": source_revision} if source_revision else {}))
@@ -3875,8 +3876,12 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                 if bound and failure is not None
                 else "index_failure_evidence_invalid"
             ),
-            error_diagnostic=_build_failure_diagnostic(
-                evidence if bound else None
+            # An exception inside the locked build is swallowed into
+            # ``diagnostics`` and leaves no sealed record; without it the
+            # receipt said only "failed without valid sealed evidence".
+            error_diagnostic=(
+                _build_failure_diagnostic(evidence if bound else None)
+                + ("; " + " | ".join(diagnostics)[:400] if diagnostics and not bound else "")
             ),
             resource_evidence_path=str(evidence_path) if bound else "",
             resource_evidence_sha256=evidence_file_sha if bound else "",
