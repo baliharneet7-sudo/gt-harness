@@ -246,10 +246,16 @@ MAX_CHANGED_FILES = 12
 
 def _base_text(repo_root: str, path: str) -> str:
     """Git HEAD text - the fallback baseline for a file no edit transaction touched."""
-    done = subprocess.run(
-        ["git", "-C", repo_root, "show", f"HEAD:{path}"],
-        capture_output=True, timeout=30, check=False,
-    )
+    try:
+        done = subprocess.run(
+            ["git", "-C", repo_root, "show", f"HEAD:{path}"],
+            capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # No git in the task image (TB2 torch-tensor-parallelism, run
+        # 36306639259: gt-changes died with FileNotFoundError) is an unknown
+        # baseline, not a tool fault.
+        return ""
     return done.stdout.decode("utf-8", errors="replace") if done.returncode == 0 else ""
 
 
@@ -842,6 +848,27 @@ class ToolMetrics:
         }
 
 
+def repo_relative_args(session: "GTSession", args: list[str]) -> list[str]:
+    """Agents pass absolute paths (``gt-changes /app/x.py``); the graph keys
+    files by repository-relative path. An argument that is an absolute path
+    inside the repository becomes that relative path; anything else - a
+    symbol, a line number, a path outside the repository - is unchanged."""
+    root = str(getattr(getattr(session, "_engine", None), "repo_root", "") or "")
+    if not root:
+        return list(args)
+    base = Path(root).resolve()
+    normalized = []
+    for arg in args:
+        if arg.startswith("/") or (len(arg) > 2 and arg[1] == ":" and arg[2] in "\\/"):
+            try:
+                normalized.append(Path(arg).resolve().relative_to(base).as_posix())
+                continue
+            except (ValueError, OSError):
+                pass
+        normalized.append(arg[2:] if arg.startswith("./") else arg)
+    return normalized
+
+
 def refresh_if_stale(session: "GTSession") -> None:
     """Pay-per-intent freshness: amend a stale graph before a graph read.
 
@@ -905,6 +932,7 @@ class ToolDispatcher:
             started = time.perf_counter()
             self.metrics.calls_by_name[name] = self.metrics.calls_by_name.get(name, 0) + 1
             status = "fault"
+            args = repo_relative_args(self.session, args)
             try:
                 if spec.reads_graph:
                     self._refresh_if_stale()

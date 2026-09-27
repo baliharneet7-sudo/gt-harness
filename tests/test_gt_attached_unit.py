@@ -470,3 +470,31 @@ def test_a_read_recovers_a_graph_the_startup_race_never_published():
                             refresh_graph=lambda *, phase: calls.append("unexpected"))
     refresh_if_stale(SimpleNamespace(_engine=fresh, capability_active=lambda name: True))
     assert calls == ["graph_query"]
+
+
+def test_absolute_paths_inside_the_repository_become_relative(tmp_path):
+    """Agents pass `gt-changes /app/x.py`; the graph keys files relatively."""
+    from types import SimpleNamespace
+
+    from gt_engine.tool_server import repo_relative_args
+
+    (tmp_path / "pkg").mkdir()
+    session = SimpleNamespace(_engine=SimpleNamespace(repo_root=str(tmp_path)))
+    inside = str(tmp_path / "pkg" / "mod.py")
+    outside = str(tmp_path.parent / "elsewhere.py")
+    assert repo_relative_args(session, [inside, "run_query", "12", "./pkg/a.py", outside]) == [
+        "pkg/mod.py", "run_query", "12", "pkg/a.py", outside]
+
+
+def test_changes_baseline_without_git_is_unknown_not_a_fault(monkeypatch):
+    """TB2 images may ship no git binary; gt-changes died with
+    internal_error:FileNotFoundError (run 36306639259)."""
+    import subprocess
+
+    from gt_engine import tool_server
+
+    def no_git(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(tool_server.subprocess, "run", no_git)
+    assert tool_server._base_text("/app", "parallel_linear.py") == ""
