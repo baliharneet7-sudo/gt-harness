@@ -55,8 +55,11 @@ Accounts: harneet2512, hbali-stack, baliharneet7-sudo (each `<acct>/gt-harness`)
 - [x] TB2: model/route/effort/temperature/step_limit/gt_delivery_mode are launch inputs; route rendered + certified per run; source SHA from the import manifest (no 921bec20); `OPENROUTER_NEW || OPENROUTER_API_KEY`; trial budget capped under the 360-min hosted ceiling; per-task `gt_delivery` (treatment_valid, step-limit match) via `scripts/annotate_gt_delivery.py`; failed gate no longer summarizes as 89 missing; summary labels a non-baseline model "context only"
 - [x] DeepSWE: A/B gains `workflow_call`; model required; secret fallback; aggregator marks `treatment_invalid` legs (not scored) and fails on a leg run in the wrong arm
 - [x] readiness blockers: stale hammer-test amend fake (missing `source_revision` kwarg) made 5 freshness tests fail on Linux and Windows since canonical b005a74e - fixed; A/B admitted to the closed workflow set
-- [~] SWE-Live Lite: launch inputs, secret fallback, route attestation, 300-task catalog + sharding (<=256 legs), slot stagger, hosted-ceiling timeout
-- [ ] push `integ/gt-attached` to hbali-stack and baliharneet7-sudo
+- [x] SWE-Live Lite: launch inputs, secret fallback, route attestation, 300-task catalog pinned by image digest (0 excluded, sha256 0013f6b7), sharding (<=256 legs), slot stagger, hosted-ceiling timeout; gt_audit names attached-mode withheld pushes
+- [x] Linux readiness defect: the product lock pins mcp 2.1.1 (datacurve-pier), and the wheel imported mcp.server.fastmcp eagerly, so route_map/api_impact failed to import on Linux. Producer 93e2e86e (lazy create_server) certified by Route-B run 36298175850 and vendored (ab159952; pin 2dcfbb88); lineage 18/18 PASS
+- [x] Linux verification (WSL, product lock, `pip install .`, GT_INDEX_BINARY): route/oracle/static/freshness suites and the previously failing recorded-content, plan-verification, recovery, producer-binding, runtime, amend-retention, supervisor and product-acceptance files all pass
+- [x] `integ/gt-attached` @ 2dcfbb88 on harneet2512, hbali-stack, baliharneet7-sudo (no push-triggered workflows)
+- [ ] dispatch: canary 1 task per benchmark (user's call); free-model rate limits unknown
 
 ## Findings recorded during implementation
 - Certified wheel defect: `ON CAST(native_id AS INTEGER)` joins defeat indexes (processes.py:218, mcp/_graph_db.py:145, resolve.py:498/597) — `symbol_context` cost 50-72 s on a 489-file repo. Likely contributor to past push-arm timeouts; worth auditing old journals.
@@ -69,6 +72,7 @@ Accounts: harneet2512, hbali-stack, baliharneet7-sudo (each `<acct>/gt-harness`)
 - The 20-task product bundle cannot run a matched control or the full 113 — hence the catalog.
 
 ## Log
+- 2026-09-27: GT-on on 3 accounts x 3 benchmarks landed (54822a6b); producer 93e2e86e (mcp 2 import) certified + vendored (ab159952, pin 2dcfbb88); pushed to all three accounts.
 - 2026-09-27: producer ec587ccc certified + vendored (70969751); import pin re-derived (98d2c332); producer CI profile identical to certified 1e83ea68 (pre-existing lint + 60 s Go-build fixture timeouts on ubuntu-3.11/windows), the one real regression fixed.
 - 2026-09-26: committed a609ee28 (W2 core, routing, resolver, catalog, A/B workflow); extended catalog + lazy freshness + gt-calls; real-repo smoke running.
 - 2026-09-26: worktree `D:\gt-attached` created; audit + plan approved; W2 core, W1 routing/resolver/catalog landed locally.
