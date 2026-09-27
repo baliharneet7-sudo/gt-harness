@@ -42,9 +42,19 @@ def _first(row: dict, keys: tuple[str, ...]) -> Any:
     return None
 
 
-def _render_row(row: Any) -> str:
+# Lists whose rows are CALLEES of the queried symbol. Their ``file_path`` and
+# ``line`` locate the callee's definition, while ``call_line`` is the call
+# site inside the queried symbol's file - so pairing file_path with call_line
+# printed a location that does not exist (DeepSWE abs, run 36306735814:
+# "New (lexer/lexer.go:1637)", where 1637 is a line of evaluator_test.go).
+_CALLEE_LISTS = frozenset({"callees", "calls", "direct_callees", "outgoing"})
+
+
+def _render_row(row: Any, *, callee: bool = False) -> str:
     if not isinstance(row, dict):
         return str(row)
+    if callee:
+        row = {key: value for key, value in row.items() if key != "call_line"}
     if isinstance(row.get("steps"), list):
         steps = [str(step) for step in row["steps"][:_MAX_STEPS_SHOWN]]
         more = len(row["steps"]) - len(steps)
@@ -86,7 +96,8 @@ def _render_value(key: str, value: Any, lines: list[str], indent: str = "") -> b
             return False
         shown = value[:_MAX_ROWS_PER_LIST]
         lines.append(f"{indent}{key} ({len(value)}):")
-        lines.extend(f"{indent}  {_render_row(row)}" for row in shown)
+        callee = key.split(" ", 1)[0] in _CALLEE_LISTS
+        lines.extend(f"{indent}  {_render_row(row, callee=callee)}" for row in shown)
         if len(value) > len(shown):
             lines.append(f"{indent}  ... {len(value) - len(shown)} more not shown")
         return True

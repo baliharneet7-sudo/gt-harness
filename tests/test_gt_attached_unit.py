@@ -498,3 +498,29 @@ def test_changes_baseline_without_git_is_unknown_not_a_fault(monkeypatch):
 
     monkeypatch.setattr(tool_server.subprocess, "run", no_git)
     assert tool_server._base_text("/app", "parallel_linear.py") == ""
+
+
+def test_callees_are_located_at_their_definition_not_the_call_site():
+    """A callee row's call_line belongs to the searched symbol's file;
+    printing it beside the callee's file named a location that does not
+    exist ("New (lexer/lexer.go:1637)", DeepSWE abs, run 36306735814)."""
+    from gt_engine.grep_augment import render_symbol_block
+    from gt_engine.tool_render import render_answer
+
+    answer = {
+        "definition": {"qualified_name": "create_tmp_test", "kind": "Function",
+                       "file_path": "tests/sh_test.py", "start_line": 131},
+        "callers": [{"qualified_name": "test_async", "file_path": "tests/sh_test.py",
+                     "line": 1690, "call_line": 1700}],
+        "callees": [{"qualified_name": "StreamBufferer.flush", "file_path": "sh.py",
+                     "line": 3273, "call_line": 141}],
+        "caller_count": 1, "callee_count": 1,
+    }
+    block = render_symbol_block("create_tmp_test", answer)
+    assert "called by: test_async (tests/sh_test.py:1700)" in block
+    assert "calls: StreamBufferer.flush (sh.py:3273)" in block
+    assert "sh.py:141" not in block
+    lines, _ = render_answer(answer)
+    text = "\n".join(lines)
+    assert "sh.py:3273" in text and "sh.py:141" not in text
+    assert "tests/sh_test.py:1700" in text

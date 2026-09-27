@@ -111,12 +111,16 @@ def symbols_in_pattern(pattern: str) -> tuple[str, ...]:
     ]
 
 
-def _site(row: Any) -> str:
+def _site(row: Any, *, callee: bool = False) -> str:
     if not isinstance(row, dict):
         return str(row)
     name = row.get("qualified_name") or row.get("name") or "?"
     path = row.get("file_path") or ""
-    line = row.get("call_line") or row.get("line") or row.get("start_line")
+    # A caller row's call_line is in the caller's own file; a callee row's
+    # file_path is the callee's definition file, so its line is ``line``
+    # (the call_line there belongs to the searched symbol's file).
+    line = (row.get("line") or row.get("start_line") if callee
+            else row.get("call_line") or row.get("line") or row.get("start_line"))
     where = f"{path}:{line}" if path and line else path
     tier = row.get("trust_tier")
     suffix = f" [{tier}]" if tier and tier != "CERTIFIED" else ""
@@ -126,7 +130,8 @@ def _site(row: Any) -> str:
 def _neighbors(label: str, rows: Any, total: Any) -> str | None:
     if not isinstance(rows, list) or not rows:
         return None
-    shown = ", ".join(_site(row) for row in rows[:MAX_NEIGHBORS_SHOWN])
+    callee = label == "calls"
+    shown = ", ".join(_site(row, callee=callee) for row in rows[:MAX_NEIGHBORS_SHOWN])
     count = total if isinstance(total, int) else len(rows)
     more = count - min(len(rows), MAX_NEIGHBORS_SHOWN)
     return f"    {label}: {shown}" + (f" (+{more} more)" if more > 0 else "")
