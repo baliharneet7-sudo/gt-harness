@@ -15,6 +15,7 @@ tasks (no harm, no noise).
 from __future__ import annotations
 
 import errno
+import contextlib
 import hashlib
 import json
 import math
@@ -2119,6 +2120,7 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
     Re-indexed on every call (a stale graph would violate correct-or-quiet;
     gt-index is fast). Never raises.
     """
+    snapshot_stack = contextlib.ExitStack()
     try:
         if not root or not os.path.isdir(root):
             return None
@@ -2127,7 +2129,31 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
         _seed_binary_env()
 
         logical_root = str(layout.workspace) if layout is not None else str(root)
-        reuse_key = compute_index_reuse_key(root, excluded_roots=excluded_roots)
+        frozen: Path | None = None
+        if excluded_roots:
+            # Snapshot FIRST and key the build on the snapshot. Hashing the
+            # live tree and then copying it raced the agent: DeepSWE dasel
+            # (run 36351257672, 88 edits) failed three startup builds as
+            # "producer input changed during snapshot" and ran with no graph.
+            # The producer receives the same filtered, frozen input that is
+            # hashed; filtering only the reuse key would certify hidden state
+            # as source, and rewriting the workspace's .gitignore is an edit.
+            frozen = Path(snapshot_stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="gt-index-input-")))
+            history = repository_history(Path(root))
+            _freeze_history(Path(root), frozen, history)
+            for source in _source_paths(Path(root), excluded_roots):
+                target = frozen / source.relative_to(Path(root).resolve())
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+            reuse_key = IndexReuseKey(
+                source_manifest_digest(frozen),
+                _binary_certification().get("binary_sha256", ""),
+                GRAPH_SCHEMA_VERSION,
+                history,
+            )
+        else:
+            reuse_key = compute_index_reuse_key(root, excluded_roots=excluded_roots)
         gt_dir = _graph_state_dir(root, state_dir, layout, reuse_key)
         if gt_dir != Path(root) / ".gt":
             gt_dir.mkdir(parents=True, exist_ok=True)
@@ -2182,25 +2208,14 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
         ) as handle:
             candidate = Path(handle.name)
         candidate.unlink(missing_ok=True)
-        frozen_input = bool(excluded_roots)
-        if excluded_roots:
-            # The producer receives the same filtered, frozen input that was
-            # hashed. Filtering only the reuse key would certify hidden state
-            # as source, and rewriting the workspace's .gitignore is an edit.
-            with tempfile.TemporaryDirectory(prefix="gt-index-input-") as staging:
-                frozen = Path(staging)
-                _freeze_history(Path(root), frozen, reuse_key.history)
-                for source in _source_paths(Path(root), excluded_roots):
-                    target = frozen / source.relative_to(Path(root).resolve())
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(source, target)
-                if source_manifest_digest(frozen) != reuse_key.source_manifest_sha256:
-                    raise ValueError("producer input changed during snapshot")
-                process_result, build_attempts = _build_index_with_attempts(
-                    str(frozen), candidate, gt_dir, **(
-                        {"source_revision": source_revision} if source_revision else {}
-                    ),
-                )
+        frozen_input = frozen is not None
+        if frozen is not None:
+            # The snapshot taken above, which reuse_key was computed from.
+            process_result, build_attempts = _build_index_with_attempts(
+                str(frozen), candidate, gt_dir, **(
+                    {"source_revision": source_revision} if source_revision else {}
+                ),
+            )
         else:
             process_result, build_attempts = _build_index_with_attempts(
                 str(root), candidate, gt_dir, **(
@@ -2218,6 +2233,8 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
         if diagnostics is not None:
             diagnostics.append(f"{type(exc).__name__}: {exc}")
         return None
+    finally:
+        snapshot_stack.close()
 
 
 class BenchmarkGraphRequired(RuntimeError):

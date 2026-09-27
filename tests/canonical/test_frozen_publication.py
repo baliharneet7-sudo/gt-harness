@@ -40,3 +40,39 @@ def test_edit_during_a_frozen_build_does_not_discard_the_graph(gt_index, tmp_pat
                                  diagnostics=diagnostics)
     assert graph is not None, diagnostics
     assert not any("superseded" in item for item in diagnostics), diagnostics
+
+
+def test_an_edit_while_the_snapshot_is_taken_does_not_fail_the_build(gt_index, tmp_path, monkeypatch):
+    # DeepSWE dasel (run 36351257672): the live tree was hashed and then
+    # copied; edits in between failed three builds as "producer input
+    # changed during snapshot". The key is now computed from the snapshot.
+    from gt_engine import indexer
+    from gt_engine.engine_state import RuntimeLayout
+
+    binary, _info = gt_index
+    monkeypatch.setenv("GT_INDEX_BINARY", binary)
+    if os.name == "nt":
+        monkeypatch.setattr(indexer, "_has_verified_index_process_tree_guard", lambda: True)
+        monkeypatch.setattr(indexer, "_kill_index_process_tree",
+                            lambda process: process.kill() if process.poll() is None else True)
+    root = tmp_path / "repo"
+    shutil.copytree(FIXTURE_DIR, root)
+    layout = RuntimeLayout.resolve(workspace=root, state_root=tmp_path / "state", task_id="snap")
+    real_copy = indexer.shutil.copyfile
+    edited = []
+
+    def copy_while_the_agent_edits(src, dst, *args, **kwargs):
+        # The agent edits a file after the live tree was hashed, while the
+        # snapshot is being copied - the window the old code raced.
+        if not edited:
+            edited.append(1)
+            helper = root / "pyapp" / "helpers.py"
+            helper.write_bytes(helper.read_bytes() + b"# edit mid-snapshot" + bytes([10]))
+        return real_copy(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(indexer.shutil, "copyfile", copy_while_the_agent_edits)
+    diagnostics: list[str] = []
+    graph = indexer.ensure_index(str(root), layout=layout, source_revision=FIXTURE_REVISION,
+                                 diagnostics=diagnostics)
+    assert graph is not None, diagnostics
+    assert not any("changed during snapshot" in item for item in diagnostics), diagnostics

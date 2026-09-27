@@ -468,7 +468,7 @@ jobs:
           # 36346438031's digest gate: five retries over 7 minutes, all
           # "Data limit exceeded"), another runner usually has quota.
           matrix = [{"image": image, "digest": digest, "attempt": attempt}
-                    for image, digest in images for attempt in (1, 2)]
+                    for image, digest in images for attempt in (1,)]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write("images=" + json.dumps({"include": matrix}, separators=(",", ":")) + chr(10))
           PY
