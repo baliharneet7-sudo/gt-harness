@@ -110,16 +110,63 @@ def _callers_with_fallback(session: "GTSession", symbol: str, depth: int,
     return result
 
 
+_AMBIGUOUS_CALLERS_SHOWN = 20
+
+
+def _ambiguous_callers(session: "GTSession", symbol: str) -> list[dict[str, Any]]:
+    """Call sites whose target the producer could not prove but whose
+    candidate set includes ``symbol``. No CALLS edge is asserted for them, so
+    a callers query alone drops them - on awilix, 35 of the 39 textual
+    ``resolve(...)`` calls it missed were exactly these."""
+    from gt_engine.capabilities._query import graph_conn
+
+    conn = graph_conn(session)
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT c.file_path, c.line_start, caller.qualified_name, caller.name,"
+            " c.candidate_count_v2 FROM nodes target"
+            " JOIN edges ct ON ct.target_id = target.id AND ct.type = 'CANDIDATE_TARGET'"
+            " JOIN nodes c ON c.id = ct.source_id AND c.label = 'Callsite'"
+            " LEFT JOIN edges h ON h.target_id = c.id AND h.type = 'HAS_CALLSITE'"
+            " LEFT JOIN nodes caller ON caller.id = h.source_id"
+            " WHERE target.name = ? AND target.label IN ('Function', 'Method')"
+            " AND c.candidate_state = 'ambiguous'"
+            " ORDER BY c.file_path, c.line_start LIMIT ?",
+            (symbol, _AMBIGUOUS_CALLERS_SHOWN + 1),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - an older graph may lack the callsite layer
+        return []
+    finally:
+        conn.close()
+    out = [{"file_path": path, "line": line,
+            "name": f"{qualified or name or '<module>'} [AMBIGUOUS: 1 of {count or '?'} candidates]"}
+           for path, line, qualified, name, count in rows[:_AMBIGUOUS_CALLERS_SHOWN]]
+    if len(rows) > _AMBIGUOUS_CALLERS_SHOWN:
+        out.append({"name": f"... more ambiguous call sites not shown"})
+    return out
+
+
+def _with_ambiguous(session: "GTSession", result: CapabilityResult, symbol: str) -> CapabilityResult:
+    possible = _ambiguous_callers(session, symbol)
+    if not possible:
+        return result
+    answer = dict(result.answer) if isinstance(result.answer, dict) else {}
+    answer["possible callers (dispatch not proven)"] = possible
+    return dataclasses.replace(result, answer=answer)
+
+
 def _run_callers(session: "GTSession", args: list[str]) -> CapabilityResult:
     usage = TOOLS["gt-callers"].usage
     _need(args, 1, usage)
     depth = _int(args[1], usage) if len(args) > 1 else 2
-    return _callers_with_fallback(session, args[0], max(1, min(depth, 6)))
+    return _with_ambiguous(session, _callers_with_fallback(session, args[0], max(1, min(depth, 6))), args[0])
 
 
 def _run_impact(session: "GTSession", args: list[str]) -> CapabilityResult:
     _need(args, 1, TOOLS["gt-impact"].usage)
-    return _callers_with_fallback(session, args[0], 3, **_symbol_hints(args))
+    return _with_ambiguous(session, _callers_with_fallback(session, args[0], 3, **_symbol_hints(args)), args[0])
 
 
 def _run_refs(session: "GTSession", args: list[str]) -> CapabilityResult:

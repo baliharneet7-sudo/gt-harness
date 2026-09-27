@@ -90,8 +90,6 @@ def test_f2_definition_of_a_top_level_function(oracle):
         ("py/shop/pricing.py", line_of(root, "py/shop/pricing.py", "def apply_tax"))]
 
 
-@pytest.mark.xfail(strict=True, reason="F1 producer gap: nested function declarations are not "
-                   "definitions (awilix createContainer pattern); only their callsites are indexed")
 def test_f1_nested_function_is_a_definition_ts(oracle):
     session, _d, root = oracle
     rows = (localization.definition(session, "isReady").answer or {}).get("definitions") or []
@@ -99,8 +97,6 @@ def test_f1_nested_function_is_a_definition_ts(oracle):
         (r["file_path"], r["start_line"]) for r in rows}
 
 
-@pytest.mark.xfail(strict=True, reason="F1 producer gap: nested function declarations are not "
-                   "definitions in Python either (closure factories)")
 def test_f1_nested_function_is_a_definition_py(oracle):
     session, _d, root = oracle
     rows = (localization.definition(session, "format_line").answer or {}).get("definitions") or []
@@ -338,3 +334,12 @@ def test_augmentation_names_the_real_callers_of_the_searched_symbol(oracle):
     block = GrepAugmenter(session).augment('grep -rn "apply_tax" py/')
     assert "apply_tax" in block and "py/shop/pricing.py" in block
     assert "called by: total" in block or "total (" in block, block
+
+
+def test_f4_ambiguous_dispatch_callers_are_listed_not_dropped(oracle):
+    _s, dispatcher, root = oracle
+    # repo is untyped: repo.lookup may be UserRepo.lookup or OrderRepo.lookup.
+    text, code = dispatcher.dispatch("gt-callers", ["lookup"])
+    assert code == EXIT_ANSWER, text
+    line = line_of(root, "py/shop/lookup.py", "return repo.lookup(key)")
+    assert f"py/shop/lookup.py:{line}  find [AMBIGUOUS" in text, text

@@ -285,6 +285,7 @@ def _run(
     arguments: dict,
     *,
     graph_source_revision: str = FIXTURE_REVISION,
+    returncodes: tuple[int, ...] = (2,),
 ) -> tuple[dict, dict]:
     _, result = execute_typed_action_fail_open(
         {"tool_name": "groundtruth", "tool_call_id": f"real-{kind}",
@@ -298,7 +299,7 @@ def _run(
     # Every advanced kind is certified partial: whatever the producer says,
     # the answer augments the model's inspection and never replaces it.
     assert payload["decision"]["mode"] == "AUGMENT", payload["decision"]
-    assert result["returncode"] == 2
+    assert result["returncode"] in returncodes
     assert payload["evidence"]["producer"] == f"deterministic_query.{kind}"
     return payload, payload["direct_answer"]
 
@@ -531,7 +532,9 @@ def test_shape_check_does_not_follow_cross_language_interface_edges(
     }
     root = tmp_path / "repo"
     graph = _index(binary, info, files, root)
-    payload, answer = _run(root, graph, "shape_check", {"symbol": "Friendly"})
+    # A fully passing check takes the exact-verdict path (0); a check with a
+    # filtered cross-language verdict stays partial (2).
+    payload, answer = _run(root, graph, "shape_check", {"symbol": "Friendly"}, returncodes=(0, 2))
     # ``Friendly`` satisfies its own (TypeScript) interface; the Go ``Greeter``
     # contract is an unrelated same-named symbol and must never be checked.
     assert answer["checks"], answer
@@ -540,10 +543,23 @@ def test_shape_check_does_not_follow_cross_language_interface_edges(
         for check in answer["checks"]
     ), answer["checks"]
     assert answer["failed"] == 0
-    assert (
-        "cross_language_interface_filtered"
-        in payload["evidence"]["omissions"]
-    ), payload["evidence"]["omissions"]
+    # Producers from 9cf513af scope bare-name binding to the language family
+    # and emit no Friendly -> Go Greeter edge; older ones do, and then the
+    # harness guard must have filtered it by name.
+    import sqlite3
+
+    with sqlite3.connect(str(graph)) as conn:
+        cross_language = conn.execute(
+            "SELECT COUNT(*) FROM edges e JOIN nodes s ON s.id = e.source_id"
+            " JOIN nodes t ON t.id = e.target_id"
+            " WHERE e.type IN ('IMPLEMENTS', 'DECLARED_IMPLEMENTS')"
+            " AND s.name = 'Friendly' AND t.language = 'go'"
+        ).fetchone()[0]
+    if cross_language:
+        assert (
+            "cross_language_interface_filtered"
+            in payload["evidence"]["omissions"]
+        ), payload["evidence"]["omissions"]
 
 
 def test_shape_check_passes_a_conforming_class_with_an_empty_method(polyglot):
