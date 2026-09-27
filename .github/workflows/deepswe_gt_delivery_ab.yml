@@ -1164,6 +1164,29 @@ jobs:
           path: results/deepswe/
           if-no-files-found: error
 
+      - name: Stage the small per-task GT feature report
+        # The evidence artifact above carries the graphs (100s of MB); this
+        # one carries only the report and verifier result, so the live
+        # feature matrix (scripts/live_feature_matrix.py) reads every task
+        # without downloading graphs.
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p gt-features
+          find results/deepswe -path '*/agent/miniswe_report.json' -not -path '*/gt-state/*' -exec cp {} gt-features/miniswe_report.json \; -quit
+          find results/deepswe -path '*/agent/official-verifier-result.json' -exec cp {} gt-features/ \; -quit
+          find results/deepswe -name reward.txt -path '*verifier*' -exec cp {} gt-features/ \; -quit
+          echo "${{ matrix.task }}" > gt-features/task.txt
+          true
+
+      - name: Upload the small per-task GT feature report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gt-features-deepswe-${{ matrix.leg_id }}-${{ github.run_id }}
+          path: gt-features/
+          if-no-files-found: ignore
+
   aggregate:
     if: ${{ always() && inputs.approve_paid_run == true && needs.provider_gate.result == 'success' }}
     needs: [plan, provider_gate, task]

@@ -133,11 +133,19 @@ def _site(row: Any, *, callee: bool = False) -> str:
 def _neighbors(label: str, rows: Any, total: Any) -> str | None:
     if not isinstance(rows, list) or not rows:
         return None
+    # SPECULATIVE edges (confidence < 0.5, name matches) were the only wrong
+    # caller/callee locations the claim audit found (e.g. Go string(x) matched
+    # to a String method); they are counted, not shown.
+    speculative = sum(1 for row in rows if isinstance(row, dict) and row.get("trust_tier") == "SPECULATIVE")
+    rows = [row for row in rows if not (isinstance(row, dict) and row.get("trust_tier") == "SPECULATIVE")]
+    if not rows:
+        return None
     callee = label == "calls"
     shown = ", ".join(_site(row, callee=callee) for row in rows[:MAX_NEIGHBORS_SHOWN])
-    count = total if isinstance(total, int) else len(rows)
+    count = (total if isinstance(total, int) else len(rows) + speculative) - speculative
     more = count - min(len(rows), MAX_NEIGHBORS_SHOWN)
-    return f"    {label}: {shown}" + (f" (+{more} more)" if more > 0 else "")
+    hidden = f" ({speculative} unproven name match(es) hidden)" if speculative else ""
+    return f"    {label}: {shown}" + (f" (+{more} more)" if more > 0 else "") + hidden
 
 
 def render_symbol_block(symbol: str, answer: Any, facts: tuple[str, ...] = ()) -> str | None:
@@ -376,6 +384,7 @@ class GrepAugmenter:
         self.metrics.bytes_delivered += len(text.encode("utf-8"))
         self.delivered_texts.append(text)
         self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="hit",
+                      features=sorted(hit_features, key=lambda f: int(f[1:]) if f[1:].isdigit() else 99),
                       bytes=len(text.encode("utf-8")))
         return text
 

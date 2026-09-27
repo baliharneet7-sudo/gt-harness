@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
@@ -178,6 +179,10 @@ class AttachedDelivery:
             augmented = self._deliver_plan_once(commands, augmented)
         except Exception:  # noqa: BLE001 - the plan never costs the observation
             pass
+        try:
+            self._record_inventory()
+        except Exception:  # noqa: BLE001 - observability never costs the observation
+            pass
         self._turns += 1
         if self.on_turn is not None and self._turns % self.CHECKPOINT_EVERY_TURNS == 0:
             try:
@@ -216,6 +221,42 @@ class AttachedDelivery:
         original = str(result.get("output") or "")
         result["output"] = f"{original}\n\n{text}" if original else text
         return [*outputs[:index], result, *outputs[index + 1:]]
+
+    feature_inventory: dict[str, int] = {}
+    _inventory_graph: str = ""
+
+    def _record_inventory(self) -> None:
+        """Journal what the repository's graph holds per feature, once per
+        adopted graph (``feature_trace``)."""
+        from gt_engine.feature_trace import inventory
+
+        state = getattr(getattr(self.session, "_engine", None), "engine_state", None)
+        graph = str(getattr(state, "graph_path", "") or "")
+        if not graph or graph == self._inventory_graph or self.feature_inventory:
+            return
+        conn = sqlite3.connect(Path(graph).resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            self.feature_inventory = inventory(conn)
+        finally:
+            conn.close()
+        self._inventory_graph = graph
+        store = getattr(getattr(self.session, "_engine", None), "store", None)
+        if store is not None:
+            store.append("gt_feature_inventory", counts=self.feature_inventory)
+
+    def features_reached(self) -> dict[str, int]:
+        """Deliveries per feature across every attached surface."""
+        from gt_engine.feature_trace import merge
+
+        tool_features: dict[str, int] = {}
+        for tool, count in (self.dispatcher.metrics.as_dict().get("gt_tool_calls_by_name") or {}).items():
+            for feature, surfaces in FEATURE_SURFACES.items():
+                if tool in surfaces:
+                    fid = feature.split()[0]
+                    tool_features[fid] = tool_features.get(fid, 0) + int(count or 0)
+        substrate = {"F1": 1, "F21": 1} if self.feature_inventory.get("F2") else {}
+        return merge(self.augmenter.metrics.features, self.action_augmenter.metrics.features,
+                     self.plan_features, tool_features, substrate)
 
     def _wake_on_new_source(self, changes: dict) -> None:
         """An edit that writes source into a graph-less workspace starts the
@@ -259,6 +300,8 @@ class AttachedDelivery:
             "gt_plan_delivered": plan_holder_delivered(self.session),
             "gt_plan_bytes_delivered": self.plan_bytes_delivered,
             "gt_plan_features": list(self.plan_features),
+            "features_reached": self.features_reached(),
+            "feature_inventory": dict(self.feature_inventory),
             "gt_search_commands": self.augmenter.search_commands,
             "gt_bytes_delivered": (tools["gt_tool_bytes_delivered"] + augment["augment_bytes_delivered"]
                                    + actions["action_augment_bytes_delivered"] + self.plan_bytes_delivered),

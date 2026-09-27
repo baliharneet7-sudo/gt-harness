@@ -19,6 +19,7 @@ Attached delivery keeps exactly that substance and none of the control:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -42,6 +43,11 @@ class AttachedPlan:
     # Attached runs computed it on every turn in shadow (runs 3633*: 30-104
     # shadow_task_start_localization rows per task) and never showed it.
     related: tuple[dict[str, Any], ...] = ()
+    # Framework wiring (routes, middleware, injection) and sink reach of the
+    # anchored code: F8/F18/F19 surface only when the agent happens to search
+    # or edit a handler; the plan is the one delivery every task gets early.
+    wiring: tuple[dict[str, Any], ...] = ()
+    wiring_features: tuple[str, ...] = ()
 
     @property
     def features(self) -> tuple[str, ...]:
@@ -50,6 +56,7 @@ class AttachedPlan:
             found.append("F11")
         if self.tests:
             found.append("F20")
+        found += [f for f in self.wiring_features if f not in found]
         return tuple(found)
 
     @property
@@ -63,6 +70,8 @@ class AttachedPlan:
                                   list(self.requirements)}
         if self.related:
             answer["code most related to the issue (hybrid lexical + semantic rank)"] = list(self.related)
+        if self.wiring:
+            answer["wiring of the anchored code (routes, middleware, injection, sinks)"] = list(self.wiring)
         if self.tests:
             answer["tests reaching the anchored code"] = list(self.tests)
         return answer
@@ -120,7 +129,47 @@ def build_attached_plan(session: "GTSession", issue_text: str) -> AttachedPlan |
         anchored_rows=anchors.anchored_rows(),
         graph_revision=str(getattr(getattr(engine, "engine_state", None), "graph_source_revision", "") or ""),
         related=_related_code(session, issue_text),
+        **_wiring(graph, [anchor for items in anchors.anchors.values() for anchor in items]),
     )
+
+
+MAX_WIRING_SHOWN = 8
+
+
+def _wiring(graph: str, anchors: list[Any]) -> dict[str, Any]:
+    """Routes/middleware/injection and sink reach of the anchored symbols."""
+    import sqlite3
+
+    from gt_engine.action_augment import _reached_sinks
+    from gt_engine.graph_facts import _framework, _guarded
+
+    rows: list[dict[str, Any]] = []
+    features: list[str] = []
+    seen: set[Any] = set()
+    try:
+        conn = sqlite3.connect(Path(graph).resolve().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return {}
+    try:
+        for anchor in anchors:
+            if anchor.node_id in seen or len(rows) >= MAX_WIRING_SHOWN:
+                continue
+            seen.add(anchor.node_id)
+            name = anchor.qualified_name or anchor.name
+            for fact in _guarded(lambda: _framework(conn, anchor.node_id)) or ():
+                rows.append({"file_path": anchor.file_path, "line": anchor.start_line, "name": f"{name} {fact}"})
+                for feature in (("F8", "F18") if fact.startswith("handles route") else ("F8",)):
+                    if feature not in features:
+                        features.append(feature)
+            sinks = _guarded(lambda: _reached_sinks(conn, anchor.node_id))
+            if sinks:
+                rows.append({"file_path": anchor.file_path, "line": anchor.start_line,
+                             "name": f"{name} reaches sink-like call(s): {', '.join(sinks)}"})
+                if "F19" not in features:
+                    features.append("F19")
+    finally:
+        conn.close()
+    return {"wiring": tuple(rows[:MAX_WIRING_SHOWN]), "wiring_features": tuple(features)}
 
 
 MAX_RELATED_SHOWN = 6
@@ -166,7 +215,8 @@ class AttachedPlanHolder:
             if self.plan is not None:
                 self._journal("attached_plan_built", rows=self.plan.rows_total,
                               anchored_rows=self.plan.anchored_rows, tests=len(self.plan.tests),
-                              graph_revision=self.plan.graph_revision)
+                              graph_revision=self.plan.graph_revision,
+                              features=list(self.plan.features))
         return self.plan
 
     def _journal(self, event: str, **row: Any) -> None:

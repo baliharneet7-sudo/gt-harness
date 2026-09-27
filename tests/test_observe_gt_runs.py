@@ -25,3 +25,18 @@ def test_edit_and_failure_features_and_tool_calls_are_counted():
     assert coverage["F19 taint"]["via"] == {"gt-taint": 1}
     assert coverage["F11 hybrid retrieval"]["reached"] is False
     assert coverage["F21 freshness / amend"]["reached"] is True
+
+
+def test_live_matrix_separates_delivered_available_and_gap(tmp_path):
+    import json
+
+    from scripts.live_feature_matrix import _rows_from, matrix
+
+    receipt = {"tasks": [{"task": "t1", "reward": 1, "gt_delivery": {
+        "features_reached": {"F2": 3, "F18": 1}, "feature_inventory": {"F2": 10, "F18": 4, "F6": 2}}}]}
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "progress.json").write_text(json.dumps(receipt), encoding="utf-8")
+    table = matrix(_rows_from(tmp_path))
+    assert "| F2 | 1 | 1 | 0 |" in table
+    assert "| F18 | 1 | 1 | 0 |" in table
+    assert "| F6 | 0 | 1 | 1 |" in table

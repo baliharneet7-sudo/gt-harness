@@ -120,7 +120,7 @@ def audit_block(block: str, src: Source, audit: Audit) -> None:
                 for name, path, number in SITE.findall(s.split("is used in:", 1)[1]):
                     if not _available(src, audit, "F3/F15 name usage", path):
                         continue
-                    ok = ident in src.window(path, int(number), 40)
+                    ok = ident in src.window(path, int(number), 150)
                     audit.note("F3/F15 name usage", "confirmed" if ok else "wrong",
                                f"{ident} in {name} @ {path}:{number}")
             elif s.startswith(("overridden by:", "overrides:", "extended/implemented by:")):

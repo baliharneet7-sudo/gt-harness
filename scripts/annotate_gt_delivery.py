@@ -62,7 +62,8 @@ def delivery_fields(report: dict[str, Any] | None, *, requested_mode: str,
         "step_limit_matches": effective == requested_step_limit,
         **{key: delivery.get(key) for key in (
             "gt_tool_calls", "augment_calls", "augment_hits", "gt_bytes_delivered",
-            "gt_context_referenced",
+            "gt_context_referenced", "features_reached", "feature_inventory",
+            "edit_augment_hits", "failure_augment_hits", "gt_plan_delivered",
         ) if key in delivery},
     }
 

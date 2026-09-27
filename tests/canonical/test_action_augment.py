@@ -336,3 +336,32 @@ def test_go_test_output_with_bare_file_names_is_located_and_sliced(polyglot_sess
               "FAIL\nFAIL\texample.com/gosvc\t0.004s\n")
     block = ActionAugmenter(session).after_failure("go test ./...", output, 1, "fail")
     assert "failing test: TestGreet (gosvc/main_test.go:16)" in block, block
+
+
+def test_plan_wiring_and_feature_trace(polyglot_session):
+    import json as _json
+
+    from gt_engine.attached_delivery import AttachedDelivery
+
+    session, adapter = polyglot_session
+    previous = _with_issue(adapter, ISSUE)
+    try:
+        delivery = AttachedDelivery(session)
+        text = delivery.observe_turn(["ls"], [{"output": ""}])[0]["output"]
+        assert "wiring of the anchored code" in text, text
+        assert "list_items handles route GET /api/items" in text
+        assert "run_query reaches sink-like call(s): execute" in text
+        delivery.augmenter.augment('grep -rn "def execute" .')
+        metrics = delivery.metrics()
+        for feature in ("F2", "F4", "F8", "F11", "F18", "F19"):
+            assert metrics["features_reached"].get(feature), (feature, metrics["features_reached"])
+        inventory = metrics["feature_inventory"]
+        assert inventory["F18"] > 0 and inventory["F2"] > 0 and inventory["F1"] == 1
+        rows = [_json.loads(line) for line in Path(adapter.store.path).read_text(encoding="utf-8").splitlines()]
+        assert any(r.get("event") == "gt_feature_inventory" for r in rows)
+        hits = [r for r in rows if r.get("event") == "gt_augment" and r.get("outcome") == "hit"]
+        assert hits and "F2" in hits[-1]["features"]
+        built = [r for r in rows if r.get("event") == "attached_plan_built"]
+        assert built and "F18" in built[-1]["features"]
+    finally:
+        _with_issue(adapter, previous)

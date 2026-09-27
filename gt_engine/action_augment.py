@@ -319,11 +319,16 @@ class Relocator:
 
 def _direct_callers(conn: sqlite3.Connection, node_id: Any) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT DISTINCT s.qualified_name, s.name, s.file_path, e.source_line, e.trust_tier FROM edges e"
+        "SELECT DISTINCT s.qualified_name, s.name, s.file_path, e.source_line, e.trust_tier,"
+        " e.resolution_method FROM edges e"
         " JOIN nodes s ON s.id = e.source_id WHERE e.target_id = ? AND e.type = 'CALLS'"
+        " AND COALESCE(e.trust_tier, '') != 'SPECULATIVE'"
         " ORDER BY s.file_path, e.source_line LIMIT 25", (node_id,)).fetchall()
-    return [{"qualified_name": qualified, "name": name, "file_path": path, "line": line, "trust_tier": tier}
-            for qualified, name, path, line, tier in rows]
+    # An edge resolved through a passed/stored function value is an indirect
+    # call (F6): label it, since changing the target changes that callback.
+    return [{"qualified_name": qualified, "name": name, "file_path": path, "line": line,
+             "trust_tier": "via function value" if method == "callable_value" else tier}
+            for qualified, name, path, line, tier, method in rows]
 
 
 def _indexed_as_on_disk(conn: sqlite3.Connection, root: Path, path: str) -> bool:
@@ -406,7 +411,8 @@ class ActionAugmenter:
     def _repo_root(self) -> str:
         return str(getattr(getattr(self.session, "_engine", None), "repo_root", "") or "")
 
-    def _finish(self, kind: str, lines: list[str], started: float) -> str:
+    def _finish(self, kind: str, lines: list[str], started: float,
+                before: dict[str, int] | None = None) -> str:
         self.metrics.time_ms += int(round((time.perf_counter() - started) * 1000))
         if len(lines) <= 1:
             self._journal(kind=kind, outcome="silent")
@@ -414,7 +420,9 @@ class ActionAugmenter:
         text = cap_text("\n".join(lines), self.max_bytes)
         self.metrics.bytes_delivered += len(text.encode("utf-8"))
         self.delivered_texts.append(text)
-        self._journal(kind=kind, outcome="hit", bytes=len(text.encode("utf-8")))
+        carried = sorted((f for f, n in self.metrics.features.items() if n > (before or {}).get(f, 0)),
+                         key=lambda f: int(f[1:]))
+        self._journal(kind=kind, outcome="hit", bytes=len(text.encode("utf-8")), features=carried)
         return text
 
     # -- edits ---------------------------------------------------------------
@@ -437,6 +445,7 @@ class ActionAugmenter:
         with self._lock:
             self.metrics.edit_calls += 1
             started = time.perf_counter()
+            before = dict(self.metrics.features)
             try:
                 lines = ["[GT] after your edit (from the graph before it):"]
                 lines += self._syntax_lines(syntax)
@@ -445,7 +454,7 @@ class ActionAugmenter:
                 self.metrics.errors += 1
                 self._journal(kind="edit", outcome=f"error:{type(exc).__name__}")
                 return ""
-            text = self._finish("edit", lines, started)
+            text = self._finish("edit", lines, started, before)
             if text:
                 self.metrics.edit_hits += 1
             return text
@@ -495,6 +504,8 @@ class ActionAugmenter:
                     callers = relocate(_direct_callers(conn, node_id))
                     if callers:
                         self.metrics.note("F4")
+                        if any(row.get("trust_tier") == "via function value" for row in callers):
+                            self.metrics.note("F6")
                         lines.append(f"    {name} is called by: {_listed(callers, MAX_CALLERS_SHOWN)}")
                     else:
                         lines.append(f"    {name}: no callers in the graph")
@@ -612,6 +623,7 @@ class ActionAugmenter:
         with self._lock:
             self.metrics.failure_calls += 1
             started = time.perf_counter()
+            before = dict(self.metrics.features)
             try:
                 lines = ["[GT] about this failure:"]
                 frames = failure_frames(output, self._repo_root())
@@ -622,7 +634,7 @@ class ActionAugmenter:
                 self.metrics.errors += 1
                 self._journal(kind="failure", outcome=f"error:{type(exc).__name__}")
                 return ""
-            text = self._finish("failure", lines, started)
+            text = self._finish("failure", lines, started, before)
             if text:
                 self.metrics.failure_hits += 1
             return text
