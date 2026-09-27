@@ -2609,6 +2609,15 @@ class MiniSweAdapter(GroundtruthController):
             parent_graph_sha256=payload.get("parent_graph_sha256"),
             build_mode=payload.get("build_mode"),
         )
+        # A startup index that failed (often: an early edit superseded it)
+        # marked an attached run treatment-invalid; a graph published later
+        # (the on-read recovery build) means GT did serve this run after all.
+        # DeepSWE aiomonitor, run 36306735814, was flagged invalid while its
+        # recovered graph answered augmentations.
+        invalid = str(getattr(self, "attached_treatment_invalid", "") or "")
+        if invalid.startswith("initial_index_failed"):
+            self.attached_treatment_invalid = ""
+            self.store.append("attached_treatment_recovered", previous_reason=invalid)
         self._last_graph_publication = identity
 
     def record_edit_transaction(self, transaction: Any) -> None:

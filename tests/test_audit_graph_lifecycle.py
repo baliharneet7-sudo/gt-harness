@@ -1588,3 +1588,22 @@ def test_attached_run_without_its_startup_graph_is_treatment_invalid(tmp_path, m
             assert bool(rows) is bool(expected)
         finally:
             adapter.close_graph_lifecycle()
+
+
+def test_a_later_graph_publication_clears_the_startup_failure_flag(tmp_path, monkeypatch):
+    """The startup index lost, but the on-read recovery published a graph:
+    GT served the run, so it is not treatment-invalid."""
+    from gt_engine.attached_delivery import ATTACHED, DELIVERY_MODE_ENV
+
+    monkeypatch.setenv(DELIVERY_MODE_ENV, ATTACHED)
+    from tests.test_scoped_merge import _adapter_with_live
+
+    adapter, live = _adapter_with_live(tmp_path)
+    try:
+        adapter.attached_treatment_invalid = "initial_index_failed:index_failure_evidence_invalid"
+        adapter._last_graph_publication = None
+        adapter._record_graph_publication()
+        assert adapter.attached_treatment_invalid == ""
+        assert _journal_rows(adapter, "attached_treatment_recovered")
+    finally:
+        adapter.close_graph_lifecycle()
