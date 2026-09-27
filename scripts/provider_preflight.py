@@ -526,7 +526,12 @@ def _served_endpoint(
     A failed or unparsable listing records nothing and fails nothing: the
     quantization gate fires on a positive observation, never on its absence.
     """
-    only = route["provider_routing"]["only"]
+    only = route["provider_routing"].get("only") or []
+    if not only:
+        # A launch-time route may leave the provider to OpenRouter ("{}"):
+        # there is no pinned endpoint to identify, and the quantization gate
+        # (which needs one) has nothing to fire on.
+        return None
     pinned = str(only[0]).strip().lower()
     # The listing hangs off the same catalog path the rest of the probe reads,
     # rather than a second hardcoded copy of it. ``safe="/"`` is deliberate:
@@ -644,7 +649,9 @@ def _probe_canary(
             # require_parameters=true reject the otherwise valid endpoint.
             "max_tokens": 16,
             "temperature": 0,
-            "provider": route["provider_routing"],
+            # An unlocked route sends no provider object at all, exactly as
+            # the task runner does (it attaches one only when routing is set).
+            **({"provider": route["provider_routing"]} if route["provider_routing"] else {}),
         },
     )
     if not isinstance(canary.get("choices"), list) or not canary["choices"]:

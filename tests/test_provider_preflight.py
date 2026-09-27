@@ -983,3 +983,36 @@ def test_paid_workflow_line_endings_are_committed_and_it_parses_as_yaml(
     assert committed.count(b"\n") > 0
     text = workflow.read_text(encoding="utf-8")
     assert yaml.safe_load(text)["jobs"]["provider_gate"]["steps"]
+
+
+def test_an_unlocked_launch_route_passes_and_sends_no_provider_object(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A launch-time model with no provider lock (routing "{}", OpenRouter
+    chooses) crashed the preflight on route["provider_routing"]["only"]."""
+    from scripts.render_provider_route import render_route
+
+    template = json.loads((ROOT / "config" / "provider_route.v1.json").read_text(encoding="utf-8"))
+    route = render_route(template, model="stealth/space-bunny-alpha")
+    assert route["provider_routing"] == {}
+    manifest = tmp_path / "provider-route.json"
+    manifest.write_text(json.dumps(route), encoding="utf-8")
+    bunny_row = {**MODEL_ROW, "id": "stealth/space-bunny-alpha",
+                 "pricing": {"prompt": "0", "completion": "0"}}
+    posted: list[dict[str, object]] = []
+
+    def fake_post(_url: str, _key: str, body: dict[str, object]) -> dict[str, object]:
+        posted.append(body)
+        return {"choices": [{"message": {"content": "OK"}}], "system_fingerprint": None}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "canary-not-a-real-key")
+    monkeypatch.setattr(provider_preflight, "_get_json",
+                        _fake_get(key_data={"limit_remaining": 10_000}, model_row=bunny_row))
+    monkeypatch.setattr(provider_preflight, "_post_json", fake_post)
+    receipt = provider_preflight.run(
+        manifest=manifest, output=tmp_path / "receipt.json", source_sha="9" * 40, live=True,
+    )
+    assert receipt["status"] == "PASS", receipt.get("error_code")
+    assert receipt["provider_routing"] == {}
+    assert receipt["served_endpoint"] is None
+    assert len(posted) == 1 and "provider" not in posted[0]
