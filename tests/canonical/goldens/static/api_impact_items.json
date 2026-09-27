@@ -76,6 +76,7 @@
         "flows_truncated": false,
         "handler": "itemsHandler",
         "handler_file": "gosvc/main.go",
+        "handler_kind": "named",
         "handler_line": 40,
         "injections": [],
         "method": null,
@@ -117,6 +118,7 @@
         "flows_truncated": false,
         "handler": "list_items",
         "handler_file": "pyapp/server.py",
+        "handler_kind": "named",
         "handler_line": 79,
         "injections": [
           {
@@ -164,6 +166,7 @@
         "flows_truncated": false,
         "handler": "listItems",
         "handler_file": "tsapp/server.ts",
+        "handler_kind": "named",
         "handler_line": 29,
         "injections": [],
         "method": "GET",
@@ -206,7 +209,7 @@
     "artifact_id": "<VOLATILE>",
     "configuration_sha256": "<VOLATILE>",
     "coverage": "complete",
-    "direct_answer_json": "{\"handler\":null,\"route\":\"/api/items\",\"route_count\":3,\"routes\":[{\"affected_files\":[\"client/web.js\"],\"confidence\":0.7,\"consumer_count\":1,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\",\"routes_called\":1}],\"consumers_truncated\":false,\"discovered_via\":\"handles_route\",\"flows\":[{\"confidence\":0.9,\"file\":\"gosvc/main.go\",\"symbol\":\"Greet\"}],\"flows_truncated\":false,\"handler\":\"itemsHandler\",\"handler_file\":\"gosvc/main.go\",\"handler_line\":40,\"injections\":[],\"method\":null,\"middleware\":[],\"name\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"affected_files\":[\"client/web.js\"],\"confidence\":0.95,\"consumer_count\":1,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\",\"routes_called\":1}],\"consumers_truncated\":false,\"discovered_via\":\"handles_route\",\"flows\":[{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"run_query\"},{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"sanitize\"}],\"flows_truncated\":false,\"handler\":\"list_items\",\"handler_file\":\"pyapp/server.py\",\"handler_line\":79,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"handler\",\"confidence\":0.85,\"declared_type\":\"Store\",\"mechanism\":\"fastapi_depends\",\"provider\":\"get_store\",\"provider_file\":\"pyapp/server.py\",\"trust_tier\":\"CANDIDATE\"}],\"method\":\"GET\",\"middleware\":[],\"name\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"affected_files\":[\"client/web.js\"],\"confidence\":0.7,\"consumer_count\":1,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\",\"routes_called\":1}],\"consumers_truncated\":false,\"discovered_via\":\"handles_route\",\"flows\":[{\"confidence\":0.5,\"file\":\"tsapp/server.ts\",\"symbol\":\"greet\"}],\"flows_truncated\":false,\"handler\":\"listItems\",\"handler_file\":\"tsapp/server.ts\",\"handler_line\":29,\"injections\":[],\"method\":\"GET\",\"middleware\":[{\"confidence\":0.9,\"file\":\"tsapp/server.ts\",\"line\":27,\"mechanism\":\"express_use\",\"name\":\"audit\",\"route_scope\":null,\"trust_tier\":\"CERTIFIED\"}],\"name\":\"/api/items\",\"route_source\":\"edge_metadata\"}]}",
+    "direct_answer_json": "{\"handler\":null,\"route\":\"/api/items\",\"route_count\":3,\"routes\":[{\"affected_files\":[\"client/web.js\"],\"confidence\":0.7,\"consumer_count\":1,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\",\"routes_called\":1}],\"consumers_truncated\":false,\"discovered_via\":\"handles_route\",\"flows\":[{\"confidence\":0.9,\"file\":\"gosvc/main.go\",\"symbol\":\"Greet\"}],\"flows_truncated\":false,\"handler\":\"itemsHandler\",\"handler_file\":\"gosvc/main.go\",\"handler_kind\":\"named\",\"handler_line\":40,\"injections\":[],\"method\":null,\"middleware\":[],\"name\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"affected_files\":[\"client/web.js\"],\"confidence\":0.95,\"consumer_count\":1,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\",\"routes_called\":1}],\"consumers_truncated\":false,\"discovered_via\":\"handles_route\",\"flows\":[{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"run_query\"},{\"confidence\":1.0,\"file\":\"pyapp/server.py\",\"symbol\":\"sanitize\"}],\"flows_truncated\":false,\"handler\":\"list_items\",\"handler_file\":\"pyapp/server.py\",\"handler_kind\":\"named\",\"handler_line\":79,\"injections\":[{\"ambiguous\":false,\"bound_on\":\"handler\",\"confidence\":0.85,\"declared_type\":\"Store\",\"mechanism\":\"fastapi_depends\",\"provider\":\"get_store\",\"provider_file\":\"pyapp/server.py\",\"trust_tier\":\"CANDIDATE\"}],\"method\":\"GET\",\"middleware\":[],\"name\":\"/api/items\",\"route_source\":\"edge_metadata\"},{\"affected_files\":[\"client/web.js\"],\"confidence\":0.7,\"consumer_count\":1,\"consumers\":[{\"attribution\":\"route_level\",\"confidence\":0.4,\"file\":\"client/web.js\",\"line\":4,\"method\":null,\"route\":\"/api/items\",\"routes_called\":1}],\"consumers_truncated\":false,\"discovered_via\":\"handles_route\",\"flows\":[{\"confidence\":0.5,\"file\":\"tsapp/server.ts\",\"symbol\":\"greet\"}],\"flows_truncated\":false,\"handler\":\"listItems\",\"handler_file\":\"tsapp/server.ts\",\"handler_kind\":\"named\",\"handler_line\":29,\"injections\":[],\"method\":\"GET\",\"middleware\":[{\"confidence\":0.9,\"file\":\"tsapp/server.ts\",\"line\":27,\"mechanism\":\"express_use\",\"name\":\"audit\",\"route_scope\":null,\"trust_tier\":\"CERTIFIED\"}],\"name\":\"/api/items\",\"route_source\":\"edge_metadata\"}]}",
     "envelope_sha256": "<VOLATILE>",
     "omissions": [
       "certified_semantics:partial"
@@ -259,6 +262,7 @@
           "flows_truncated": false,
           "handler": "itemsHandler",
           "handler_file": "gosvc/main.go",
+          "handler_kind": "named",
           "handler_line": 40,
           "injections": [],
           "method": null,
@@ -300,6 +304,7 @@
           "flows_truncated": false,
           "handler": "list_items",
           "handler_file": "pyapp/server.py",
+          "handler_kind": "named",
           "handler_line": 79,
           "injections": [
             {
@@ -347,6 +352,7 @@
           "flows_truncated": false,
           "handler": "listItems",
           "handler_file": "tsapp/server.ts",
+          "handler_kind": "named",
           "handler_line": 29,
           "injections": [],
           "method": "GET",

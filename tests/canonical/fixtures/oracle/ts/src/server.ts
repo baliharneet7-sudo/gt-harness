@@ -16,5 +16,6 @@ function listItems(req: any, res: any) {
 
 app.use(audit)
 app.get("/api/items", listItems)
+app.get("/api/health", (req: any, res: any) => res.json({ ok: true }))
 
 export default app

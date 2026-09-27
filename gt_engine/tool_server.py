@@ -674,11 +674,12 @@ def _shape_routes(answer: Any, args: list[str]) -> Any:
         injections = ", ".join(str(item.get("provider")) for item in route.get("injections") or [])
         extras = "".join((f" middleware=[{middleware}]" if middleware else "",
                           f" injects=[{injections}]" if injections else ""))
+        handler = route.get("handler") or "<inline handler>"
         rows.append({
             "file_path": route.get("handler_file"),
             "line": route.get("handler_line"),
             "name": f"{route.get('method') or 'ANY'} {route.get('route')} -> "
-                    f"{route.get('handler')}{extras}",
+                    f"{handler}{extras}",
         })
     return {"routes": rows}
 

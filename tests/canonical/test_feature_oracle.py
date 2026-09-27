@@ -179,12 +179,17 @@ def test_f7_shape_flags_the_implementation_missing_a_method(oracle):
 
 
 def test_f18_routes_with_handlers_and_middleware(oracle):
-    _s, dispatcher, _root = oracle
+    _s, dispatcher, root = oracle
     text, code = dispatcher.dispatch("gt-routes", [])
     assert code == EXIT_ANSWER, text
     assert "/report -> report_view" in text and "/safe -> safe_view" in text
     express = next(l for l in text.splitlines() if "/api/items -> listItems" in l)
     assert "middleware=[audit]" in express
+    # Inline handlers are routes too: surfaced at their registration line.
+    health = line_of(root, "ts/src/server.ts", '"/api/health"')
+    assert f"ts/src/server.ts:{health}  GET /api/health -> <inline handler>" in text, text
+    koa = line_of(root, "js/koa/routes.js", '"/messages"')
+    assert f"js/koa/routes.js:{koa}  GET /messages -> <inline handler>" in text, text
 
 
 def test_f9_flow_follows_the_real_call_chain(oracle):
