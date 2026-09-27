@@ -207,11 +207,23 @@ def attached_system_section() -> str:
     system template. Short on purpose: it is paid on every request."""
     from gt_engine.tool_server import tool_reference
 
+    # Modelled on GitNexus's "when to use what" table: the first GT-on runs
+    # (runs 36303712349/36303714218/36303715831) made 0 tool calls in 11
+    # tasks under a prompt that said "skip them when grep is enough", so only
+    # grep augmentation ever reached the agent. The commands stay optional -
+    # nothing is enforced - but each is tied to the moment it pays off.
     return (
-        "## Code intelligence (optional)\n\n"
+        "## Code intelligence\n\n"
         "GroundTruth keeps a code graph of this repository, updated after every edit. "
-        "These shell commands answer in well under a second. Use them when they save "
-        "you searching or reading; skip them when grep is enough.\n\n"
+        "These shell commands answer in well under a second and replace several "
+        "grep/cat rounds each:\n\n"
+        "| When you need to | Run |\n"
+        "|---|---|\n"
+        "| find where the task's behaviour lives | `gt-query \"<words from the issue>\"` |\n"
+        "| understand a function before touching it | `gt-context <symbol>` |\n"
+        "| know what breaks if you change it | `gt-impact <symbol>` |\n"
+        "| pick the tests to run for a file | `gt-tests <file>` |\n"
+        "| check your edits before submitting | `gt-changes` |\n\n"
         f"{tool_reference()}\n\n"
         "`gt-help` lists more (routes and API clients, slices, taint, interface checks, "
         "renames, co-change, recurring failures).\n\n"

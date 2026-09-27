@@ -842,6 +842,33 @@ class ToolMetrics:
         }
 
 
+def refresh_if_stale(session: "GTSession") -> None:
+    """Pay-per-intent freshness: amend a stale graph before a graph read.
+
+    Attached delivery does no per-action refresh, so every read surface - a
+    gt-* tool call AND a grep augmentation - must bring the graph current
+    itself. Without it the augmenter queried an invalidated graph after the
+    agent's first edit and stayed silent for the rest of the run (SWE-Live
+    amoffat__sh-744, run 36303715831: 34 augmentations, 0 hits, although
+    the searched symbols were in the graph).
+    """
+    adapter = getattr(session, "_engine", None)
+    if adapter is None:
+        return
+    # No graph at all is the stalest graph: a startup index that an early
+    # edit superseded (DeepSWE aiomonitor, run 36303714218) left attached
+    # mode graph-less for the whole run, because nothing but a per-action
+    # boundary - which attached mode skips - ever rebuilt it. refresh_graph
+    # recovers a missing graph through the bounded recovery build (streak
+    # and episode caps), and leaves a still-running startup index alone.
+    if (
+        not getattr(adapter, "graph_fresh", True)
+        and session.capability_active("graph_refresh")
+        and session.capability_active("graph_queries")
+    ):
+        adapter.refresh_graph(phase="graph_query")
+
+
 class ToolDispatcher:
     """Resolve one tool call against the live session. Thread-safe."""
 
@@ -852,16 +879,7 @@ class ToolDispatcher:
         self._lock = threading.Lock()
 
     def _refresh_if_stale(self) -> None:
-        adapter = getattr(self.session, "_engine", None)
-        if adapter is None:
-            return
-        if (
-            getattr(adapter, "graph_db", None)
-            and not getattr(adapter, "graph_fresh", True)
-            and self.session.capability_active("graph_refresh")
-            and self.session.capability_active("graph_queries")
-        ):
-            adapter.refresh_graph(phase="graph_query")
+        refresh_if_stale(self.session)
 
     def _scope_key(self) -> tuple[Any, ...]:
         adapter = getattr(self.session, "_engine", None)

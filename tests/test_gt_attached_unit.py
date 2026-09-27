@@ -402,3 +402,71 @@ def test_query_shows_source_before_tests():
     shaped = tool_server._shape_query(answer, ["q"])
     assert [row["file_path"] for row in shaped["1 source"]] == ["src/x.ts", "src/y.ts"]
     assert [row["file_path"] for row in shaped["2 related tests"]] == ["src/__tests__/x.test.ts"]
+
+
+def test_grep_augmentation_brings_a_stale_graph_current_before_reading(monkeypatch):
+    """After the agent's first edit the graph is invalidated; attached mode
+    refreshes only on demand. The augmenter must refresh like a gt-* tool
+    does, or it answers from nothing for the rest of the run (SWE-Live
+    amoffat__sh-744, run 36303715831: 34 augmentations, 0 hits)."""
+    from types import SimpleNamespace
+
+    from gt_engine.capabilities import structure
+    from gt_engine.grep_augment import GrepAugmenter
+
+    class Adapter:
+        graph_db = "graph.db"
+        global_action = 0
+        _edit_epoch = 1
+        store = None
+
+        def __init__(self):
+            self.graph_fresh = False
+            self.refreshes = 0
+
+        def refresh_graph(self, *, phase):
+            self.refreshes += 1
+            self.graph_fresh = True
+            return True
+
+    adapter = Adapter()
+    session = SimpleNamespace(_engine=adapter, capability_active=lambda name: True)
+
+    def symbol_context(_session, symbol):
+        if not adapter.graph_fresh:
+            return SimpleNamespace(status="unavailable", answer=None)
+        return SimpleNamespace(status="ok", answer={
+            "definition": {"qualified_name": symbol, "kind": "Function",
+                           "file_path": "tests/sh_test.py", "start_line": 131},
+            "callers": [{"qualified_name": "test_async", "file_path": "tests/sh_test.py",
+                         "line": 1700}],
+            "caller_count": 1,
+        })
+
+    monkeypatch.setattr(structure, "symbol_context", symbol_context)
+    block = GrepAugmenter(session).augment('grep -rn "create_tmp_test" tests/')
+    assert adapter.refreshes == 1
+    assert "create_tmp_test (Function) tests/sh_test.py:131" in block
+    assert "called by: test_async" in block
+    # A current graph is not refreshed again.
+    GrepAugmenter(session).augment('grep -rn "create_tmp_test" tests/')
+    assert adapter.refreshes == 1
+
+
+def test_a_read_recovers_a_graph_the_startup_race_never_published():
+    """No adopted graph at all is refreshed too - refresh_graph owns the
+    bounded recovery build - so a superseded startup index does not leave
+    attached mode graph-less for the whole run."""
+    from types import SimpleNamespace
+
+    from gt_engine.tool_server import refresh_if_stale
+
+    calls = []
+    adapter = SimpleNamespace(graph_db=None, graph_fresh=False,
+                              refresh_graph=lambda *, phase: calls.append(phase))
+    refresh_if_stale(SimpleNamespace(_engine=adapter, capability_active=lambda name: True))
+    assert calls == ["graph_query"]
+    fresh = SimpleNamespace(graph_db="g.db", graph_fresh=True,
+                            refresh_graph=lambda *, phase: calls.append("unexpected"))
+    refresh_if_stale(SimpleNamespace(_engine=fresh, capability_active=lambda name: True))
+    assert calls == ["graph_query"]

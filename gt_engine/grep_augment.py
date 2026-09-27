@@ -218,6 +218,9 @@ class GrepAugmenter:
             self.metrics.calls += 1
             blocks: list[str] = []
             try:
+                from gt_engine.tool_server import refresh_if_stale
+
+                refresh_if_stale(self.session)
                 with snapshot_scope(scope):
                     symbol_results = [(symbol, structure.symbol_context(self.session, symbol))
                                       for symbol in symbols]
