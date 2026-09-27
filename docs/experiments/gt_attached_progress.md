@@ -103,6 +103,14 @@ Evidence: every delivered `[GT]` block parsed from the trajectories (`scripts/de
 - Full runs relaunched on b39b0b3c: DeepSWE all 36346438031, TB2 full-89 36346440397, SWE-Live 1/2 36346442578, 2/2 36346444850.
 - Open: F6 never reached (callable_value edges rarely touch searched symbols); `_CATALOG_NOISE_RE` drops security requirement lines (shared with the push contract, not changed); startup `initial_index_ready.elapsed_ms` is always 0.
 
+## Round 6: claim correctness audit (7863ed52)
+- `scripts/audit_delivered.py` (via `replay_attached.py --audit`) re-reads every location a delivered block cites.
+- Found: edit-block caller lines came from the pre-edit graph, so in a just-edited file 11/16 pointed at the wrong line. Fixed with `Relocator` (diff from indexed text to current file; rewritten lines shown as "edited since").
+- After the fix, 10 recorded code tasks: 449/450 claims correct (definitions 28/28, callers 34/34, callees 18/18, callers of changed fns 73/73, name usage 141/142, dispatch 7/7, injection 5/5, slices 16/16, failure locations 8/8, tests 21/21, plan anchors 98/98).
+- SWE-Live gold canary rejects ungradeable cfn-lint instances (gold patch fails; space-bunny GT-off baseline solved 1/26 cfn-lint) - not GT; count identically on both arms.
+- DeepSWE full cohort: images mirrored to GHCR before the digest gate (public ECR per-IP data limit).
+- Runs relaunched on 7863ed52: DeepSWE 36350395444, TB2 36350397955, SWE-Live 1/2 36350400233, 2/2 36350402561.
+
 ## Log
 - 2026-09-27: round 3 landed (44af8b6d, pin ee20bb8e) on all three accounts; SWE-Live first5 @5994b3ef 5/5 solved, red only on the cfn-lint amend refusal; stale DeepSWE rest15 @09ae8ff4 (queued for hours) cancelled.
 - 2026-09-27: GT-on on 3 accounts x 3 benchmarks landed (54822a6b); producer 93e2e86e (mcp 2 import) certified + vendored (ab159952, pin 2dcfbb88); pushed to all three accounts.
