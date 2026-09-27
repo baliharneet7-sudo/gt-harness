@@ -1,0 +1,179 @@
+[
+ {
+  "task": "awilix-async-container-initialization",
+  "language": "typescript",
+  "symbols": [
+   "createContainer",
+   "register",
+   "resolve",
+   "asFunction",
+   "asValue"
+  ],
+  "errors": [],
+  "features": {
+   "F1 parsing coverage": {
+    "status": "FAIL",
+    "rate": 0.25,
+    "n": 8,
+    "notes": [],
+    "failures": [
+     "isAlreadyInitialized (added by the gold patch) is not a definition even in a full rebuild",
+     "initializeLevelWithConcurrency (added by the gold patch) is not a definition even in a full rebuild",
+     "createSemaphore (added by the gold patch) is not a definition even in a full rebuild",
+     "computeTopologicalLevels (added by the gold patch) is not a definition even in a full rebuild",
+     "buildDependencyGraph (added by the gold patch) is not a definition even in a full rebuild"
+    ]
+   },
+   "F2 definitions": {
+    "status": "pass",
+    "rate": 1.0,
+    "n": 14,
+    "notes": [],
+    "failures": []
+   },
+   "F3 references": {
+    "status": "pass",
+    "rate": 0.923,
+    "n": 39,
+    "notes": [],
+    "failures": [
+     "reference to resolve at src/container.ts:30 reads 'export interface AwilixContainer<Cradle extends object = any> {'",
+     "reference to resolve at src/container.ts:30 reads 'export interface AwilixContainer<Cradle extends object = any> {'",
+     "reference to resolve at src/resolvers.ts:31 reads 'export interface Resolver<T> extends ResolverOptions<T> {'"
+    ]
+   },
+   "F4 callers/callees": {
+    "status": "pass",
+    "rate": 0.96,
+    "n": 50,
+    "notes": [],
+    "failures": [
+     "caller of register at src/__tests__/rollup.test.ts:34 reads 'return pkg'",
+     "caller of resolve at src/__tests__/rollup.test.ts:34 reads 'return pkg'"
+    ]
+   },
+   "F4 callers recall": {
+    "status": "weak",
+    "rate": 0.8,
+    "n": 5,
+    "notes": [
+     "createContainer: 7/12",
+     "register: 43/70",
+     "resolve: 30/67",
+     "asFunction: 43/63",
+     "asValue: 32/48"
+    ],
+    "failures": [
+     "resolve: graph CALLS cover 30/67 textual call sites"
+    ]
+   },
+   "F5/F6 call resolution": {
+    "status": "pass",
+    "rate": 1.0,
+    "n": 6,
+    "notes": [],
+    "failures": []
+   },
+   "F7 inheritance / shape": {
+    "status": "pass",
+    "rate": 1.0,
+    "n": 2,
+    "notes": [],
+    "failures": []
+   },
+   "F8/F18 routes, DI": {
+    "status": "FAIL",
+    "rate": 0.0,
+    "n": 1,
+    "notes": [],
+    "failures": [
+     "1 route declarations in source, graph shows none: [('examples/koa/index.js', 49)]"
+    ]
+   },
+   "F9 processes": {
+    "status": "pass",
+    "rate": 1.0,
+    "n": 22,
+    "notes": [],
+    "failures": []
+   },
+   "F10 communities": {
+    "status": "pass",
+    "rate": 1.0,
+    "n": 10,
+    "notes": [],
+    "failures": []
+   },
+   "F11 hybrid retrieval": {
+    "status": "FAIL",
+    "rate": 0.0,
+    "n": 1,
+    "notes": [
+     "gold 0/4 in top-10 files ['src/__tests__/container.test.ts', 'src/__tests__/container.disposing.test.ts', 'src/__tests__/function-tokenizer.test.ts', 'src/__tests__/load-modules.test.ts', 'src/__tests__/local-injections.test.ts']"
+    ],
+    "failures": [
+     "top-10 ['src/__tests__/container.test.ts', 'src/__tests__/container.disposing.test.ts', 'src/__tests__/function-tokenizer.test.ts', 'src/__tests__/load-modules.test.ts', 'src/__tests__/local-injections.test.ts'] misses gold ['src/awilix.ts', 'src/container.ts', 'src/errors.ts', 'src/resolvers.ts']"
+    ]
+   },
+   "F12 symbol context": {
+    "status": "pass",
+    "rate": 0.9,
+    "n": 10,
+    "notes": [],
+    "failures": [
+     "register: graph has 65 CALLS in, context shows 0"
+    ]
+   },
+   "F13 patch impact": {
+    "status": "pass",
+    "rate": 1.0,
+    "n": 1,
+    "notes": [
+     "files (2):"
+    ],
+    "failures": []
+   },
+   "F14-F17 CFG / slice": {
+    "status": "no data",
+    "rate": null,
+    "n": 0,
+    "notes": [
+     "createContainer: partial ['analysis_failed:createContainer:no statement covers line 236']",
+     "register: partial ['no_persisted_cfg']",
+     "resolve: partial ['no_persisted_cfg']"
+    ],
+    "failures": []
+   },
+   "F19 taint": {
+    "status": "n/a: no taint path between the chosen symbols",
+    "rate": null,
+    "n": 0,
+    "notes": [],
+    "failures": []
+   },
+   "F20 tests / verification": {
+    "status": "pass",
+    "rate": 1.0,
+    "n": 1,
+    "notes": [
+     "task tests are all new files (not reachable at base)"
+    ],
+    "failures": []
+   },
+   "F21 freshness": {
+    "status": "pass",
+    "rate": 1.0,
+    "n": 3,
+    "notes": [],
+    "failures": []
+   },
+   "augmentation (F2/F4/F9/F12 auto)": {
+    "status": "pass",
+    "rate": 1.0,
+    "n": 5,
+    "notes": [],
+    "failures": []
+   }
+  }
+ }
+]

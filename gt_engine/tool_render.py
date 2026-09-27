@@ -18,7 +18,7 @@ _MAX_ROWS_PER_LIST = 20
 _MAX_STEPS_SHOWN = 8
 
 _LOCATION_KEYS = ("file_path", "path", "file")
-_LINE_KEYS = ("call_line", "line", "start_line")
+_LINE_KEYS = ("reference_line", "call_line", "line", "start_line")
 _NAME_KEYS = ("qualified_name", "name", "symbol", "label", "handler", "route")
 _TIER_KEYS = ("trust_tier", "tier")
 # Content hashes and revision ids cost context and give the model nothing

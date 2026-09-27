@@ -70,9 +70,25 @@ def _symbol_hints(args: list[str]) -> dict[str, Any]:
     return {"path": args[1]} if len(args) > 1 and args[1].strip() else {}
 
 
+_QUERY_CANDIDATES = 30
+_QUERY_SOURCE_SHOWN = 8
+_QUERY_TESTS_SHOWN = 4
+
+
+_TEST_DIRS = frozenset({"test", "tests", "__tests__", "__tests", "spec", "specs", "testing"})
+
+
+def _looks_like_test(path: str) -> bool:
+    parts = path.replace("\\", "/").lower().split("/")
+    name = parts[-1]
+    return (any(part in _TEST_DIRS for part in parts[:-1])
+            or name.startswith("test_") or ".test." in name or ".spec." in name
+            or name.endswith(("_test.go", "_test.py", "_test.rs", "_spec.rb")))
+
+
 def _run_query(session: "GTSession", args: list[str]) -> CapabilityResult:
     _need(args, 1, TOOLS["gt-query"].usage)
-    return localization.hybrid_rank(session, " ".join(args), k=10)
+    return localization.hybrid_rank(session, " ".join(args), k=_QUERY_CANDIDATES)
 
 
 def _run_context(session: "GTSession", args: list[str]) -> CapabilityResult:
@@ -224,6 +240,24 @@ def _run_changes(session: "GTSession", args: list[str]) -> CapabilityResult:
         after = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
         edited[path] = {"before": _base_text(repo_root, path), "after": after}
     result = change.patch_impact(session, edited)
+    if result.answer is None and len(edited) > 1:
+        # One unmappable file (an export-only index, a config file) sinks the
+        # combined answer; ask per file and merge what maps.
+        merged: dict[str, Any] = {}
+        unmapped = []
+        for path, texts in edited.items():
+            single = change.patch_impact(session, {path: texts})
+            if isinstance(single.answer, dict):
+                for key, value in single.answer.items():
+                    if isinstance(value, list):
+                        merged.setdefault(key, []).extend(value)
+                    else:
+                        merged.setdefault(key, value)
+            else:
+                unmapped.append(path)
+        if merged:
+            result = dataclasses.replace(result, answer=merged, status="partial", omissions=tuple(
+                f"changed_symbols_unmapped:{path}" for path in unmapped))
     if len(paths) > MAX_CHANGED_FILES:
         result = dataclasses.replace(result, omissions=(
             *result.omissions, f"changed_files_truncated:{len(paths)}>{MAX_CHANGED_FILES}"))
@@ -314,9 +348,39 @@ def _run_calls(session: "GTSession", args: list[str]) -> CapabilityResult:
                 omissions=() if calls else ("no_callsites_recorded",))
 
 
+_MODULE_MEMBERS_SHOWN = 15
+
+
 def _run_module(session: "GTSession", args: list[str]) -> CapabilityResult:
+    """The community a file belongs to AND its sibling files - the facade
+    returns only the community's label and cohesion, which does not tell the
+    agent which other files move with this one."""
     _need(args, 1, TOOLS["gt-module"].usage)
-    return structure.communities(session, args[0])
+    from gt_engine.capabilities._query import graph_conn
+
+    result = structure.communities(session, args[0])
+    answer = result.answer if isinstance(result.answer, dict) else None
+    if not answer or not answer.get("communities"):
+        return result
+    conn = graph_conn(session)
+    if conn is None:
+        return result
+    shaped = []
+    try:
+        for community in answer["communities"]:
+            members = [row[0] for row in conn.execute(
+                "SELECT member FROM community_members WHERE community_id = ? AND member_kind = 'file'"
+                " AND member != ? ORDER BY member LIMIT ?",
+                (community.get("id"), args[0], _MODULE_MEMBERS_SHOWN + 1))]
+            cohesion = community.get("structural_cohesion") or community.get("cohesion")
+            shaped.append({
+                "cluster": f"{community.get('label') or community.get('heuristic_label')}"
+                           f" ({community.get('member_count')} files, cohesion {cohesion})",
+                "files moving with it": [{"file_path": member} for member in members[:_MODULE_MEMBERS_SHOWN]],
+            })
+    finally:
+        conn.close()
+    return dataclasses.replace(result, answer={"modules": shaped})
 
 
 def _run_cochange(session: "GTSession", args: list[str]) -> CapabilityResult:
@@ -357,17 +421,31 @@ def _shape_query(answer: Any, _args: list[str]) -> Any:
     if not isinstance(answer, dict):
         return answer
     provenance = answer.get("provenance") or {}
-    rows = []
+    source: list[dict[str, Any]] = []
+    tests: list[dict[str, Any]] = []
     for row in answer.get("fused") or []:
         origin = provenance.get(row.get("stable_id")) or {}
-        rows.append({
-            "file_path": origin.get("file_path") or "",
+        path = origin.get("file_path") or ""
+        item = {
+            "file_path": path,
             "line": origin.get("start_line"),
             "qualified_name": origin.get("qualified_name") or origin.get("name")
             or row.get("snippet"),
             "kind": origin.get("label"),
-        })
-    return {"ranked": rows}
+        }
+        # Natural-language task text matches descriptive test names; tests
+        # would otherwise crowd out the code the agent has to change.
+        (tests if _looks_like_test(path) else source).append(item)
+    return {"1 source": source[:_QUERY_SOURCE_SHOWN], "2 related tests": tests[:_QUERY_TESTS_SHOWN]}
+
+
+def _shape_modules(answer: Any, _args: list[str]) -> Any:
+    if not isinstance(answer, dict) or "modules" not in answer:
+        return answer
+    flat: dict[str, Any] = {}
+    for module in answer["modules"]:
+        flat[f"cluster {module['cluster']}"] = module["files moving with it"]
+    return flat
 
 
 def _shape_tests(answer: Any, _args: list[str]) -> Any:
@@ -488,7 +566,7 @@ TOOLS: dict[str, ToolSpec] = {
                  _run_calls, _joined("calls in")),
         ToolSpec("gt-module", "gt-module <file>",
                  "the cluster of files this file belongs with",
-                 _run_module, _joined("module cluster")),
+                 _run_module, _joined("module cluster"), shape=_shape_modules),
         ToolSpec("gt-cochange", "gt-cochange <file>",
                  "files that historically change together with this one",
                  _run_cochange, _joined("co-change")),

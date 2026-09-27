@@ -383,3 +383,22 @@ def test_submit_gate_never_blocks_under_attached(monkeypatch):
                               plan_submit_gate=lambda: False)
     assert miniswe_runtime._run_submit_gate(session, "echo done", pre_execution=True) is True
     assert store.rows == [("submit_gate_bypassed", {"reason": "attached_delivery"})]
+
+
+@pytest.mark.parametrize(("path", "is_test"), [
+    ("src/__tests__/container.test.ts", True), ("tests/integration/test_attrs.py", True),
+    ("ast/ast_test.go", True), ("lib/__tests/clone.js", True), ("src/container.ts", False),
+    ("src/adaptix/_internal/provider.py", False), ("src/testenv_helper.rs", False),
+])
+def test_query_test_path_classifier(path, is_test):
+    assert tool_server._looks_like_test(path) is is_test
+
+
+def test_query_shows_source_before_tests():
+    answer = {"fused": [{"stable_id": "a"}, {"stable_id": "b"}, {"stable_id": "c"}],
+              "provenance": {"a": {"file_path": "src/__tests__/x.test.ts", "start_line": 3, "name": "it: x"},
+                             "b": {"file_path": "src/x.ts", "start_line": 9, "qualified_name": "X.run"},
+                             "c": {"file_path": "src/y.ts", "start_line": 1, "name": "y"}}}
+    shaped = tool_server._shape_query(answer, ["q"])
+    assert [row["file_path"] for row in shaped["1 source"]] == ["src/x.ts", "src/y.ts"]
+    assert [row["file_path"] for row in shaped["2 related tests"]] == ["src/__tests__/x.test.ts"]
