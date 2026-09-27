@@ -41,6 +41,12 @@ from .persistent_execution_state import (
 from .request_history import load_history_evidence, store_history_evidence
 from .run_diagnostics import CapabilityState, DiagnosticCode, DiagnosticEvent
 
+
+def _attached_delivery() -> bool:
+    from .attached_delivery import is_attached
+
+    return is_attached()
+
 # Capabilities a host can declare (see the verdict's negotiation list).
 # The two stages __init__ can disable GT with. Neither is a fault: one is the
 # OFF mode, the other the global kill switch. Shared so the constructor and the
@@ -2375,6 +2381,18 @@ class GTSession:
                         # measured verdict - which is exactly what the
                         # last-row-wins read did, reporting DEGRADED for a
                         # 515-document index that had answered real queries.
+                        dense_refused = True
+                    elif (
+                        str(row.get("reason") or "") == "dense_index_not_ready"
+                        and _attached_delivery()
+                    ):
+                        # Attached delivery skips the whole-repository dense
+                        # sidecar by design (a 120 s startup bound keeps the
+                        # graph from waiting on it); a lookup against that
+                        # sidecar reporting "not ready" measures the choice,
+                        # not the index. It never overwrites a measured
+                        # verdict - SWE-Live arviz (run 36310150455) was
+                        # DEGRADED after its candidate re-ranks had answered.
                         dense_refused = True
                     else:
                         dense_measured = True

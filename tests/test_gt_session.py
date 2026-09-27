@@ -2065,3 +2065,27 @@ def test_the_degrade_stage_constant_matches_the_actual_call_sites(tmp_path):
     # now fails on its own assertion rather than passing quietly. That is what
     # caught before_model and submit, and it needs no scan to keep working.
     assert test_found, "tests exercise degrade() and the scan saw none of it"
+
+
+def test_attached_skipped_sidecar_never_downgrades_a_measured_index(tmp_path, monkeypatch):
+    """Attached delivery skips the whole-repository dense sidecar by design;
+    lookups against it report dense_index_not_ready. After candidate re-ranks
+    answered, those rows must not flip the verdict (SWE-Live arviz, run
+    36310150455). In push mode the same row is still a measurement."""
+    from gt_engine.attached_delivery import ATTACHED, DELIVERY_MODE_ENV, PUSH
+
+    sidecar = {"event": "dense_index_ready", "query_ready": False,
+               "reason": "dense_index_not_ready", "document_count": 1306}
+    journal = [
+        {"event": "dense_index_ready", "query_ready": True,
+         "document_count": 20, "query_result_count": 4},
+        dict(sidecar), dict(sidecar),
+    ]
+    (tmp_path / "a").mkdir()
+    (tmp_path / "p").mkdir()
+    monkeypatch.setenv(DELIVERY_MODE_ENV, ATTACHED)
+    assert _capability_rows(tmp_path / "a", journal)["dense_retrieval"] == (
+        "WORKING", "dense_index_ready_query_ready")
+    monkeypatch.setenv(DELIVERY_MODE_ENV, PUSH)
+    assert _capability_rows(tmp_path / "p", journal)["dense_retrieval"] == (
+        "DEGRADED", "dense_index_ready_not_query_ready")
