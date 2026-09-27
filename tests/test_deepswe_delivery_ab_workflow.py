@@ -85,8 +85,18 @@ def test_render_route_id_is_deterministic():
 
 def test_workflow_parses_with_expected_jobs():
     _, doc = _workflow()
-    assert list(doc["jobs"]) == ["plan", "readiness", "readiness_binding", "image_digest_gate",
-                                 "provider_gate", "task", "aggregate"]
+    assert list(doc["jobs"]) == ["plan", "readiness", "readiness_binding", "mirror_plan", "mirror",
+                                 "image_digest_gate", "provider_gate", "task", "aggregate"]
+
+
+def test_task_images_are_mirrored_before_the_digest_gate():
+    # Public ECR throttles anonymous reads per runner IP; the full cohort
+    # (run 36346438031) could not read its manifests from one runner.
+    _, doc = _workflow()
+    mirror = doc["jobs"]["mirror"]
+    assert mirror["permissions"]["packages"] == "write"
+    assert "crane" in str(mirror["steps"]) and "@${DIGEST}" in str(mirror["steps"])
+    assert "mirror" in doc["jobs"]["image_digest_gate"]["needs"]
 
 
 def test_no_gt_off_arm_anywhere():

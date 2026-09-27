@@ -88,7 +88,8 @@ on:
 
 permissions:
   contents: read
-  packages: read
+  # write: the called A/B workflow mirrors task images to this account's GHCR.
+  packages: write
   actions: read
 
 jobs:
