@@ -13,6 +13,7 @@ nothing to say.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -272,4 +273,55 @@ def symbol_facts(session: "GTSession", definition: dict[str, Any],
     return facts
 
 
-__all__ = ["symbol_facts"]
+# Property kinds that say how a function or class USES a name, most telling
+# first. The producer writes them per function (``properties``) and indexes
+# their text (``properties_fts``).
+_MENTION_KINDS = {"class_field": "declares it", "data_flow": "data flow",
+                  "field_read": "reads it", "param": "parameter", "docstring": "docstring"}
+MAX_MENTIONS_SHOWN = 5
+
+
+def mentions(conn: sqlite3.Connection, identifier: str,
+             verified: Callable[[str], bool] | None = None) -> list[tuple[str, str, str, int]]:
+    """(kind words, function/class, path, line) where ``identifier`` is used.
+
+    The grep fallback for a name that is not a definition node - constants,
+    fields, attributes, config keys: 108 of 122 silent searches on runs
+    36336203906/36336250729 were such names, and the producer had recorded
+    where each one flows or is declared."""
+    rank = list(_MENTION_KINDS)
+    try:
+        rows = conn.execute(
+            "SELECT p.kind, n.qualified_name, n.name, n.file_path, p.line, p.value FROM properties_fts f"
+            " JOIN properties p ON p.rowid = f.rowid JOIN nodes n ON n.id = p.node_id"
+            " WHERE properties_fts MATCH ? AND p.kind IN (%s) LIMIT 200" % ",".join("?" * len(rank)),
+            ('"' + identifier.replace('"', "") + '"', *rank)).fetchall()
+    except sqlite3.Error:
+        return []
+    word = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(identifier) + r"(?![A-Za-z0-9_])")
+    best: dict[tuple[str, str], tuple[int, str, str, int]] = {}
+    for kind, qualified, name, path, line, value in rows:
+        if not word.search(str(value or "")) or (verified is not None and not verified(str(path))):
+            continue
+        key = (str(qualified or name), str(path))
+        order = rank.index(kind)
+        if key not in best or order < best[key][0]:
+            best[key] = (order, _MENTION_KINDS[kind], str(path), int(line or 0))
+    ordered = sorted(best.items(), key=lambda item: (item[1][0], item[1][2], item[1][3]))
+    return [(words, name, path, line) for (name, _p), (_o, words, path, line) in ordered]
+
+
+def mention_block(conn: sqlite3.Connection, identifier: str,
+                  verified: Callable[[str], bool] | None = None) -> tuple[str, set[str], str] | None:
+    """(line, features, first user's short name) for a non-definition name."""
+    found = mentions(conn, identifier, verified)
+    if not found:
+        return None
+    shown = ", ".join(f"{name} ({path}:{line}, {words})" for words, name, path, line in found[:MAX_MENTIONS_SHOWN])
+    more = len(found) - MAX_MENTIONS_SHOWN
+    features = {"F3"} | ({"F15"} if any(words == "data flow" for words, *_ in found) else set())
+    return (f"  {identifier} (not a definition) is used in: {shown}" + (f" (+{more} more)" if more > 0 else ""),
+            features, found[0][1].rsplit(".", 1)[-1])
+
+
+__all__ = ["mention_block", "mentions", "symbol_facts"]

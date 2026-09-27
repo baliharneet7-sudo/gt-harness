@@ -319,3 +319,9 @@ def test_editing_a_test_lists_the_code_it_exercises(polyglot_session):
     block = ActionAugmenter(session).after_edit({path: (before, after)})
     assert "test ServerHelpersTest.test_sanitize exercises: sanitize" in block or \
         "test test_sanitize exercises: sanitize" in block, block
+
+
+def test_a_name_that_is_not_a_definition_shows_where_it_is_used(polyglot_session):
+    block = GrepAugmenter(polyglot_session[0]).augment('grep -rn "rate" pyapp')
+    assert "rate (not a definition) is used in: apply_tax (pyapp/helpers.py:9, data flow)" in block, block
+    assert "next: `gt-impact apply_tax`" in block

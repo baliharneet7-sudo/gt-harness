@@ -179,6 +179,12 @@ def _facts(session: "GTSession", answer: Any) -> tuple[tuple[str, str], ...]:
     return tuple(symbol_facts(session, definition)) if isinstance(definition, dict) else ()
 
 
+def _mention(conn: sqlite3.Connection, symbol: str, verified: Any = None) -> tuple[str, set[str], str] | None:
+    from gt_engine.graph_facts import mention_block
+
+    return mention_block(conn, symbol, verified)
+
+
 def block_features(answer: Any, facts: tuple[tuple[str, str], ...]) -> set[str]:
     """The features one rendered symbol block carries."""
     features = {"F2", "F12"}
@@ -338,6 +344,11 @@ class GrepAugmenter:
             for symbol in symbols:
                 answer, facts = view.symbol(symbol)
                 if answer is None:
+                    found = _mention(view.conn, symbol, view.verified)
+                    if found:
+                        blocks.append(found[0])
+                        hit_symbols.append(found[2])
+                        hit_features |= found[1]
                     continue
                 block = render_symbol_block(symbol, answer, tuple(line for _ids, line in facts))
                 if block:
@@ -398,6 +409,9 @@ class GrepAugmenter:
                 with snapshot_scope(scope):
                     symbol_results = [(symbol, structure.symbol_context(self.session, symbol))
                                       for symbol in symbols]
+                unresolved = [symbol for symbol, result in symbol_results
+                              if result.status in ("unavailable", "error", "abstain")
+                              or not render_symbol_block(symbol, result.answer)]
                 hit_symbols: list[str] = []
                 hit_features: set[str] = set()
                 for symbol, result in symbol_results:
@@ -409,6 +423,20 @@ class GrepAugmenter:
                         blocks.append(block)
                         hit_symbols.append(symbol)
                         hit_features |= block_features(result.answer, facts)
+                if unresolved:
+                    from gt_engine.capabilities._query import graph_conn
+
+                    conn = graph_conn(self.session)
+                    if conn is not None:
+                        try:
+                            for symbol in unresolved:
+                                found = _mention(conn, symbol)
+                                if found:
+                                    blocks.append(found[0])
+                                    hit_symbols.append(found[2])
+                                    hit_features |= found[1]
+                        finally:
+                            conn.close()
             except Exception as exc:  # noqa: BLE001 - enrichment is silent on failure
                 self.metrics.errors += 1
                 self._journal(pattern=pattern[:200], outcome=f"error:{type(exc).__name__}")
