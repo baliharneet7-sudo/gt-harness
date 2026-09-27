@@ -193,9 +193,16 @@
     "58e463a1621fdfe36a33f47376bfcaaa04276c56",
     "a42c15829442dac99202d4d4495272ef36b3e499",
     "0ff6ab4ebeb6bbccc549a8f62a7b4478aee604b1",
-    "1e83ea687bf2df5d9a168b2bc2c77ea3fd990307"
+    "1e83ea687bf2df5d9a168b2bc2c77ea3fd990307",
+    "9cf513af651a096ce2921b1259a4ea0a05ad6187",
+    "0127b71254dbd64dcd89599c5a867a3c4061cb77",
+    "99a5a162da5aa3a6e8241beb63dabc60c965352a",
+    "2f194415833f006a466180899d17836ebfdcb2b3",
+    "92b08c3938e8e19c033c8bf693a5902c934f42f4",
+    "3ee0ce16695b6da736dde945f227a968490931cd",
+    "ec587cccf275d9c86dedf8962971afa5d6f4c972"
    ],
-   "attestation_digest_sha256": "ce0073a63fe3eb5fc39b28216af912ad4c680073268c3cbc3a9fbd32f1ea3c9f",
+   "attestation_digest_sha256": "7736a2f2bdfd9c23d11cb25a846359b6b9ae96d614b5b37a0c19f0b729b847ac",
    "authority": "HAR-81_OWNER_DIRECTIVE",
    "certified_source_commit": "cffca1fd29001577bf35a3355b7238e6cedd1130",
    "post_certification_changed_paths": [
@@ -334,6 +341,7 @@
     "gt-index/internal/parser/cfg_test.go",
     "gt-index/internal/parser/content_address_test.go",
     "gt-index/internal/parser/decorator_facts_test.go",
+    "gt-index/internal/parser/nested_definitions_test.go",
     "gt-index/internal/parser/parser.go",
     "gt-index/internal/parser/parser_idxfix_test.go",
     "gt-index/internal/parser/receiver_calls.go",
@@ -1026,7 +1034,7 @@
     }
    ],
    "reason_code": "digest_recorded_source_descends_from_unadvanced_default",
-   "review_inbox_commit": "82da776bf754b6c9a67b1bb2138befd2cf536e3d",
+   "review_inbox_commit": "aaf79405329bdfc5e1bd776459e22eb4eb7fb485",
    "review_packets": [
     {
      "head_sha": "db9daf9ecf3a6ec1c92c40fba214ee66e4d09d14",
@@ -1156,10 +1164,19 @@
      "packet_digest_sha256": "b50390463200d5085ddd5aa3ad9f67e645a90c7afa1cb239c3148b786a233b69",
      "packet_id": "har90-local-producer-1e83ea68",
      "status": "PASS"
+    },
+    {
+     "basis": "certified_producer_build_green",
+     "head_sha": "ec587cccf275d9c86dedf8962971afa5d6f4c972",
+     "kind": "check_outcome",
+     "packet_digest_sha256": "66a600d3dcad05dc8e1770ccb1910061f987668b5fd4d63a1f72bb98a26b72d1",
+     "packet_id": "har90-certified-producer-ec587ccc",
+     "path": "inbox/HAR-90/har90-certified-producer-ec587ccc.json",
+     "status": "PASS"
     }
    ],
    "schema": "gt.groundtruth_lineage_exception.v1",
-   "source_commit": "1e83ea687bf2df5d9a168b2bc2c77ea3fd990307",
+   "source_commit": "ec587cccf275d9c86dedf8962971afa5d6f4c972",
    "status": "VERIFIED_DESCENDANT_LINEAGE_EXCEPTION"
   },
   "producer_build": {

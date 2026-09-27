@@ -25,13 +25,16 @@ Legend: [ ] todo · [~] in progress · [x] done · [!] blocked / needs the user
 - [x] `scripts/resolve_baseline.py` — per-(model, effort) comparator from the public leaderboard trials; reproduces deepseek-v4-flash/max pass@1 0.5332 exactly
 - [x] `config/deepswe_task_catalog_v1.json` — all 113 tasks, images pinned by registry digest, 20 bundle rows cross-checked byte-for-byte; task set == leaderboard's 113
 - [x] `deepswe_gt_delivery_ab.yml` — interleaved push/attached × n_runs, catalog cohort, rendered route, aggregate with step-limit proof (in progress)
-- [!] TB2 central `GT_SOURCE_SHA 921bec20` is an import-provenance pin (`config/tb2_gt_import_manifest.json`, asserted by 2 tests), not a stray label — re-deriving the import manifest needs a decision; deferred (TB2 secondary)
+- [x] import-provenance pin re-derived per release: `scripts/rederive_import_manifest.py` (in-place, `--check`); pinned to 70969751; workflows/tests assert zero drift, not a literal (98d2c332)
+- [ ] TB2 central still sets `GT_SOURCE_SHA 921bec20` in the workflow env (TB2 secondary)
 - [x] GitHub accepts up to 25 `workflow_dispatch` inputs since 2025-12-04 (changelog) — the A/B workflow's 14 are fine
 
 ## W3 — hardening
-- [!] re-certify producer 9cf513af (Route-B CI run) — needs the user
+- [x] producer re-certified: Route-B run 36290313967 @ec587ccc (VTA bound, nested defs, inline routes, 9cf513af) vendored with wheel a873f92a, blob-exact gt-index-src; `verify_producer_binding --enforce` VERIFIED (70969751)
+- [x] inline route handler no longer reported `route_handler_unresolved`; answer carries `handler_kind` (producer ec587ccc)
+- [~] lineage attestation extended with review packet `har90-certified-producer-ec587ccc` (gt-review-inbox)
 - [x] stale canonical docs: `TYPED_SURFACE.md` (subprocess.run, revision identity, route_map middleware) + registry limitation string; [ ] re-render `HAR90_CANONICAL_SECTION.md`
-- [~] real-repo provider-free smoke (`scripts/smoke_attached_real_repos.py`; adaptix, aiomonitor, awilix, abs, fd, csstree)
+- [x] real-repo provider-free smoke (`scripts/smoke_attached_real_repos.py`; adaptix, aiomonitor, awilix, abs, fd, csstree)
 - [x] `gt-query` path (`hybrid_rank` facade) already fuses available sources with RRF (dense absence = omission, not all-or-nothing); the all-or-nothing defect is only in the push localization lane
 - [x] efficiency: wheel `processes._stable_id_to_nodes` quadratic CAST join (40 s/call on adaptix) → output-identical shim 0.94 s, attached arm only; per-action working-tree snapshot cache
 
@@ -51,5 +54,6 @@ Legend: [ ] todo · [~] in progress · [x] done · [!] blocked / needs the user
 - The 20-task product bundle cannot run a matched control or the full 113 — hence the catalog.
 
 ## Log
+- 2026-09-27: producer ec587ccc certified + vendored (70969751); import pin re-derived (98d2c332); producer CI profile identical to certified 1e83ea68 (pre-existing lint + 60 s Go-build fixture timeouts on ubuntu-3.11/windows), the one real regression fixed.
 - 2026-09-26: committed a609ee28 (W2 core, routing, resolver, catalog, A/B workflow); extended catalog + lazy freshness + gt-calls; real-repo smoke running.
 - 2026-09-26: worktree `D:\gt-attached` created; audit + plan approved; W2 core, W1 routing/resolver/catalog landed locally.
