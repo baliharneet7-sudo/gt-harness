@@ -68,18 +68,30 @@ Source of truth: `gt_engine/attached_delivery.FEATURE_SURFACES`. Pinned by `test
 - **`gt_bytes_would_push`:** not measurable in SHADOW, because the push producers do not run there. Adding them back would add per-action cost; the A/B compares arms directly instead.
 - **Untested at scale:** nothing here has run on a real DeepSWE repository yet. The next step is W3.2: a provider-free smoke on 6 repos.
 
-## 6. Efficiency on real repositories (measured)
+## 6. Real repositories (measured, provider-free)
 
-First real-repo smoke (adaptix@a691069, 489 files, 283 MB graph, local gt-index build):
+`scripts/smoke_attached_real_repos.py`: each DeepSWE task repository cloned at its base commit, indexed, bound exactly as the runtime binds it; every `gt-*` tool run with arguments derived from the graph (the most-called functions), and grep augmentation on those symbols. Local gt-index build `0ff6ab4e` (Windows); the hang below was reproduced with the certified linux binary under WSL.
 
-| call | before | cause | after |
-|---|---|---|---|
-| `gt-context` / `gt-flows` / `gt-calls` / every grep augmentation | **50–72 s** | wheel `processes._stable_id_to_nodes` joins `resolution_symbols` with `ON CAST(rs.native_id AS INTEGER) = n.id`; the cast defeats every index, so SQLite nested-scans ~99k nodes × resolution symbols on every `symbol_context` call (40 s self-time) | `gt_engine/wheel_perf.py`: same mapping via two linear scans + dict join — **0.94 s vs 40.12 s, output dict-identical (98,769 entries)**; pinned equal on the real producer graph by `tests/canonical/test_wheel_perf.py` |
-| every typed query | +~450 ms | `build_action_request` content-hashes the whole working tree per call | snapshot computed once per agent action (`miniswe_typed_actions.snapshot_scope`), the same granularity at which the engine observes edits |
+| repo (lang) | index | tools answered | internal errors | tool p50 | grep augment hits |
+|---|---|---|---|---|---|
+| adaptix (py) | 99 s | 24/35 | 0 | 396 ms | 5/5 |
+| aiomonitor (py) | **producer hang** | – | – | – | – |
+| awilix (ts) | 5 s | 21/35 | 0 | 193 ms | 5/5 |
+| abs (go) | 15 s | 23/35 | 0 | 491 ms | 5/5 |
+| fd (rust) | 5 s | 24/35 | 0 | 119 ms | 4/5 |
+| csstree (js) | 17 s | 26/35 | 0 | 287 ms | 4/5 |
 
-The shim is installed **only** in the attached arm, so the push arm — the A/B control — runs the unmodified wheel. The defect is in the certified wheel and should be fixed there. The same cast-join pattern also appears in `groundtruth/mcp/endpoints/_graph_db.py:145` and `groundtruth/resolve.py:498,597`.
+The no-answers are named and mostly legitimate: no HTTP routes or MCP tools in these libraries, no test run yet (`gt-verify`/`gt-failures`), no git history in a depth-1 clone (`gt-cochange`), leaf functions with no callsites (`gt-calls`), Rust outside the `syntax`/`slice` language sets. Three were real and are fixed:
 
-Consequence for past runs: wherever GT's push lanes called `symbol_context`/process detection on a real repository, this cost fell on the agent's wall clock. That is a candidate contributor to the TB2/DeepSWE timeouts and is worth checking in past journals.
-| repeat `symbol_context` / flows on the same graph | ~2 s each | process detection recomputed per call over an immutable published graph | memoized per graph file identity (path, size, mtime); an amend publishes a new file, so the cache can never serve a stale graph; cached == uncached pinned on the real graph |
+| problem found | cause | fix |
+|---|---|---|
+| `gt-context` / `gt-flows` / `gt-calls` / every grep augmentation took **50–72 s** | wheel `processes._stable_id_to_nodes` joins on `CAST(rs.native_id AS INTEGER) = n.id`; the cast defeats every index (40 s self-time per call) | `gt_engine/wheel_perf.py`: same mapping via two scans + dict join, **0.94 s vs 40.12 s, dict-identical (98,769 entries)**; process detection memoized per immutable published graph file; both pinned equal to the wheel on a real producer graph; attached arm only, so the push control runs the unmodified wheel |
+| every typed query re-hashed the working tree (~450 ms on adaptix) | `build_action_request` content-addresses the whole tree per call | once per agent action (`snapshot_scope`), the granularity at which the engine observes edits |
+| `gt-tests` found covering tests in **0/5** repos (each has 130–900 `is_test` functions) | the certified covering selector returns nothing | fall back to graph reachability: test functions within 3 CALLS hops of the file's functions, labelled as reachability not coverage; now 5/5 (adaptix 5.6 s). The producer's `is_test` also marks benchmark/example helpers |
+| heavily called symbols (`loader`, 98 callers) read as "no callers" | the typed byte bound nulls the whole answer instead of truncating rows | `gt-callers`/`gt-impact` fall back to depth 1 and say so; the bound (`typed_output_bounds.py`) should truncate rows — this affects the push arm's typed tool too |
 
-**Typed byte-bound defect (surfaced by adaptix):** for a heavily called symbol (`loader`, 98 callers), `callers` at depth ≥ 2 exceeds `QUERY_RESULT_MAX_BYTES`, and the bound *drops the whole answer* (`answer: null`, `query_result_unbounded_payload`) instead of truncating its rows. So the symbols where callers matter most read as "no callers". `gt-callers` and `gt-impact` now fall back to depth 1 and say so (`depth_reduced_to_1`). The bound itself (`gt_engine/typed_output_bounds.py`) should truncate rows, not null the answer; that affects the typed tool on the push arm too.
+### Producer hang — benchmark blocker
+
+The **certified** producer (`vendor/gt-index-linux-amd64`, sha `d4655bcc…`, source 1e83ea68) does not finish on aiomonitor@b73fea2 — 43 source files — within 300 s. A goroutine dump places it in `resolver.AnalyzeVTAWithBudget` (`vta.go:374` → `vta.go:167`, called from `main.go:816`). Each worklist iteration scans every call × argument × every assignment (9,726 calls, 4,846 assignments ≈ 94M `parameterMatches`) and re-sorts evidence edge sets that grow every round. `GT_VTA_ITERATION_BUDGET` (default 64) bounds iterations, not per-iteration work. HAR-93 records aiomonitor indexing under 0becde10, so this is a regression in the certified build. In a benchmark this means a graphless run (attached: treatment-invalid row; push: startup abort). It must be fixed in the producer (bound per-iteration work, or index parameters by (file, scope)) and re-certified before a DeepSWE run.
+
+The same cast-join pattern also appears in `groundtruth/mcp/endpoints/_graph_db.py:145` and `groundtruth/resolve.py:498,597`. Wherever the push lanes called `symbol_context` or process detection on a real repository, that cost fell on the agent's wall clock — a candidate contributor to past timeouts, worth checking in old journals.

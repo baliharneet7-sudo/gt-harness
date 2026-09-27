@@ -1,0 +1,2687 @@
+{
+ "binary": "C:\\gt-smoke-a6\\gt-index-new.exe",
+ "build_info": {
+  "schema": "gt-index.build.v1",
+  "complete": true,
+  "git_commit": "0ff6ab4ebeb6bbccc549a8f62a7b4478aee604b1",
+  "build_time_utc": "2026-09-23T02:46:46Z",
+  "source_fingerprint": "a70e4eac87a96b4320c6f5f976b6b09045244b6902f0770ba313df45cc297a9f",
+  "go_toolchain": "go1.26.7",
+  "build_tags": "netgo,osusergo,sqlite_fts5",
+  "build_id": "3d3c0f87802e8b782ca880d4367df5ea4d008f118b74ca6a921eb05cbc559d71",
+  "executable_sha256": "412f5a0490bcc552b687ad008ef4cf83f8d3dec30b8af24ee46c49c496d3d395",
+  "graph_schema_version": "v15.4-callsite-actuals",
+  "capabilities": [
+   "atomic_graph_publication",
+   "batch_parser_node_reuse_v1",
+   "call_resolution_v2",
+   "data_access_edges_v1",
+   "framework_surface_resolution_v1",
+   "incremental_stale_suppression",
+   "parse_failure_accounting",
+   "parser_inspection_v1",
+   "retained_call_candidates",
+   "source_revision_meta_v1",
+   "versioned_query_policy"
+  ]
+ },
+ "tasks": [
+  {
+   "task": "adaptix-name-mapping-aliases",
+   "repository": "https://github.com/reagento/adaptix",
+   "commit": "a691069fcadf9131e5f7a5a130a022dc678f3e1d",
+   "language": "python",
+   "index_seconds": 98.6,
+   "node_counts": {
+    "Callsite": 11893,
+    "Class": 891,
+    "CompletenessFact": 72961,
+    "Decorator": 878,
+    "DerivationFact": 275,
+    "File": 356,
+    "Function": 959,
+    "Method": 1276,
+    "QueryPolicyVersion": 2,
+    "TypeAlias": 3,
+    "UnresolvedFact": 5926,
+    "vta_flow_edge_fact": 2475,
+    "vta_flow_source_fact": 874
+   },
+   "edge_counts": {
+    "ACCESSES": 652,
+    "CALLS": 4977,
+    "CANDIDATE_TARGET": 12342,
+    "CONTAINS": 2154,
+    "CO_SERIALIZES": 325,
+    "DATA_FLOW": 74,
+    "DECORATES": 978,
+    "EXTENDS": 371,
+    "HAS_CALLSITE": 11893,
+    "HAS_COMPLETENESS_FACT": 72961,
+    "HAS_DERIVATION_FACT": 275,
+    "HAS_UNRESOLVED_FACT": 5926,
+    "IMPORTS": 2495,
+    "INJECTS": 82,
+    "PARAM_TYPE": 997,
+    "PRECEDES": 192,
+    "RAISES": 169,
+    "READS": 496,
+    "RETURNS_TYPE": 258,
+    "SELECTED_TARGET": 5967,
+    "WRITES": 197
+   },
+   "top_symbols": [
+    {
+     "name": "loader",
+     "file": "src/adaptix/_internal/morphing/facade/provider.py",
+     "line": 63,
+     "callers": 98
+    },
+    {
+     "name": "get_loader",
+     "file": "src/adaptix/_internal/morphing/facade/retort.py",
+     "line": 266,
+     "callers": 80
+    },
+    {
+     "name": "dumper",
+     "file": "src/adaptix/_internal/morphing/facade/provider.py",
+     "line": 89,
+     "callers": 72
+    },
+    {
+     "name": "get_dumper",
+     "file": "src/adaptix/_internal/morphing/facade/retort.py",
+     "line": 292,
+     "callers": 58
+    },
+    {
+     "name": "normalize_type",
+     "file": "src/adaptix/_internal/type_tools/normalize_type.py",
+     "line": 880,
+     "callers": 54
+    }
+   ],
+   "tools_answered": 24,
+   "tools_run": 35,
+   "internal_errors": 0,
+   "tool_ms_p50": 396.2,
+   "tool_ms_max": 2611.6,
+   "augment_hits": 5,
+   "augment_runs": 5,
+   "tools": [
+    {
+     "tool": "gt-query",
+     "args": [
+      "Add input key aliases to name mapping"
+     ],
+     "exit_code": 0,
+     "ms": 902.5,
+     "bytes": 1217,
+     "internal_error": false,
+     "head": "[GT] query Add input key aliases to name mapping",
+     "text": "[GT] query Add input key aliases to name mapping\nranked (10):\n  src/adaptix/_internal/morphing/model/dumper_gen.py:97  GenState.add_key  (Method)\n  src/adaptix/_internal/morphing/model/loader_gen.py:151  GenState.add_key  (Method)\n  src/adaptix/_internal/provider/fields.py:7  input_field_to_loc  (Function)\n  tests/unit/model_tools/introspection/test_pydantic.py:748  test_simple_aliases  (Function)\n  src/adaptix/_internal/datastructures.py:287  OrderedUniqueGrouper.add  (Method)\n  src/adaptix/_internal/conversion/linking_provider.py:87  FunctionLinkingProvider._get_linking  (Method)\n  src/adaptix/_internal/morphing/model/loader_gen.py:471  BuiltinModelLoaderGen._gen_add_self_extra_to_parent_extra  (Method)\n  src/adaptix/_internal/morphing/name_layout/component.py:383  _paths_to_branches  (Function)\n  docs/examples/loading-and-dumping/extended_usage/mapping_to_list.py:1  docs/examples/loading-and-dumping/extended_usage/mapping_to_list.py  (File)\n  src/adaptix/_internal/morphing/name_layout/provider.py:58  BuiltinNameLayoutProvider._create_input_crown  (Method)\nnote: partial: name-level graph facts, verify by reading the code; omitted: source_unavailable:dense\nnext: gt-context <symbol> for the top hit"
+    },
+    {
+     "tool": "gt-flows",
+     "args": [],
+     "exit_code": 0,
+     "ms": 2611.6,
+     "bytes": 1776,
+     "internal_error": false,
+     "head": "[GT] flows",
+     "text": "[GT] flows\nmatched: 75\nprocess_count: 75\nprocesses (5):\n  dumper (src/adaptix/_internal/morphing/facade/provider.py:89) -> bound (src/adaptix/_internal/provider/facade/provider.py:20) -> create_loc_stack_checker (src/adaptix/_internal/provider/loc_stack_filtering.py:236) -> ExactOriginLSC (src/adaptix/_internal/provider/loc_stack_filtering.py:162)\n  get_attrs_shape (src/adaptix/_internal/model_tools/introspection/attrs.py:144) -> _get_output_shape (src/adaptix/_internal/model_tools/introspection/attrs.py:124) -> _get_default (src/adaptix/_internal/model_tools/introspection/attrs.py:31) -> DefaultFactory (src/adaptix/_internal/model_tools/definitions.py:32)\n  get_dataclass_shape (src/adaptix/_internal/model_tools/introspection/dataclass.py:60) -> normalize_type (src/adaptix/_internal/type_tools/normalize_type.py:880) -> normalize (src/adaptix/_internal/type_tools/normalize_type.py:528) -> get_generic_args (src/adaptix/_internal/type_tools/fundamentals.py:38)\n  get_pydantic_shape (src/adaptix/_internal/model_tools/introspection/pydantic.py:219) -> _get_input_shape (src/adaptix/_internal/model_tools/introspection/pydantic.py:105) -> _get_default (src/adaptix/_internal/model_tools/introspection/pydantic.py:41) -> DefaultValue (src/adaptix/_internal/model_tools/definitions.py:21)\n  loader (src/adaptix/_internal/morphing/facade/provider.py:63) -> bound (src/adaptix/_internal/provider/facade/provider.py:20) -> create_loc_stack_checker (src/adaptix/_internal/provider/loc_stack_filtering.py:236) -> ExactTypeLSC (src/adaptix/_internal/provider/loc_stack_filtering.py:138)\ntruncated: True\nnote: partial: name-level graph facts, verify by reading the code; omitted: process_library_truncated, query_result_byte_limit, query_result_truncated:answer.processes:5/10"
+    },
+    {
+     "tool": "gt-routes",
+     "args": [],
+     "exit_code": 1,
+     "ms": 1106.5,
+     "bytes": 55,
+     "internal_error": false,
+     "head": "[GT] routes: no answer (no matching facts in the graph)",
+     "text": "[GT] routes: no answer (no matching facts in the graph)"
+    },
+    {
+     "tool": "gt-tools",
+     "args": [],
+     "exit_code": 1,
+     "ms": 370.1,
+     "bytes": 49,
+     "internal_error": false,
+     "head": "[GT] tool handlers: no answer (no_tools_detected)",
+     "text": "[GT] tool handlers: no answer (no_tools_detected)"
+    },
+    {
+     "tool": "gt-verify",
+     "args": [],
+     "exit_code": 1,
+     "ms": 9.0,
+     "bytes": 56,
+     "internal_error": false,
+     "head": "[GT] last test result: no answer (no_execution_recorded)",
+     "text": "[GT] last test result: no answer (no_execution_recorded)"
+    },
+    {
+     "tool": "gt-failures",
+     "args": [],
+     "exit_code": 1,
+     "ms": 1.9,
+     "bytes": 57,
+     "internal_error": false,
+     "head": "[GT] recurring failures: no answer (no_failures_recorded)",
+     "text": "[GT] recurring failures: no answer (no_failures_recorded)"
+    },
+    {
+     "tool": "gt-help",
+     "args": [],
+     "exit_code": 0,
+     "ms": 2.4,
+     "bytes": 1593,
+     "internal_error": false,
+     "head": "[GT] commands",
+     "text": "[GT] commands\ntools (23):\n  gt-query \"<concept or error text>\"  - rank files and symbols relevant to a concept\n  gt-context <symbol> [file]  - definition, callers, callees and flows of one symbol\n  gt-callers <symbol> [depth]  - who calls this symbol, by call depth\n  gt-impact <symbol> [file]  - what may break if this symbol changes (callers to depth 3)\n  gt-refs <symbol> [file]  - graph references to a symbol\n  gt-def <symbol> [file]  - where a symbol is defined\n  gt-flows [\"<concept>\"]  - execution flows (entry point -> steps)\n  gt-tests <file> [file...]  - tests that cover the given source files\n  gt-routes [route|handler|file filter]  - HTTP routes, handlers, middleware and injections\n  gt-slice <function> <line> [backward|forward]  - statements that affect (or are affected by) a line\n  gt-taint <source-symbol> [sink-symbol]  - call paths from a source to a sink\n  gt-verify  - the last test/build result GT observed, vs the task baseline\n  gt-changes [file...]  - callers and tests affected by your edits so far (or by the given files)\n  gt-check <file>  - parse a file you edited and report syntax errors\n  gt-help  - list every GT command\n  gt-api <route|handler>  - clients and callers of an HTTP route or handler\n  gt-shape <interface|class> [file]  - does each implementation still match the interface\n  gt-calls <function> [file]  - how each call inside a function resolved (target, ambiguous, external)\n  gt-module <file>  - the cluster of files this file belongs with\n  gt-cochange <file>  - files that historically change together with this one\n  ... 3 more not shown"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "loader"
+     ],
+     "exit_code": 0,
+     "ms": 2095.0,
+     "bytes": 1745,
+     "internal_error": false,
+     "head": "[GT] context loader",
+     "text": "[GT] context loader\ncallee_count: 3\ncallees (3):\n  src/adaptix/_internal/provider/value_provider.py:84  ValueProvider  [CERTIFIED]\n  src/adaptix/_internal/provider/facade/provider.py:80  bound  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/provider.py:82  make_chain  [CERTIFIED]\ncaller_count: 98\ncallers (10):\n  src/adaptix/_internal/morphing/facade/provider.py:121  as_is_loader  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:22  test_any  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:16  test_coordinates  [CERTIFIED]\n  tests/unit/morphing/test_enum_provider.py:117  test_exact_value_provider  [CERTIFIED]\n  tests/unit/morphing/test_enum_provider.py:211  test_flag_by_exact_value  [CERTIFIED]\n  tests/unit/morphing/test_enum_provider.py:234  test_flag_by_exact_value_loader_with_bad_types  [CERTIFIED]\n  tests/unit/morphing/test_enum_provider.py:280  test_flag_by_member_names  [CERTIFIED]\n  tests/unit/morphing/test_enum_provider.py:354  test_flag_by_member_names_with_bad_types  [CERTIFIED]\n  tests/unit/morphing/test_enum_provider.py:398  test_flag_by_member_names_with_mapping  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:55  test_int  [CERTIFIED]\ncandidates (1):\n  src/adaptix/_internal/morphing/facade/provider.py:63  loader  (Function)\ndefinition: src/adaptix/_internal/morphing/facade/provider.py:63  loader  (Function)\nflows (5):\n  loader -> ExactTypeLSC\n  loader -> LocStackBoundingProvider\n  loader -> ChainingProvider\n  _make_loader -> ReFieldNameLSC (lower bound)\n  _make_loader -> OriginSubclassLSC (lower bound)\nprimary_selection: unique\nsymbol: loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "loader"
+     ],
+     "exit_code": 1,
+     "ms": 417.2,
+     "bytes": 50,
+     "internal_error": false,
+     "head": "[GT] callers loader: no answer (callers_truncated)",
+     "text": "[GT] callers loader: no answer (callers_truncated)"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "loader"
+     ],
+     "exit_code": 0,
+     "ms": 377.7,
+     "bytes": 1769,
+     "internal_error": false,
+     "head": "[GT] impact loader",
+     "text": "[GT] impact loader\ncaller_count: 119\ncallers_by_depth 1 (5):\n  src/adaptix/_internal/morphing/facade/provider.py:121  as_is_loader  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:22  test_any  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:16  test_coordinates  [CERTIFIED]\n  tests/unit/morphing/test_enum_provider.py:117  test_exact_value_provider  [CERTIFIED]\n  tests/unit/morphing/test_enum_provider.py:211  test_flag_by_exact_value  [CERTIFIED]\ncallers_by_depth 2 (5):\n  src/adaptix/_internal/morphing/constant_length_tuple_provider.py:66  ConstantLengthTupleProvider._make_loader  [CERTIFIED]\n  src/adaptix/_internal/morphing/generic_provider.py:264  LiteralProvider._make_loader  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/retort.py:271  AdornedRetort.get_loader  [CERTIFIED]\n  tests/integration/morphing/test_pydantic.py:70  test_generic  [CERTIFIED]\n  src/adaptix/_internal/integrations/pydantic/native.py:60  NativePydanticProvider.provide_loader  [SPECULATIVE conf=0.2]\ncallers_by_depth 3 (4):\n  src/adaptix/_internal/integrations/sqlalchemy/orm.py:30  AdaptixJSON.__init__  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/retort.py:327  AdornedRetort.load  [CERTIFIED]\n  tests/unit/retort/test_operating_retort.py:21  test_cannot_produce_loader  [CERTIFIED]\n  tests/unit/morphing/test_enum_provider.py:164  test_exact_value_optimization  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 1\nresolved_symbols (1):\n  src/adaptix/_internal/morphing/facade/provider.py:63  loader  (Function)\nreturned_count: 41\nsymbol: loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "loader"
+     ],
+     "exit_code": 0,
+     "ms": 366.7,
+     "bytes": 1494,
+     "internal_error": false,
+     "head": "[GT] references loader",
+     "text": "[GT] references loader\nreference_count: 128\nreferences_by_type CALLS (5):\n  src/adaptix/_internal/morphing/facade/provider.py:115  as_is_loader  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/provider.py:431  validator  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:12  test_coordinates  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:28  test_with_dependent_factory  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:18  test_any  [CERTIFIED]\nreferences_by_type DATA_FLOW (4):\n  src/adaptix/_internal/morphing/concrete_provider.py:306  BytesIOBase64Provider._make_loader  [CANDIDATE conf=0.8]\n  src/adaptix/_internal/morphing/concrete_provider.py:349  BytearrayBase64Provider._make_loader  [CANDIDATE conf=0.8]\n  src/adaptix/_internal/morphing/dict_provider.py:273  DefaultDictProvider._make_loader  [CANDIDATE conf=0.8]\n  src/adaptix/_internal/morphing/iterable_provider.py:51  IterableProvider._create_dt_first_iter_loader  [CANDIDATE conf=0.8]\nreferences_by_type IMPORTS (2):\n  src/adaptix/__init__.py:1  src/adaptix/__init__.py  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/retort.py:1  src/adaptix/_internal/morphing/facade/retort.py  [CERTIFIED]\nresolved_nodes: 1\nresolved_symbols (1):\n  src/adaptix/_internal/morphing/facade/provider.py:63  loader  (Function)\nreturned_count: 48\nsymbol: loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, references_truncated:IMPORTS, query_result_byte_limit"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "loader"
+     ],
+     "exit_code": 0,
+     "ms": 380.4,
+     "bytes": 253,
+     "internal_error": false,
+     "head": "[GT] definition loader",
+     "text": "[GT] definition loader\ndefinition_count: 1\ndefinitions (1):\n  src/adaptix/_internal/morphing/facade/provider.py:63  loader  (Function)\nsymbol: loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "loader"
+     ],
+     "exit_code": 0,
+     "ms": 1958.1,
+     "bytes": 593,
+     "internal_error": false,
+     "head": "[GT] calls in loader",
+     "text": "[GT] calls in loader\ncalls (3):\n  src/adaptix/_internal/morphing/facade/provider.py:80  bound -> bound (src/adaptix/_internal/provider/facade/provider.py:20) [CERTIFIED] [selected, static]\n  src/adaptix/_internal/morphing/facade/provider.py:82  make_chain -> make_chain (src/adaptix/_internal/morphing/facade/provider.py:56) [CERTIFIED] [selected, static]\n  src/adaptix/_internal/morphing/facade/provider.py:84  ValueProvider -> ValueProvider (src/adaptix/_internal/provider/value_provider.py:10) [CERTIFIED] [selected, static]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "get_loader"
+     ],
+     "exit_code": 0,
+     "ms": 2138.8,
+     "bytes": 1451,
+     "internal_error": false,
+     "head": "[GT] context get_loader",
+     "text": "[GT] context get_loader\ncallee_count: 1\ncallees (1):\n  src/adaptix/_internal/morphing/facade/retort.py:271  AdornedRetort._make_loader  [CERTIFIED]\ncaller_count: 80\ncallers (10):\n  src/adaptix/_internal/integrations/sqlalchemy/orm.py:30  AdaptixJSON.__init__  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/retort.py:327  AdornedRetort.load  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:21  test_any  [CERTIFIED]\n  tests/unit/morphing/test_concrete_provider.py:454  test_bool_loader_provider  [CERTIFIED]\n  tests/unit/morphing/test_concrete_provider.py:337  test_bytes_like_provider  [CERTIFIED]\n  tests/unit/retort/test_operating_retort.py:21  test_cannot_produce_loader  [CERTIFIED]\n  tests/unit/morphing/test_concrete_provider.py:511  test_complex_loader_provider  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:15  test_coordinates  [CERTIFIED]\n  tests/unit/morphing/test_concrete_provider.py:258  test_date_timestamp_provider  [CERTIFIED]\n  tests/unit/morphing/test_concrete_provider.py:198  test_datetime_format_provider  [CERTIFIED]\ncandidates (1):\n  src/adaptix/_internal/morphing/facade/retort.py:266  AdornedRetort.get_loader  (Method)\ndefinition: src/adaptix/_internal/morphing/facade/retort.py:266  AdornedRetort.get_loader  (Method)\nprimary_selection: unique\nsymbol: get_loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "get_loader"
+     ],
+     "exit_code": 0,
+     "ms": 420.3,
+     "bytes": 1708,
+     "internal_error": false,
+     "head": "[GT] callers get_loader",
+     "text": "[GT] callers get_loader\ncaller_count: 160\ncallers_by_depth 1 (5):\n  src/adaptix/_internal/integrations/sqlalchemy/orm.py:30  AdaptixJSON.__init__  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/retort.py:327  AdornedRetort.load  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:21  test_any  [CERTIFIED]\n  tests/unit/morphing/test_concrete_provider.py:454  test_bool_loader_provider  [CERTIFIED]\n  tests/unit/morphing/test_concrete_provider.py:337  test_bytes_like_provider  [CERTIFIED]\ncallers_by_depth 2 (10):\n  tests/unit/morphing/name_layout/test_provider.py:209  assert_flat_name_mapping  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/func.py:29  load  [CERTIFIED]\n  tests/integration/morphing/test_msgspec.py:30  test_all_field_kinds  [CERTIFIED]\n  tests/integration/morphing/test_pydantic.py:36  test_all_field_kinds  [CERTIFIED]\n  tests/unit/morphing/name_layout/test_provider.py:334  test_as_list  [CERTIFIED]\n  tests/integration/morphing/test_msgspec.py:14  test_basic  [CERTIFIED]\n  tests/integration/morphing/test_pydantic.py:16  test_basic  [CERTIFIED]\n  tests/unit/morphing/name_layout/test_provider.py:1066  test_chaining_priority  [CERTIFIED]\n  tests/unit/morphing/model/test_loader_provider.py:425  test_creation  [CERTIFIED]\n  tests/unit/morphing/name_layout/test_provider.py:173  test_default_parameters  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 1\nresolved_symbols (1):\n  src/adaptix/_internal/morphing/facade/retort.py:266  AdornedRetort.get_loader  (Method)\nreturned_count: 40\nsymbol: get_loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "get_loader"
+     ],
+     "exit_code": 0,
+     "ms": 420.2,
+     "bytes": 1533,
+     "internal_error": false,
+     "head": "[GT] impact get_loader",
+     "text": "[GT] impact get_loader\ncaller_count: 162\ncallers_by_depth 1 (5):\n  src/adaptix/_internal/integrations/sqlalchemy/orm.py:30  AdaptixJSON.__init__  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/retort.py:327  AdornedRetort.load  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:21  test_any  [CERTIFIED]\n  tests/unit/morphing/test_concrete_provider.py:454  test_bool_loader_provider  [CERTIFIED]\n  tests/unit/morphing/test_concrete_provider.py:337  test_bytes_like_provider  [CERTIFIED]\ncallers_by_depth 2 (5):\n  tests/unit/morphing/name_layout/test_provider.py:209  assert_flat_name_mapping  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/func.py:29  load  [CERTIFIED]\n  tests/integration/morphing/test_msgspec.py:30  test_all_field_kinds  [CERTIFIED]\n  tests/integration/morphing/test_pydantic.py:36  test_all_field_kinds  [CERTIFIED]\n  tests/unit/morphing/name_layout/test_provider.py:334  test_as_list  [CERTIFIED]\ncallers_by_depth 3 (2):\n  tests/unit/morphing/name_layout/test_provider.py:283  test_name_filtering  [CERTIFIED]\n  tests/unit/morphing/name_layout/test_provider.py:228  test_name_mutating  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 1\nresolved_symbols (1):\n  src/adaptix/_internal/morphing/facade/retort.py:266  AdornedRetort.get_loader  (Method)\nreturned_count: 42\nsymbol: get_loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "get_loader"
+     ],
+     "exit_code": 0,
+     "ms": 368.1,
+     "bytes": 1344,
+     "internal_error": false,
+     "head": "[GT] references get_loader",
+     "text": "[GT] references get_loader\nreference_count: 81\nreferences_by_type CALLS (10):\n  src/adaptix/_internal/integrations/sqlalchemy/orm.py:19  AdaptixJSON.__init__  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/retort.py:326  AdornedRetort.load  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:12  test_coordinates  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:28  test_with_dependent_factory  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:18  test_any  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:34  test_object  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:50  test_int  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:74  test_int_lax_coercion  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:82  test_int_dt_disable  [CERTIFIED]\n  tests/integration/morphing/test_empty.py:11  test_simple  [CERTIFIED]\nreferences_by_type CONTAINS (1):\n  src/adaptix/_internal/morphing/facade/retort.py:216  AdornedRetort  [CERTIFIED]\nresolved_nodes: 1\nresolved_symbols (1):\n  src/adaptix/_internal/morphing/facade/retort.py:266  AdornedRetort.get_loader  (Method)\nreturned_count: 21\nsymbol: get_loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, query_result_byte_limit, query_result_truncated:answer.references_by_type.CALLS:10/20"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "get_loader"
+     ],
+     "exit_code": 0,
+     "ms": 342.3,
+     "bytes": 276,
+     "internal_error": false,
+     "head": "[GT] definition get_loader",
+     "text": "[GT] definition get_loader\ndefinition_count: 1\ndefinitions (1):\n  src/adaptix/_internal/morphing/facade/retort.py:266  AdornedRetort.get_loader  (Method)\nsymbol: get_loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "get_loader"
+     ],
+     "exit_code": 0,
+     "ms": 2066.3,
+     "bytes": 585,
+     "internal_error": false,
+     "head": "[GT] calls in get_loader",
+     "text": "[GT] calls in get_loader\ncalls (1):\n  src/adaptix/_internal/morphing/facade/retort.py:271  _make_loader -> one of: IsoFormatProvider._make_loader (src/adaptix/_internal/morphing/concrete_provider.py:45); DatetimeFormatProvider._make_loader (src/adaptix/_internal/morphing/concrete_provider.py:78); DatetimeTimestampProvider._make_loader (src/adaptix/_internal/morphing/concrete_provider.py:114); DateTimestampProvider._make_loader (src/adaptix/_internal/morphing/concrete_provider.py:160); +18 more [ambiguous, virtual]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "dumper"
+     ],
+     "exit_code": 0,
+     "ms": 2007.4,
+     "bytes": 1626,
+     "internal_error": false,
+     "head": "[GT] context dumper",
+     "text": "[GT] context dumper\ncallee_count: 3\ncallees (3):\n  src/adaptix/_internal/provider/value_provider.py:110  ValueProvider  [CERTIFIED]\n  src/adaptix/_internal/provider/facade/provider.py:106  bound  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/provider.py:108  make_chain  [CERTIFIED]\ncaller_count: 72\ncallers (10):\n  src/adaptix/_internal/morphing/facade/provider.py:130  as_is_dumper  [CERTIFIED]\n  tests/unit/morphing/test_constant_length_tuple_provider.py:37  retort  [CERTIFIED]\n  tests/unit/morphing/test_dict_provider.py:25  retort  [CERTIFIED]\n  tests/unit/morphing/test_iterable_provider.py:38  retort  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:25  test_any  [CERTIFIED]\n  tests/unit/morphing/test_union_provider.py:176  test_bad_optional_dumping  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:19  test_coordinates  [CERTIFIED]\n  tests/unit/morphing/generic_provider/test_literal_provider.py:240  test_dumper_with_bytes  [CERTIFIED]\n  tests/unit/morphing/generic_provider/test_literal_provider.py:261  test_dumper_with_bytes_and_enums  [CERTIFIED]\n  tests/unit/morphing/generic_provider/test_literal_provider.py:206  test_dumper_with_enums  [CERTIFIED]\ncandidates (1):\n  src/adaptix/_internal/morphing/facade/provider.py:89  dumper  (Function)\ndefinition: src/adaptix/_internal/morphing/facade/provider.py:89  dumper  (Function)\nflows (3):\n  dumper -> ExactOriginLSC\n  dumper -> Omitted\n  dumper -> ValueProvider\nprimary_selection: unique\nsymbol: dumper\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "dumper"
+     ],
+     "exit_code": 0,
+     "ms": 344.7,
+     "bytes": 1510,
+     "internal_error": false,
+     "head": "[GT] callers dumper",
+     "text": "[GT] callers dumper\ncaller_count: 74\ncallers_by_depth 1 (10):\n  src/adaptix/_internal/morphing/facade/provider.py:130  as_is_dumper  [CERTIFIED]\n  tests/unit/morphing/test_constant_length_tuple_provider.py:37  retort  [CERTIFIED]\n  tests/unit/morphing/test_dict_provider.py:25  retort  [CERTIFIED]\n  tests/unit/morphing/test_iterable_provider.py:38  retort  [CERTIFIED]\n  tests/integration/morphing/test_basics.py:25  test_any  [CERTIFIED]\n  tests/unit/morphing/test_union_provider.py:176  test_bad_optional_dumping  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:19  test_coordinates  [CERTIFIED]\n  tests/unit/morphing/generic_provider/test_literal_provider.py:240  test_dumper_with_bytes  [CERTIFIED]\n  tests/unit/morphing/generic_provider/test_literal_provider.py:261  test_dumper_with_bytes_and_enums  [CERTIFIED]\n  tests/unit/morphing/generic_provider/test_literal_provider.py:206  test_dumper_with_enums  [CERTIFIED]\ncallers_by_depth 2 (2):\n  src/adaptix/_internal/morphing/constant_length_tuple_provider.py:245  ConstantLengthTupleProvider._make_dumper  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/retort.py:297  AdornedRetort.get_dumper  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 1\nresolved_symbols (1):\n  src/adaptix/_internal/morphing/facade/provider.py:89  dumper  (Function)\nreturned_count: 22\nsymbol: dumper\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:10/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "dumper"
+     ],
+     "exit_code": 1,
+     "ms": 377.0,
+     "bytes": 49,
+     "internal_error": false,
+     "head": "[GT] impact dumper: no answer (callers_truncated)",
+     "text": "[GT] impact dumper: no answer (callers_truncated)"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "dumper"
+     ],
+     "exit_code": 0,
+     "ms": 418.0,
+     "bytes": 1481,
+     "internal_error": false,
+     "head": "[GT] references dumper",
+     "text": "[GT] references dumper\nreference_count: 91\nreferences_by_type CALLS (2):\n  src/adaptix/_internal/morphing/facade/provider.py:124  as_is_dumper  [CERTIFIED]\n  tests/integration/morphing/test_attrs.py:12  test_coordinates  [CERTIFIED]\nreferences_by_type CO_SERIALIZES (1):\n  src/adaptix/_internal/morphing/facade/provider.py:63  loader  [CERTIFIED]\nreferences_by_type DATA_FLOW (3):\n  src/adaptix/_internal/morphing/iterable_provider.py:191  IterableProvider._create_dt_first_iter_dumper  [CANDIDATE conf=0.8]\n  src/adaptix/_internal/morphing/iterable_provider.py:206  IterableProvider._create_dt_all_iter_dumper  [CANDIDATE conf=0.8]\n  src/adaptix/_internal/morphing/union_provider.py:257  UnionProvider._produce_single_optional_dumper  [CANDIDATE conf=0.8]\nreferences_by_type IMPORTS (3):\n  src/adaptix/__init__.py:1  src/adaptix/__init__.py  [CERTIFIED]\n  src/adaptix/_internal/morphing/facade/retort.py:1  src/adaptix/_internal/morphing/facade/retort.py  [CERTIFIED]\n  docs/examples/loading-and-dumping/extended_usage/fields_filtering_type.py:1  docs/examples/loading-and-dumping/extended_usage/fields_filtering_type.py  [CANDIDATE conf=0.6]\nresolved_nodes: 1\nresolved_symbols (1):\n  src/adaptix/_internal/morphing/facade/provider.py:89  dumper  (Function)\nreturned_count: 39\nsymbol: dumper\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, query_result_byte_limit, query_result_truncated:answer.references_by_type.CALLS:2/20"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "dumper"
+     ],
+     "exit_code": 0,
+     "ms": 370.0,
+     "bytes": 253,
+     "internal_error": false,
+     "head": "[GT] definition dumper",
+     "text": "[GT] definition dumper\ndefinition_count: 1\ndefinitions (1):\n  src/adaptix/_internal/morphing/facade/provider.py:89  dumper  (Function)\nsymbol: dumper\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "dumper"
+     ],
+     "exit_code": 0,
+     "ms": 1950.2,
+     "bytes": 596,
+     "internal_error": false,
+     "head": "[GT] calls in dumper",
+     "text": "[GT] calls in dumper\ncalls (3):\n  src/adaptix/_internal/morphing/facade/provider.py:106  bound -> bound (src/adaptix/_internal/provider/facade/provider.py:20) [CERTIFIED] [selected, static]\n  src/adaptix/_internal/morphing/facade/provider.py:108  make_chain -> make_chain (src/adaptix/_internal/morphing/facade/provider.py:56) [CERTIFIED] [selected, static]\n  src/adaptix/_internal/morphing/facade/provider.py:110  ValueProvider -> ValueProvider (src/adaptix/_internal/provider/value_provider.py:10) [CERTIFIED] [selected, static]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-tests",
+     "args": [
+      "src/adaptix/_internal/morphing/facade/provider.py"
+     ],
+     "exit_code": 1,
+     "ms": 872.1,
+     "bytes": 95,
+     "internal_error": false,
+     "head": "[GT] tests for src/adaptix/_internal/morphing/facade/provider.py: no answer (no_covering_tests)",
+     "text": "[GT] tests for src/adaptix/_internal/morphing/facade/provider.py: no answer (no_covering_tests)"
+    },
+    {
+     "tool": "gt-module",
+     "args": [
+      "src/adaptix/_internal/morphing/facade/provider.py"
+     ],
+     "exit_code": 0,
+     "ms": 3.8,
+     "bytes": 239,
+     "internal_error": false,
+     "head": "[GT] module cluster src/adaptix/_internal/morphing/facade/provider.py",
+     "text": "[GT] module cluster src/adaptix/_internal/morphing/facade/provider.py\ncommunities (1):\n  tests/integration/morphing/*\nfile: src/adaptix/_internal/morphing/facade/provider.py\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-check",
+     "args": [
+      "src/adaptix/_internal/morphing/facade/provider.py"
+     ],
+     "exit_code": 0,
+     "ms": 366.7,
+     "bytes": 203,
+     "internal_error": false,
+     "head": "[GT] syntax src/adaptix/_internal/morphing/facade/provider.py",
+     "text": "[GT] syntax src/adaptix/_internal/morphing/facade/provider.py\nchecker (1):\n  ast.parse\nlanguage: .py\npath: src/adaptix/_internal/morphing/facade/provider.py\nreason: parsed\nsource_bytes: 20243\nverdict: ok"
+    },
+    {
+     "tool": "gt-cochange",
+     "args": [
+      "src/adaptix/_internal/morphing/facade/provider.py"
+     ],
+     "exit_code": 1,
+     "ms": 5.8,
+     "bytes": 97,
+     "internal_error": false,
+     "head": "[GT] co-change src/adaptix/_internal/morphing/facade/provider.py: no answer (no_cochange_history)",
+     "text": "[GT] co-change src/adaptix/_internal/morphing/facade/provider.py: no answer (no_cochange_history)"
+    },
+    {
+     "tool": "gt-changes",
+     "args": [
+      "src/adaptix/_internal/morphing/facade/provider.py"
+     ],
+     "exit_code": 1,
+     "ms": 2107.9,
+     "bytes": 158,
+     "internal_error": false,
+     "head": "[GT] impact of edits src/adaptix/_internal/morphing/facade/provider.py: no answer (changed_symbols_unmapped:src/adaptix/_internal/morphing/facade/provider.py)",
+     "text": "[GT] impact of edits src/adaptix/_internal/morphing/facade/provider.py: no answer (changed_symbols_unmapped:src/adaptix/_internal/morphing/facade/provider.py)"
+    },
+    {
+     "tool": "gt-slice",
+     "args": [
+      "loader",
+      "64"
+     ],
+     "exit_code": 0,
+     "ms": 396.2,
+     "bytes": 245,
+     "internal_error": false,
+     "head": "[GT] slice loader 64",
+     "text": "[GT] slice loader 64\ndirection: backward\nline: 64\nslice_count: 1\nslices (1):\n  src/adaptix/_internal/morphing/facade/provider.py\nsymbol: loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: slice_limitations_present"
+    },
+    {
+     "tool": "gt-shape",
+     "args": [
+      "loader"
+     ],
+     "exit_code": 1,
+     "ms": 346.0,
+     "bytes": 54,
+     "internal_error": false,
+     "head": "[GT] shape loader: no answer (no_verifiable_contracts)",
+     "text": "[GT] shape loader: no answer (no_verifiable_contracts)"
+    },
+    {
+     "tool": "gt-api",
+     "args": [
+      "loader"
+     ],
+     "exit_code": 1,
+     "ms": 348.1,
+     "bytes": 51,
+     "internal_error": false,
+     "head": "[GT] api impact loader: no answer (route_not_found)",
+     "text": "[GT] api impact loader: no answer (route_not_found)"
+    },
+    {
+     "tool": "gt-rename",
+     "args": [
+      "loader",
+      "loader_renamed"
+     ],
+     "exit_code": 0,
+     "ms": 451.2,
+     "bytes": 2863,
+     "internal_error": false,
+     "head": "[GT] rename loader loader_renamed",
+     "text": "[GT] rename loader loader_renamed\ndefinitions (1):\n  src/adaptix/_internal/morphing/facade/provider.py:63  loader  (Function)\nedit_site_count: 128\nedit_sites_by_type CALLS (6):\n  src/adaptix/_internal/integrations/sqlalchemy/orm.py:53  [CANDIDATE conf=0.5]\n  src/adaptix/_internal/morphing/constant_length_tuple_provider.py:118  [SPECULATIVE conf=0.2]\n  src/adaptix/_internal/morphing/constant_length_tuple_provider.py:158  [SPECULATIVE conf=0.2]\n  src/adaptix/_internal/morphing/constant_length_tuple_provider.py:182  [SPECULATIVE conf=0.2]\n  src/adaptix/_internal/morphing/constant_length_tuple_provider.py:209  [SPECULATIVE conf=0.2]\n  src/adaptix/_internal/morphing/facade/provider.py:121  [CERTIFIED]\nedit_sites_by_type DATA_FLOW (4):\n  src/adaptix/_internal/morphing/concrete_provider.py:308  [CANDIDATE conf=0.8]\n  src/adaptix/_internal/morphing/concrete_provider.py:351  [CANDIDATE conf=0.8]\n  src/adaptix/_internal/morphing/dict_provider.py:277  [CANDIDATE conf=0.8]\n  src/adaptix/_internal/morphing/iterable_provider.py:57  [CANDIDATE conf=0.8]\nedit_sites_by_type IMPORTS (5):\n  docs/examples/loading-and-dumping/extended_usage/fields_filtering_type.py:4  [CANDIDATE conf=0.6]\n  docs/examples/loading-and-dumping/tutorial/chaining.py:5  [CANDIDATE conf=0.6]\n  docs/examples/loading-and-dumping/tutorial/predicate_system_p.py:4  [CANDIDATE conf=0.6]\n  docs/examples/loading-and-dumping/tutorial/recipe_providers_priority.py:3  [CANDIDATE conf=0.6]\n  docs/examples/loading-and-dumping/tutorial/retort_combination.py:5  [CANDIDATE conf=0.6]\nfiles_to_touch (19):\n  docs/examples/loading-and-dumping/extended_usage/fields_filtering_type.py\n  docs/examples/loading-and-dumping/tutorial/chaining.py\n  docs/examples/loading-and-dumping/tutorial/predicate_system_p.py\n  docs/examples/loading-and-dumping/tutorial/recipe_providers_priority.py\n  docs/examples/loading-and-dumping/tutorial/retort_combination.py\n  docs/examples/loading-and-dumping/tutorial/retort_extend.py\n  docs/examples/loading-and-dumping/tutorial/retort_recipe_intro.py\n  docs/examples/loading-and-dumping/tutorial/retort_recipe_intro_dumper.py\n  docs/examples/loading-and-dumping/tutorial/unexpected_error.py\n  examples/api_division/retort.py\n  examples/simple_api_processing/retort.py\n  src/adaptix/__init__.py\n  src/adaptix/_internal/integrations/sqlalchemy/orm.py\n  src/adaptix/_internal/morphing/concrete_provider.py\n  src/adaptix/_internal/morphing/constant_length_tuple_provider.py\n  src/adaptix/_internal/morphing/dict_provider.py\n  src/adaptix/_internal/morphing/facade/provider.py\n  src/adaptix/_internal/morphing/facade/retort.py\n  src/adaptix/_internal/morphing/generic_provider.py\nnew_name: loader_renamed\nsymbol: loader\nnote: partial: name-level graph facts, verify by reading the code; omitted: edit_sites_truncated:CALLS, text_references_not_enumerated, query_result_byte_limit"
+    },
+    {
+     "tool": "gt-taint",
+     "args": [
+      "get_loader",
+      "loader"
+     ],
+     "exit_code": 0,
+     "ms": 1266.1,
+     "bytes": 508,
+     "internal_error": false,
+     "head": "[GT] taint get_loader loader",
+     "text": "[GT] taint get_loader loader\ndataflow_omissions (2):\n  attribute_flow_untracked\n  weak_mutation_flow_overapprox\nfield_channels (1):\n  field=_loader_cache  identity=owner_bound  owner=AdornedRetort  same_file=True\npaths_found: 1\nreachable_symbol_count: 53\nsink: loader\nsource: get_loader\nuncertain_paths (1):\n  ['get_loader', '_make_loader', 'loader']\nnote: partial: name-level graph facts, verify by reading the code; omitted: field_flow_owner_bound, name_match_edges_excluded, symbol_level_reachability_only"
+    }
+   ],
+   "augment": [
+    {
+     "symbol": "loader",
+     "hit": true,
+     "bytes": 765,
+     "ms": 2202.2,
+     "text": "[GT] graph context for your search:\n  loader (Function) src/adaptix/_internal/morphing/facade/provider.py:63\n    called by: as_is_loader (src/adaptix/_internal/morphing/facade/provider.py:121), test_any (tests/integration/morphing/test_basics.py:22), test_coordinates (tests/integration/morphing/test_attrs.py:16), test_exact_value_provider (tests/unit/morphing/test_enum_provider.py:117), test_flag_by_exact_value (tests/unit/morphing/test_enum_provider.py:211) (+93 more)\n    calls: ValueProvider (src/adaptix/_internal/provider/value_provider.py:84), bound (src/adaptix/_internal/provider/facade/provider.py:80), make_chain (src/adaptix/_internal/morphing/facade/provider.py:82)\n    in flow: loader -> ExactTypeLSC\n    in flow: loader -> LocStackBoundingProvider"
+    },
+    {
+     "symbol": "get_loader",
+     "hit": true,
+     "bytes": 608,
+     "ms": 1924.8,
+     "text": "[GT] graph context for your search:\n  AdornedRetort.get_loader (Method) src/adaptix/_internal/morphing/facade/retort.py:266\n    called by: AdaptixJSON.__init__ (src/adaptix/_internal/integrations/sqlalchemy/orm.py:30), AdornedRetort.load (src/adaptix/_internal/morphing/facade/retort.py:327), test_any (tests/integration/morphing/test_basics.py:21), test_bool_loader_provider (tests/unit/morphing/test_concrete_provider.py:454), test_bytes_like_provider (tests/unit/morphing/test_concrete_provider.py:337) (+75 more)\n    calls: AdornedRetort._make_loader (src/adaptix/_internal/morphing/facade/retort.py:271)"
+    },
+    {
+     "symbol": "dumper",
+     "hit": true,
+     "bytes": 726,
+     "ms": 2123.6,
+     "text": "[GT] graph context for your search:\n  dumper (Function) src/adaptix/_internal/morphing/facade/provider.py:89\n    called by: as_is_dumper (src/adaptix/_internal/morphing/facade/provider.py:130), retort (tests/unit/morphing/test_constant_length_tuple_provider.py:37), retort (tests/unit/morphing/test_dict_provider.py:25), retort (tests/unit/morphing/test_iterable_provider.py:38), test_any (tests/integration/morphing/test_basics.py:25) (+67 more)\n    calls: ValueProvider (src/adaptix/_internal/provider/value_provider.py:110), bound (src/adaptix/_internal/provider/facade/provider.py:106), make_chain (src/adaptix/_internal/morphing/facade/provider.py:108)\n    in flow: dumper -> ExactOriginLSC\n    in flow: dumper -> Omitted"
+    },
+    {
+     "symbol": "get_dumper",
+     "hit": true,
+     "bytes": 605,
+     "ms": 2130.7,
+     "text": "[GT] graph context for your search:\n  AdornedRetort.get_dumper (Method) src/adaptix/_internal/morphing/facade/retort.py:292\n    called by: AdaptixJSON.__init__ (src/adaptix/_internal/integrations/sqlalchemy/orm.py:31), AdornedRetort.dump (src/adaptix/_internal/morphing/facade/retort.py:345), test_any (tests/integration/morphing/test_basics.py:24), test_bytes_like_provider (tests/unit/morphing/test_concrete_provider.py:367), test_cannot_produce_dumper (tests/unit/retort/test_operating_retort.py:48) (+53 more)\n    calls: AdornedRetort._make_dumper (src/adaptix/_internal/morphing/facade/retort.py:297)"
+    },
+    {
+     "symbol": "normalize_type",
+     "hit": true,
+     "bytes": 845,
+     "ms": 1957.5,
+     "text": "[GT] graph context for your search:\n  normalize_type (Function) src/adaptix/_internal/type_tools/normalize_type.py:880\n    called by: ABCProxy.__init__ (src/adaptix/_internal/morphing/provider_template.py:99), AnyEnumLSC._check_location (src/adaptix/_internal/morphing/enum_provider.py:80), FlagEnumLSC._check_location (src/adaptix/_internal/morphing/enum_provider.py:90), ExactTypeLSC._check_location (src/adaptix/_internal/provider/loc_stack_filtering.py:143), OriginSubclassLSC._check_location (src/adaptix/_internal/provider/loc_stack_filtering.py:155) (+49 more)\n    calls: TypeNormalizer.normalize (src/adaptix/_internal/type_tools/normalize_type.py:884), _BasicNormType.__hash__ (src/adaptix/_internal/type_tools/normalize_type.py:882) [SPECULATIVE]\n    in flow: get_dataclass_shape -> get_generic_args\n    in flow: provide_loader -> copy"
+    }
+   ]
+  },
+  {
+   "task": "aiomonitor-task-snapshots-diff",
+   "error": "RuntimeError: Pass 1: discovering files in D:\\tmp\\gt_attached_smoke\\aiomonitor-task-snapshots-diff\\repo...\n  Found 43 source files\n  yaml: 4 files\n  python: 29 files\n  javascript: 5 files\n  html: 4 files\n  toml: 1 files\nPass 2: parsing 43 files (12 workers)...\n  Parse cache: 0 hits, 43 misses\n  Parsed 43/43 files in 2.023s (0 parse failures, 0.0%)\n  Inserted 623 nodes in 287ms\n  Extracted 623 definitions, 279 imports\nPass 3: resolving 9726 call references...\n  Declared-type receivers: 85 callers with typed pa"
+  },
+  {
+   "task": "awilix-async-container-initialization",
+   "repository": "https://github.com/jeffijoe/awilix",
+   "commit": "82ac179c1de4c216c4e333093044fac643303f0c",
+   "language": "typescript",
+   "index_seconds": 5.0,
+   "node_counts": {
+    "Callsite": 1708,
+    "Class": 43,
+    "CompletenessFact": 12429,
+    "DerivationFact": 12,
+    "Enum": 1,
+    "EnumMember": 2,
+    "File": 53,
+    "Function": 224,
+    "Method": 55,
+    "QueryPolicyVersion": 2,
+    "TypeAlias": 14,
+    "UnresolvedFact": 1293,
+    "vta_flow_edge_fact": 17,
+    "vta_flow_source_fact": 13
+   },
+   "edge_counts": {
+    "ACCESSES": 23,
+    "CALLS": 549,
+    "CANDIDATE_TARGET": 1059,
+    "COMPOSES": 15,
+    "CONTAINS": 57,
+    "DATA_FLOW": 3,
+    "EXTENDS": 4,
+    "HAS_CALLSITE": 1708,
+    "HAS_COMPLETENESS_FACT": 12429,
+    "HAS_DERIVATION_FACT": 12,
+    "HAS_UNRESOLVED_FACT": 1293,
+    "IMPORTS": 129,
+    "INJECTS": 5,
+    "PARAM_TYPE": 33,
+    "RAISES": 5,
+    "READS": 8,
+    "RETURNS_TYPE": 12,
+    "RE_EXPORTS": 3,
+    "SELECTED_TARGET": 415,
+    "WRITES": 15
+   },
+   "top_symbols": [
+    {
+     "name": "createContainer",
+     "file": "src/container.ts",
+     "line": 235,
+     "callers": 82
+    },
+    {
+     "name": "register",
+     "file": "src/container.ts",
+     "line": 77,
+     "callers": 65
+    },
+    {
+     "name": "resolve",
+     "file": "src/container.ts",
+     "line": 100,
+     "callers": 60
+    },
+    {
+     "name": "asFunction",
+     "file": "src/resolvers.ts",
+     "line": 156,
+     "callers": 49
+    },
+    {
+     "name": "asValue",
+     "file": "src/resolvers.ts",
+     "line": 133,
+     "callers": 35
+    }
+   ],
+   "tools_answered": 21,
+   "tools_run": 35,
+   "internal_errors": 0,
+   "tool_ms_p50": 192.7,
+   "tool_ms_max": 767.6,
+   "augment_hits": 5,
+   "augment_runs": 5,
+   "tools": [
+    {
+     "tool": "gt-query",
+     "args": [
+      "Add dependency-aware async initialization to the container"
+     ],
+     "exit_code": 0,
+     "ms": 200.8,
+     "bytes": 1253,
+     "internal_error": false,
+     "head": "[GT] query Add dependency-aware async initialization to the container",
+     "text": "[GT] query Add dependency-aware async initialization to the container\nranked (10):\n  src/__tests__/resolvers.test.ts:209  it: returns the string aliased dependency  (Function)\n  src/__tests__/resolvers.test.ts:214  it: returns the symbol aliased dependency  (Function)\n  src/__tests__/local-injections.test.ts:27  it: invokes the injector and provides the result to the constructor  (Function)\n  src/__tests__/container.test.ts:120  it: resolves the dependency graph and supports all resolvers  (Function)\n  src/__tests__/function-tokenizer.test.ts:31  it: does not require the constructor to be first  (Function)\n  src/__tests__/container.test.ts:442  it: behaves properly when the cradle is returned from an async function  (Function)\n  src/__tests__/param-parser.test.ts:289  it: skips async keyword  (Function)\n  src/__tests__/resolvers.test.ts:133  it: resolves single dependency as cradle  (Function)\n  src/__tests__/resolvers.test.ts:58  it: defaults to transient  (Function)\n  src/__tests__/load-modules.test.ts:16  it: registers loaded modules with the container using the name of the file  (Function)\nnote: partial: name-level graph facts, verify by reading the code; omitted: source_unavailable:dense\nnext: gt-context <symbol> for the top hit"
+    },
+    {
+     "tool": "gt-flows",
+     "args": [],
+     "exit_code": 0,
+     "ms": 767.6,
+     "bytes": 1559,
+     "internal_error": false,
+     "head": "[GT] flows",
+     "text": "[GT] flows\nmatched: 75\nprocess_count: 75\nprocesses (10):\n  createContainer (src/container.ts:235) -> createContainerInternal (src/container.ts:241) -> asClass (src/resolvers.ts:194) -> makeOptions (src/resolvers.ts:323)\n  asClass (src/resolvers.ts:194) -> generateResolve (src/resolvers.ts:451) -> createInjectorProxy (src/resolvers.ts:373) -> uniq (src/utils.ts:114)\n  createContainer (src/container.ts:235) -> createContainerInternal (src/container.ts:241) -> nameValueToObject (src/utils.ts:35)\n  parseParameterList (src/param-parser.ts:27) -> createTokenizer (src/function-tokenizer.ts:39) -> isIdentifierStart (src/function-tokenizer.ts:303)\n  isClass (src/utils.ts:66) -> createTokenizer (src/function-tokenizer.ts:39) -> isWhiteSpace (src/function-tokenizer.ts:268)\n  parseParameterList (src/param-parser.ts:27) -> createTokenizer (src/function-tokenizer.ts:39) -> isIdentifierPart (src/function-tokenizer.ts:310)\n  parseParameterList (src/param-parser.ts:27) -> createTokenizer (src/function-tokenizer.ts:39) -> isStringQuote (src/function-tokenizer.ts:283)\n  createContainer (src/container.ts:235) -> createContainerInternal (src/container.ts:241) -> last (src/utils.ts:56)\n  createContainer (src/container.ts:235) -> createContainerInternal (src/container.ts:241) -> isLifetimeLonger (src/lifetime.ts:32)\n  createContainer (src/container.ts:235) -> createContainerInternal (src/container.ts:241) -> require (src/load-modules.ts:59)\ntruncated: True\nnote: partial: name-level graph facts, verify by reading the code; omitted: process_library_truncated"
+    },
+    {
+     "tool": "gt-routes",
+     "args": [],
+     "exit_code": 1,
+     "ms": 182.9,
+     "bytes": 55,
+     "internal_error": false,
+     "head": "[GT] routes: no answer (no matching facts in the graph)",
+     "text": "[GT] routes: no answer (no matching facts in the graph)"
+    },
+    {
+     "tool": "gt-tools",
+     "args": [],
+     "exit_code": 1,
+     "ms": 184.2,
+     "bytes": 49,
+     "internal_error": false,
+     "head": "[GT] tool handlers: no answer (no_tools_detected)",
+     "text": "[GT] tool handlers: no answer (no_tools_detected)"
+    },
+    {
+     "tool": "gt-verify",
+     "args": [],
+     "exit_code": 1,
+     "ms": 15.0,
+     "bytes": 56,
+     "internal_error": false,
+     "head": "[GT] last test result: no answer (no_execution_recorded)",
+     "text": "[GT] last test result: no answer (no_execution_recorded)"
+    },
+    {
+     "tool": "gt-failures",
+     "args": [],
+     "exit_code": 1,
+     "ms": 2.5,
+     "bytes": 57,
+     "internal_error": false,
+     "head": "[GT] recurring failures: no answer (no_failures_recorded)",
+     "text": "[GT] recurring failures: no answer (no_failures_recorded)"
+    },
+    {
+     "tool": "gt-help",
+     "args": [],
+     "exit_code": 0,
+     "ms": 2.4,
+     "bytes": 1593,
+     "internal_error": false,
+     "head": "[GT] commands",
+     "text": "[GT] commands\ntools (23):\n  gt-query \"<concept or error text>\"  - rank files and symbols relevant to a concept\n  gt-context <symbol> [file]  - definition, callers, callees and flows of one symbol\n  gt-callers <symbol> [depth]  - who calls this symbol, by call depth\n  gt-impact <symbol> [file]  - what may break if this symbol changes (callers to depth 3)\n  gt-refs <symbol> [file]  - graph references to a symbol\n  gt-def <symbol> [file]  - where a symbol is defined\n  gt-flows [\"<concept>\"]  - execution flows (entry point -> steps)\n  gt-tests <file> [file...]  - tests that cover the given source files\n  gt-routes [route|handler|file filter]  - HTTP routes, handlers, middleware and injections\n  gt-slice <function> <line> [backward|forward]  - statements that affect (or are affected by) a line\n  gt-taint <source-symbol> [sink-symbol]  - call paths from a source to a sink\n  gt-verify  - the last test/build result GT observed, vs the task baseline\n  gt-changes [file...]  - callers and tests affected by your edits so far (or by the given files)\n  gt-check <file>  - parse a file you edited and report syntax errors\n  gt-help  - list every GT command\n  gt-api <route|handler>  - clients and callers of an HTTP route or handler\n  gt-shape <interface|class> [file]  - does each implementation still match the interface\n  gt-calls <function> [file]  - how each call inside a function resolved (target, ambiguous, external)\n  gt-module <file>  - the cluster of files this file belongs with\n  gt-cochange <file>  - files that historically change together with this one\n  ... 3 more not shown"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "createContainer"
+     ],
+     "exit_code": 0,
+     "ms": 519.8,
+     "bytes": 1694,
+     "internal_error": false,
+     "head": "[GT] context createContainer",
+     "text": "[GT] context createContainer\ncallee_count: 1\ncallees (1):\n  src/container.ts:238  createContainerInternal  [CERTIFIED]\ncaller_count: 82\ncallers (10):\n  src/__tests__/container.test.ts:459  container  [CERTIFIED]\n  src/__tests__/container.test.ts:972  it: JSON.stringify() should return [object AwilixContainerCradle]  [CERTIFIED]\n  src/__tests__/container.test.ts:978  it: Symbol.toStringTag  [CERTIFIED]\n  src/__tests__/container.test.ts:659  it: allows aliasTo to be used when strict is set  [CERTIFIED]\n  src/__tests__/container.test.ts:640  it: allows for asValue() to be used when strict is set  [CERTIFIED]\n  src/__tests__/container.test.ts:596  it: allows longer lifetime modules to depend on shorter lifetime dependencies by default  [CERTIFIED]\n  src/__tests__/load-modules.test.ts:446  it: allows setting a name to register as  [CERTIFIED]\n  src/__tests__/container.test.ts:443  it: behaves properly when the cradle is returned from an async function  [CERTIFIED]\n  src/__tests__/container.test.ts:231  it: caches singletons regardless of scope  [CERTIFIED]\n  src/__tests__/container.test.ts:344  it: cannot find a scope-registered value when resolved from root  [CERTIFIED]\ncandidates (1):\n  src/container.ts:235  createContainer  (Function)\ndefinition: src/container.ts:235  createContainer  (Function)\nflows (5):\n  createContainer -> makeOptions\n  createContainer -> nameValueToObject\n  createContainer -> last\n  createContainer -> isLifetimeLonger\n  createContainer -> require\nprimary_selection: unique\nsymbol: createContainer\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, flows_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "createContainer"
+     ],
+     "exit_code": 0,
+     "ms": 207.2,
+     "bytes": 1663,
+     "internal_error": false,
+     "head": "[GT] callers createContainer",
+     "text": "[GT] callers createContainer\ncaller_count: 85\ncallers_by_depth 1 (10):\n  src/__tests__/container.test.ts:459  container  [CERTIFIED]\n  src/__tests__/container.test.ts:972  it: JSON.stringify() should return [object AwilixContainerCradle]  [CERTIFIED]\n  src/__tests__/container.test.ts:978  it: Symbol.toStringTag  [CERTIFIED]\n  src/__tests__/container.test.ts:659  it: allows aliasTo to be used when strict is set  [CERTIFIED]\n  src/__tests__/container.test.ts:640  it: allows for asValue() to be used when strict is set  [CERTIFIED]\n  src/__tests__/container.test.ts:596  it: allows longer lifetime modules to depend on shorter lifetime dependencies by default  [CERTIFIED]\n  src/__tests__/load-modules.test.ts:446  it: allows setting a name to register as  [CERTIFIED]\n  src/__tests__/container.test.ts:443  it: behaves properly when the cradle is returned from an async function  [CERTIFIED]\n  src/__tests__/container.test.ts:231  it: caches singletons regardless of scope  [CERTIFIED]\n  src/__tests__/container.test.ts:344  it: cannot find a scope-registered value when resolved from root  [CERTIFIED]\ncallers_by_depth 2 (3):\n  src/__tests__/rollup.test.ts:27  it: does not support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:20  it: support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:11  it: works  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 1\nresolved_symbols (1):\n  src/container.ts:235  createContainer  (Function)\nreturned_count: 23\nsymbol: createContainer\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:10/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "createContainer"
+     ],
+     "exit_code": 0,
+     "ms": 195.2,
+     "bytes": 1705,
+     "internal_error": false,
+     "head": "[GT] impact createContainer",
+     "text": "[GT] impact createContainer\ncaller_count: 85\ncallers_by_depth 1 (10):\n  src/__tests__/container.test.ts:459  container  [CERTIFIED]\n  src/__tests__/container.test.ts:972  it: JSON.stringify() should return [object AwilixContainerCradle]  [CERTIFIED]\n  src/__tests__/container.test.ts:978  it: Symbol.toStringTag  [CERTIFIED]\n  src/__tests__/container.test.ts:659  it: allows aliasTo to be used when strict is set  [CERTIFIED]\n  src/__tests__/container.test.ts:640  it: allows for asValue() to be used when strict is set  [CERTIFIED]\n  src/__tests__/container.test.ts:596  it: allows longer lifetime modules to depend on shorter lifetime dependencies by default  [CERTIFIED]\n  src/__tests__/load-modules.test.ts:446  it: allows setting a name to register as  [CERTIFIED]\n  src/__tests__/container.test.ts:443  it: behaves properly when the cradle is returned from an async function  [CERTIFIED]\n  src/__tests__/container.test.ts:231  it: caches singletons regardless of scope  [CERTIFIED]\n  src/__tests__/container.test.ts:344  it: cannot find a scope-registered value when resolved from root  [CERTIFIED]\ncallers_by_depth 2 (3):\n  src/__tests__/rollup.test.ts:27  it: does not support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:20  it: support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:11  it: works  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 1\nresolved_symbols (1):\n  src/container.ts:235  createContainer  (Function)\nreturned_count: 23\nsymbol: createContainer\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:10/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "createContainer"
+     ],
+     "exit_code": 0,
+     "ms": 199.2,
+     "bytes": 1514,
+     "internal_error": false,
+     "head": "[GT] references createContainer",
+     "text": "[GT] references createContainer\nreference_count: 89\nreferences_by_type CALLS (5):\n  src/__tests__/container.disposing.test.ts:32  order  [CERTIFIED]\n  src/__tests__/container.test.ts:34  it: returns an object  [CERTIFIED]\n  src/__tests__/container.test.ts:41  it: lets me register something and resolve it  [CERTIFIED]\n  src/__tests__/container.test.ts:57  it: lets me register something and resolve it via classic injection mode  [CERTIFIED]\n  src/__tests__/container.test.ts:72  it: supports multiple registrations in a single call  [CERTIFIED]\nreferences_by_type IMPORTS (7):\n  src/__tests__/awilix.test.ts:1  src/__tests__/awilix.test.ts  [CERTIFIED]\n  src/__tests__/container.disposing.test.ts:1  src/__tests__/container.disposing.test.ts  [CERTIFIED]\n  src/__tests__/container.test.ts:1  src/__tests__/container.test.ts  [CERTIFIED]\n  src/__tests__/inheritance.test.js:1  src/__tests__/inheritance.test.js  [CERTIFIED]\n  src/__tests__/load-modules.test.ts:1  src/__tests__/load-modules.test.ts  [CERTIFIED]\n  src/__tests__/local-injections.test.ts:1  src/__tests__/local-injections.test.ts  [CERTIFIED]\n  src/__tests__/resolvers.test.ts:1  src/__tests__/resolvers.test.ts  [CERTIFIED]\nresolved_nodes: 1\nresolved_symbols (1):\n  src/container.ts:235  createContainer  (Function)\nreturned_count: 27\nsymbol: createContainer\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, query_result_byte_limit, query_result_truncated:answer.references_by_type.CALLS:5/20"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "createContainer"
+     ],
+     "exit_code": 0,
+     "ms": 185.3,
+     "bytes": 248,
+     "internal_error": false,
+     "head": "[GT] definition createContainer",
+     "text": "[GT] definition createContainer\ndefinition_count: 1\ndefinitions (1):\n  src/container.ts:235  createContainer  (Function)\nsymbol: createContainer\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "createContainer"
+     ],
+     "exit_code": 0,
+     "ms": 566.3,
+     "bytes": 235,
+     "internal_error": false,
+     "head": "[GT] calls in createContainer",
+     "text": "[GT] calls in createContainer\ncalls (1):\n  src/container.ts:238  createContainerInternal -> createContainerInternal (src/container.ts:241) [CERTIFIED] [selected, static]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "register"
+     ],
+     "exit_code": 0,
+     "ms": 701.3,
+     "bytes": 445,
+     "internal_error": false,
+     "head": "[GT] context register",
+     "text": "[GT] context register\nadditional_definitions: 1\ncandidates (2):\n  src/container.ts:73  AwilixContainer.register  (Method)\n  src/container.ts:77  AwilixContainer.register  (Method)\ndefinition: src/container.ts:73  AwilixContainer.register  (Method)\nprimary_selection: ambiguous_preferred_order\nsymbol: register\nnote: partial: name-level graph facts, verify by reading the code; omitted: ambiguous_symbol\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "register"
+     ],
+     "exit_code": 0,
+     "ms": 202.0,
+     "bytes": 1721,
+     "internal_error": false,
+     "head": "[GT] callers register",
+     "text": "[GT] callers register\ncaller_count: 68\ncallers_by_depth 1 (10):\n  src/load-modules.ts:298  registerDescriptor  [CERTIFIED]\n  examples/koa/index.js:37  ctx  [CANDIDATE conf=0.6]\n  src/__tests__/rollup.test.ts:34  getValue  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:662  it: allows aliasTo to be used when strict is set  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:643  it: allows for asValue() to be used when strict is set  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:597  it: allows longer lifetime modules to depend on shorter lifetime dependencies by default  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:444  it: behaves properly when the cradle is returned from an async function  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:233  it: caches singletons regardless of scope  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:348  it: cannot find a scope-registered value when resolved from root  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:760  it: detects and errors when a singleton is registered on a scope  [CANDIDATE conf=0.6]\ncallers_by_depth 2 (3):\n  src/__tests__/rollup.test.ts:27  it: does not support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:20  it: support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:11  it: works  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 2\nresolved_symbols (2):\n  src/container.ts:73  AwilixContainer.register  (Method)\n  src/container.ts:77  AwilixContainer.register  (Method)\nreturned_count: 23\nsymbol: register\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:10/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "register"
+     ],
+     "exit_code": 0,
+     "ms": 317.6,
+     "bytes": 1763,
+     "internal_error": false,
+     "head": "[GT] impact register",
+     "text": "[GT] impact register\ncaller_count: 68\ncallers_by_depth 1 (10):\n  src/load-modules.ts:298  registerDescriptor  [CERTIFIED]\n  examples/koa/index.js:37  ctx  [CANDIDATE conf=0.6]\n  src/__tests__/rollup.test.ts:34  getValue  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:662  it: allows aliasTo to be used when strict is set  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:643  it: allows for asValue() to be used when strict is set  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:597  it: allows longer lifetime modules to depend on shorter lifetime dependencies by default  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:444  it: behaves properly when the cradle is returned from an async function  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:233  it: caches singletons regardless of scope  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:348  it: cannot find a scope-registered value when resolved from root  [CANDIDATE conf=0.6]\n  src/__tests__/container.test.ts:760  it: detects and errors when a singleton is registered on a scope  [CANDIDATE conf=0.6]\ncallers_by_depth 2 (3):\n  src/__tests__/rollup.test.ts:27  it: does not support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:20  it: support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:11  it: works  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 2\nresolved_symbols (2):\n  src/container.ts:73  AwilixContainer.register  (Method)\n  src/container.ts:77  AwilixContainer.register  (Method)\nreturned_count: 23\nsymbol: register\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:10/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "register"
+     ],
+     "exit_code": 1,
+     "ms": 279.0,
+     "bytes": 64,
+     "internal_error": false,
+     "head": "[GT] references register: no answer (references_truncated:CALLS)",
+     "text": "[GT] references register: no answer (references_truncated:CALLS)"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "register"
+     ],
+     "exit_code": 0,
+     "ms": 192.7,
+     "bytes": 260,
+     "internal_error": false,
+     "head": "[GT] definition register",
+     "text": "[GT] definition register\ndefinition_count: 2\ndefinitions (2):\n  src/container.ts:73  AwilixContainer.register  (Method)\n  src/container.ts:77  AwilixContainer.register  (Method)\nsymbol: register\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "register"
+     ],
+     "exit_code": 1,
+     "ms": 634.2,
+     "bytes": 57,
+     "internal_error": false,
+     "head": "[GT] calls in register: no answer (no_callsites_recorded)",
+     "text": "[GT] calls in register: no answer (no_callsites_recorded)"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "resolve"
+     ],
+     "exit_code": 0,
+     "ms": 417.2,
+     "bytes": 671,
+     "internal_error": false,
+     "head": "[GT] context resolve",
+     "text": "[GT] context resolve\nadditional_definitions: 3\ncaller_count: 1\ncallers (1):\n  src/container.ts:286  createContainerInternal  [CANDIDATE conf=0.6]\ncandidates (4):\n  src/container.ts:87  AwilixContainer.resolve  (Method)\n  src/container.ts:100  AwilixContainer.resolve  (Method)\n  src/resolvers.ts:32  Resolver.resolve  (Method)\n  src/__tests__/fixture/repositories/answerRepository.js:15  resolve  (Function)\ndefinition: src/container.ts:87  AwilixContainer.resolve  (Method)\nprimary_selection: ambiguous_preferred_order\nsymbol: resolve\nnote: partial: name-level graph facts, verify by reading the code; omitted: ambiguous_symbol\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "resolve"
+     ],
+     "exit_code": 0,
+     "ms": 148.1,
+     "bytes": 1375,
+     "internal_error": false,
+     "head": "[GT] callers resolve",
+     "text": "[GT] callers resolve\ncaller_count: 70\ncallers_by_depth 1 (5):\n  src/resolvers.ts:404  createInjectorProxy  [CERTIFIED]\n  src/resolvers.ts:492  generateResolve  [CERTIFIED]\n  src/resolvers.ts:361  wrapWithLocals  [CERTIFIED]\n  src/list-modules.ts:69  _listModules  [CANDIDATE conf=0.5]\n  src/resolvers.ts:231  aliasTo  [CANDIDATE conf=0.5]\ncallers_by_depth 2 (8):\n  src/resolvers.ts:213  asClass  [CERTIFIED]\n  src/resolvers.ts:170  asFunction  [CERTIFIED]\n  src/container.ts:238  createContainer  [CERTIFIED]\n  src/__tests__/rollup.test.ts:27  it: does not support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:20  it: support loadModules  [CERTIFIED]\n  src/__tests__/rollup.test.ts:11  it: works  [CERTIFIED]\n  src/list-modules.ts:95  listModules  [CERTIFIED]\n  examples/koa/services/MessageService.js:9  MessageService.findMessages  [SPECULATIVE conf=0.2]\nmax_depth: 2\nresolved_nodes: 4\nresolved_symbols (4):\n  src/container.ts:87  AwilixContainer.resolve  (Method)\n  src/container.ts:100  AwilixContainer.resolve  (Method)\n  src/resolvers.ts:32  Resolver.resolve  (Method)\n  src/__tests__/fixture/repositories/answerRepository.js:15  resolve  (Function)\nreturned_count: 28\nsymbol: resolve\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "resolve"
+     ],
+     "exit_code": 1,
+     "ms": 153.4,
+     "bytes": 50,
+     "internal_error": false,
+     "head": "[GT] impact resolve: no answer (callers_truncated)",
+     "text": "[GT] impact resolve: no answer (callers_truncated)"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "resolve"
+     ],
+     "exit_code": 0,
+     "ms": 143.8,
+     "bytes": 1076,
+     "internal_error": false,
+     "head": "[GT] references resolve",
+     "text": "[GT] references resolve\nreference_count: 66\nreferences_by_type CALLS (5):\n  src/resolvers.ts:352  wrapWithLocals  [CERTIFIED]\n  src/resolvers.ts:373  createInjectorProxy  [CERTIFIED]\n  src/resolvers.ts:451  generateResolve  [CERTIFIED]\n  examples/koa/index.js:49  ctx  [CANDIDATE conf=0.5]\n  examples/koa/repositories/messageRepository.js:29  findMessagesForUser  [CANDIDATE conf=0.5]\nreferences_by_type CONTAINS (3):\n  src/container.ts:30  AwilixContainer  [CERTIFIED]\n  src/container.ts:30  AwilixContainer  [CERTIFIED]\n  src/resolvers.ts:31  Resolver  [CERTIFIED]\nresolved_nodes: 4\nresolved_symbols (4):\n  src/container.ts:87  AwilixContainer.resolve  (Method)\n  src/container.ts:100  AwilixContainer.resolve  (Method)\n  src/resolvers.ts:32  Resolver.resolve  (Method)\n  src/__tests__/fixture/repositories/answerRepository.js:15  resolve  (Function)\nreturned_count: 23\nsymbol: resolve\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, query_result_byte_limit, query_result_truncated:answer.references_by_type.CALLS:5/20"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "resolve"
+     ],
+     "exit_code": 0,
+     "ms": 132.2,
+     "bytes": 388,
+     "internal_error": false,
+     "head": "[GT] definition resolve",
+     "text": "[GT] definition resolve\ndefinition_count: 4\ndefinitions (4):\n  src/container.ts:87  AwilixContainer.resolve  (Method)\n  src/container.ts:100  AwilixContainer.resolve  (Method)\n  src/resolvers.ts:32  Resolver.resolve  (Method)\n  src/__tests__/fixture/repositories/answerRepository.js:15  resolve  (Function)\nsymbol: resolve\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "resolve"
+     ],
+     "exit_code": 1,
+     "ms": 487.2,
+     "bytes": 56,
+     "internal_error": false,
+     "head": "[GT] calls in resolve: no answer (no_callsites_recorded)",
+     "text": "[GT] calls in resolve: no answer (no_callsites_recorded)"
+    },
+    {
+     "tool": "gt-tests",
+     "args": [
+      "src/container.ts"
+     ],
+     "exit_code": 1,
+     "ms": 179.1,
+     "bytes": 62,
+     "internal_error": false,
+     "head": "[GT] tests for src/container.ts: no answer (no_covering_tests)",
+     "text": "[GT] tests for src/container.ts: no answer (no_covering_tests)"
+    },
+    {
+     "tool": "gt-module",
+     "args": [
+      "src/container.ts"
+     ],
+     "exit_code": 0,
+     "ms": 5.2,
+     "bytes": 149,
+     "internal_error": false,
+     "head": "[GT] module cluster src/container.ts",
+     "text": "[GT] module cluster src/container.ts\ncommunities (1):\n  src/\nfile: src/container.ts\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-check",
+     "args": [
+      "src/container.ts"
+     ],
+     "exit_code": 0,
+     "ms": 255.9,
+     "bytes": 1253,
+     "internal_error": false,
+     "head": "[GT] syntax src/container.ts",
+     "text": "[GT] syntax src/container.ts\nchecker (4):\n  node\n  -e\n  let ts;const c=[process.env.GT_TS_MODULE,'typescript','/opt/gt/tsmod/node_modules/typescript','/opt/gt/node/lib/node_modules/typescript','/opt/gt/node/node_modules/typescript','/usr/lib/node_modules/typescript','/usr/local/lib/node_modules/typescript'];for(const m of c){if(!m)continue;try{ts=require(m);break}catch(e){}}if(!ts){try{ts=require(require.resolve('typescript',{paths:['/opt/gt/node/lib/node_modules','/opt/gt/node/node_modules']}))}catch(e){}}if(!ts){console.error('GT_TS_UNAVAILABLE');process.exit(3)}const fs=require('fs');const p=process.argv[1];let src;try{src=fs.readFileSync(p,'utf8')}catch(e){process.exit(0)}const sf=ts.createSourceFile(p,src,ts.ScriptTarget.Latest,false);const d=(sf.parseDiagnostics||[])[0];if(!d){process.exit(0)}const lc=sf.getLineAndCharacterOfPosition(d.start||0);const m=ts.flattenDiagnosticMessageText(d.messageText,' ');console.log(p+':'+(lc.line+1)+':'+(lc.character+1)+': error TS'+d.code+': '+m);process.exit(1);\n  src/container.ts\nlanguage: .ts\npath: src/container.ts\nreason: checker_module_unavailable\nsource_bytes: 21509\nverdict: unavailable\nnote: partial: name-level graph facts, verify by reading the code; omitted: checker_module_unavailable"
+    },
+    {
+     "tool": "gt-cochange",
+     "args": [
+      "src/container.ts"
+     ],
+     "exit_code": 1,
+     "ms": 6.1,
+     "bytes": 64,
+     "internal_error": false,
+     "head": "[GT] co-change src/container.ts: no answer (no_cochange_history)",
+     "text": "[GT] co-change src/container.ts: no answer (no_cochange_history)"
+    },
+    {
+     "tool": "gt-changes",
+     "args": [
+      "src/container.ts"
+     ],
+     "exit_code": 1,
+     "ms": 494.2,
+     "bytes": 92,
+     "internal_error": false,
+     "head": "[GT] impact of edits src/container.ts: no answer (changed_symbols_unmapped:src/container.ts)",
+     "text": "[GT] impact of edits src/container.ts: no answer (changed_symbols_unmapped:src/container.ts)"
+    },
+    {
+     "tool": "gt-slice",
+     "args": [
+      "createContainer",
+      "236"
+     ],
+     "exit_code": 1,
+     "ms": 170.5,
+     "bytes": 104,
+     "internal_error": false,
+     "head": "[GT] slice createContainer 236: no answer (analysis_failed:createContainer:no statement covers line 236)",
+     "text": "[GT] slice createContainer 236: no answer (analysis_failed:createContainer:no statement covers line 236)"
+    },
+    {
+     "tool": "gt-shape",
+     "args": [
+      "createContainer"
+     ],
+     "exit_code": 1,
+     "ms": 148.8,
+     "bytes": 63,
+     "internal_error": false,
+     "head": "[GT] shape createContainer: no answer (no_verifiable_contracts)",
+     "text": "[GT] shape createContainer: no answer (no_verifiable_contracts)"
+    },
+    {
+     "tool": "gt-api",
+     "args": [
+      "createContainer"
+     ],
+     "exit_code": 1,
+     "ms": 158.7,
+     "bytes": 60,
+     "internal_error": false,
+     "head": "[GT] api impact createContainer: no answer (route_not_found)",
+     "text": "[GT] api impact createContainer: no answer (route_not_found)"
+    },
+    {
+     "tool": "gt-rename",
+     "args": [
+      "createContainer",
+      "createContainer_renamed"
+     ],
+     "exit_code": 0,
+     "ms": 164.0,
+     "bytes": 1707,
+     "internal_error": false,
+     "head": "[GT] rename createContainer createContainer_renamed",
+     "text": "[GT] rename createContainer createContainer_renamed\ndefinitions (1):\n  src/container.ts:235  createContainer  (Function)\nedit_site_count: 89\nedit_sites_by_type CALLS (12):\n  src/__tests__/container.disposing.test.ts:34  [CERTIFIED]\n  src/__tests__/container.test.ts:35  [CERTIFIED]\n  src/__tests__/container.test.ts:42  [CERTIFIED]\n  src/__tests__/container.test.ts:58  [CERTIFIED]\n  src/__tests__/container.test.ts:73  [CERTIFIED]\n  src/__tests__/container.test.ts:96  [CERTIFIED]\n  src/__tests__/container.test.ts:108  [CERTIFIED]\n  src/__tests__/container.test.ts:115  [CERTIFIED]\n  src/__tests__/container.test.ts:129  [CERTIFIED]\n  src/__tests__/container.test.ts:141  [CERTIFIED]\n  src/__tests__/container.test.ts:148  [CERTIFIED]\n  src/__tests__/container.test.ts:156  [CERTIFIED]\nedit_sites_by_type IMPORTS (7):\n  src/__tests__/awilix.test.ts:2  [CERTIFIED]\n  src/__tests__/container.disposing.test.ts:1  [CERTIFIED]\n  src/__tests__/container.test.ts:3  [CERTIFIED]\n  src/__tests__/inheritance.test.js:1  [CERTIFIED]\n  src/__tests__/load-modules.test.ts:3  [CERTIFIED]\n  src/__tests__/local-injections.test.ts:1  [CERTIFIED]\n  src/__tests__/resolvers.test.ts:3  [CERTIFIED]\nfiles_to_touch (8):\n  src/__tests__/awilix.test.ts\n  src/__tests__/container.disposing.test.ts\n  src/__tests__/container.test.ts\n  src/__tests__/inheritance.test.js\n  src/__tests__/load-modules.test.ts\n  src/__tests__/local-injections.test.ts\n  src/__tests__/resolvers.test.ts\n  src/__tests__/rollup.test.ts\nnew_name: createContainer_renamed\nsymbol: createContainer\nnote: partial: name-level graph facts, verify by reading the code; omitted: edit_sites_truncated:CALLS, text_references_not_enumerated, query_result_byte_limit"
+    },
+    {
+     "tool": "gt-taint",
+     "args": [
+      "register",
+      "createContainer"
+     ],
+     "exit_code": 0,
+     "ms": 304.2,
+     "bytes": 360,
+     "internal_error": false,
+     "head": "[GT] taint register createContainer",
+     "text": "[GT] taint register createContainer\ndataflow_omissions (2):\n  dataflow_python_only:src/container.ts\n  dataflow_source_unresolved:register\nsink: createContainer\nsource: register\nnote: partial: name-level graph facts, verify by reading the code; omitted: statement_level_dataflow_unavailable, symbol_level_reachability_only, dataflow_python_only:src/container.ts"
+    }
+   ],
+   "augment": [
+    {
+     "symbol": "createContainer",
+     "hit": true,
+     "bytes": 660,
+     "ms": 479.6,
+     "text": "[GT] graph context for your search:\n  createContainer (Function) src/container.ts:235\n    called by: container (src/__tests__/container.test.ts:459), it: JSON.stringify() should return [object AwilixContainerCradle] (src/__tests__/container.test.ts:972), it: Symbol.toStringTag (src/__tests__/container.test.ts:978), it: allows aliasTo to be used when strict is set (src/__tests__/container.test.ts:659), it: allows for asValue() to be used when strict is set (src/__tests__/container.test.ts:640) (+77 more)\n    calls: createContainerInternal (src/container.ts:238)\n    in flow: createContainer -> makeOptions\n    in flow: createContainer -> nameValueToObject"
+    },
+    {
+     "symbol": "register",
+     "hit": true,
+     "bytes": 144,
+     "ms": 468.9,
+     "text": "[GT] graph context for your search:\n  AwilixContainer.register (Method) src/container.ts:73\n    ambiguous: 1 other definition(s) share this name"
+    },
+    {
+     "symbol": "resolve",
+     "hit": true,
+     "bytes": 217,
+     "ms": 356.4,
+     "text": "[GT] graph context for your search:\n  AwilixContainer.resolve (Method) src/container.ts:87\n    ambiguous: 3 other definition(s) share this name\n    called by: createContainerInternal (src/container.ts:286) [CANDIDATE]"
+    },
+    {
+     "symbol": "asFunction",
+     "hit": true,
+     "bytes": 821,
+     "ms": 468.1,
+     "text": "[GT] graph context for your search:\n  asFunction (Function) src/resolvers.ts:156\n    called by: createContainerInternal (src/container.ts:659), it: allows aliasTo to be used when strict is set (src/__tests__/container.test.ts:663), it: allows for asValue() to be used when strict is set (src/__tests__/container.test.ts:644), it: allows longer lifetime modules to depend on shorter lifetime dependencies by default (src/__tests__/container.test.ts:598), it: caches singletons regardless of scope (src/__tests__/container.test.ts:234) (+44 more)\n    calls: createBuildResolver (src/resolvers.ts:176), createDisposableResolver (src/resolvers.ts:176), generateResolve (src/resolvers.ts:170), isFunction (src/utils.ts:160), makeOptions (src/resolvers.ts:168)\n    in flow: asFunction -> resolve\n    in flow: asFunction -> uniq"
+    },
+    {
+     "symbol": "asValue",
+     "hit": true,
+     "bytes": 586,
+     "ms": 862.3,
+     "text": "[GT] graph context for your search:\n  asValue (Function) src/resolvers.ts:133\n    called by: it: allows aliasTo to be used when strict is set (src/__tests__/container.test.ts:667), it: allows for asValue() to be used when strict is set (src/__tests__/container.test.ts:650), it: behaves properly when the cradle is returned from an async function (src/__tests__/container.test.ts:444), it: cannot find a scope-registered value when resolved from root (src/__tests__/container.test.ts:355), it: creates a registration with a resolve method (src/__tests__/resolvers.test.ts:49) (+30 more)"
+    }
+   ]
+  },
+  {
+   "task": "abs-module-cache-flags",
+   "repository": "https://github.com/abs-lang/abs",
+   "commit": "cb1b3b671d0ee9fa9da9f7b02f86967953ffd10a",
+   "language": "go",
+   "index_seconds": 15.2,
+   "node_counts": {
+    "Callsite": 3152,
+    "Class": 60,
+    "CompletenessFact": 23626,
+    "DerivationFact": 928,
+    "File": 67,
+    "Function": 378,
+    "Interface": 9,
+    "Method": 257,
+    "QueryPolicyVersion": 2,
+    "UnresolvedFact": 2563,
+    "vta_flow_edge_fact": 4614,
+    "vta_flow_source_fact": 3054
+   },
+   "edge_counts": {
+    "ACCESSES": 175,
+    "CALLS": 1299,
+    "CANDIDATE_TARGET": 8728,
+    "CONTAINS": 257,
+    "CO_SERIALIZES": 39,
+    "EXTENDS": 2,
+    "HAS_CALLSITE": 3152,
+    "HAS_COMPLETENESS_FACT": 23626,
+    "HAS_DERIVATION_FACT": 928,
+    "HAS_UNRESOLVED_FACT": 2563,
+    "IMPLEMENTS": 73,
+    "IMPORTS": 58,
+    "INJECTS": 5,
+    "PARAM_TYPE": 405,
+    "PRECEDES": 58,
+    "RAISES": 92,
+    "READS": 167,
+    "RETURNS_TYPE": 198,
+    "SELECTED_TARGET": 589,
+    "WRITES": 32
+   },
+   "top_symbols": [
+    {
+     "name": "String",
+     "file": "ast/ast.go",
+     "line": 13,
+     "callers": 79
+    },
+    {
+     "name": "validateArgs",
+     "file": "evaluator/functions.go",
+     "line": 528,
+     "callers": 63
+    },
+    {
+     "name": "Inspect",
+     "file": "object/object.go",
+     "line": 58,
+     "callers": 48
+    },
+    {
+     "name": "ParseProgram",
+     "file": "parser/parser.go",
+     "line": 219,
+     "callers": 48
+    },
+    {
+     "name": "newError",
+     "file": "evaluator/evaluator.go",
+     "line": 45,
+     "callers": 48
+    }
+   ],
+   "tools_answered": 23,
+   "tools_run": 35,
+   "internal_errors": 0,
+   "tool_ms_p50": 491.2,
+   "tool_ms_max": 8493.4,
+   "augment_hits": 5,
+   "augment_runs": 5,
+   "tools": [
+    {
+     "tool": "gt-query",
+     "args": [
+      "Harden module loading, cache introspection, and script flags"
+     ],
+     "exit_code": 0,
+     "ms": 392.4,
+     "bytes": 452,
+     "internal_error": false,
+     "head": "[GT] query Harden module loading, cache introspection, and script flags",
+     "text": "[GT] query Harden module loading, cache introspection, and script flags\nranked (5):\n  install/install.go:19  Install  (Function)\n  install/install.go:15  valid  (Function)\n  install/install.go:122  unzip  (Function)\n  install/install.go:68  getZip  (Function)\n  install/install.go:192  createAlias  (Function)\nnote: partial: name-level graph facts, verify by reading the code; omitted: source_unavailable:dense\nnext: gt-context <symbol> for the top hit"
+    },
+    {
+     "tool": "gt-flows",
+     "args": [],
+     "exit_code": 0,
+     "ms": 8493.4,
+     "bytes": 1700,
+     "internal_error": false,
+     "head": "[GT] flows",
+     "text": "[GT] flows\nmatched: 75\nprocess_count: 75\nprocesses (10):\n  Eval (evaluator/evaluator.go:70) -> evalInfixExpression (evaluator/evaluator.go:561) -> evalStringInfixExpression (evaluator/evaluator.go:735) -> appendFile (evaluator/evaluator.go:794)\n  Eval (evaluator/evaluator.go:70) -> evalInfixExpression (evaluator/evaluator.go:561) -> evalInExpression (evaluator/evaluator.go:843) -> Inspect (object/object.go:58)\n  Eval (evaluator/evaluator.go:70) -> applyMethod (evaluator/evaluator.go:1231) -> CanCallMethod (evaluator/evaluator.go:1264) -> Contains (util/util.go:16)\n  Eval (evaluator/evaluator.go:70) -> evalDecorator (evaluator/evaluator.go:336) -> doEvalDecorator (evaluator/evaluator.go:370) -> getDecoratedName (evaluator/evaluator.go:426)\n  Rewind (lexer/lexer.go:338) -> NextToken (lexer/lexer.go:79) -> readCommand (lexer/lexer.go:544) -> prevChar (lexer/lexer.go:355)\n  Eval (evaluator/evaluator.go:70) -> applyFunction (evaluator/evaluator.go:1212) -> extendFunctionEnv (evaluator/evaluator.go:1272) -> Inspect (object/object.go:162)\n  Eval (evaluator/evaluator.go:70) -> evalCommandExpression (evaluator/evaluator.go:1500) -> SetRunning (object/object.go:253) -> mustHaveMutex (object/object.go:235)\n  Eval (evaluator/evaluator.go:70) -> evalInfixExpression (evaluator/evaluator.go:561) -> newError (evaluator/evaluator.go:45)\n  Eval (evaluator/evaluator.go:70) -> InterpolateStringVars (util/util.go:63) -> Get (object/environment.go:91)\n  Eval (evaluator/evaluator.go:70) -> evalCommandExpression (evaluator/evaluator.go:1500) -> SetCmdResult (object/object.go:292)\ntruncated: True\nnote: partial: name-level graph facts, verify by reading the code; omitted: process_library_truncated"
+    },
+    {
+     "tool": "gt-routes",
+     "args": [],
+     "exit_code": 1,
+     "ms": 541.4,
+     "bytes": 55,
+     "internal_error": false,
+     "head": "[GT] routes: no answer (no matching facts in the graph)",
+     "text": "[GT] routes: no answer (no matching facts in the graph)"
+    },
+    {
+     "tool": "gt-tools",
+     "args": [],
+     "exit_code": 1,
+     "ms": 542.2,
+     "bytes": 49,
+     "internal_error": false,
+     "head": "[GT] tool handlers: no answer (no_tools_detected)",
+     "text": "[GT] tool handlers: no answer (no_tools_detected)"
+    },
+    {
+     "tool": "gt-verify",
+     "args": [],
+     "exit_code": 1,
+     "ms": 11.9,
+     "bytes": 56,
+     "internal_error": false,
+     "head": "[GT] last test result: no answer (no_execution_recorded)",
+     "text": "[GT] last test result: no answer (no_execution_recorded)"
+    },
+    {
+     "tool": "gt-failures",
+     "args": [],
+     "exit_code": 1,
+     "ms": 2.3,
+     "bytes": 57,
+     "internal_error": false,
+     "head": "[GT] recurring failures: no answer (no_failures_recorded)",
+     "text": "[GT] recurring failures: no answer (no_failures_recorded)"
+    },
+    {
+     "tool": "gt-help",
+     "args": [],
+     "exit_code": 0,
+     "ms": 2.7,
+     "bytes": 1593,
+     "internal_error": false,
+     "head": "[GT] commands",
+     "text": "[GT] commands\ntools (23):\n  gt-query \"<concept or error text>\"  - rank files and symbols relevant to a concept\n  gt-context <symbol> [file]  - definition, callers, callees and flows of one symbol\n  gt-callers <symbol> [depth]  - who calls this symbol, by call depth\n  gt-impact <symbol> [file]  - what may break if this symbol changes (callers to depth 3)\n  gt-refs <symbol> [file]  - graph references to a symbol\n  gt-def <symbol> [file]  - where a symbol is defined\n  gt-flows [\"<concept>\"]  - execution flows (entry point -> steps)\n  gt-tests <file> [file...]  - tests that cover the given source files\n  gt-routes [route|handler|file filter]  - HTTP routes, handlers, middleware and injections\n  gt-slice <function> <line> [backward|forward]  - statements that affect (or are affected by) a line\n  gt-taint <source-symbol> [sink-symbol]  - call paths from a source to a sink\n  gt-verify  - the last test/build result GT observed, vs the task baseline\n  gt-changes [file...]  - callers and tests affected by your edits so far (or by the given files)\n  gt-check <file>  - parse a file you edited and report syntax errors\n  gt-help  - list every GT command\n  gt-api <route|handler>  - clients and callers of an HTTP route or handler\n  gt-shape <interface|class> [file]  - does each implementation still match the interface\n  gt-calls <function> [file]  - how each call inside a function resolved (target, ambiguous, external)\n  gt-module <file>  - the cluster of files this file belongs with\n  gt-cochange <file>  - files that historically change together with this one\n  ... 3 more not shown"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "String"
+     ],
+     "exit_code": 0,
+     "ms": 1330.8,
+     "bytes": 1535,
+     "internal_error": false,
+     "head": "[GT] context String",
+     "text": "[GT] context String\nadditional_definitions: 31\ncaller_count: 79\ncallers (10):\n  parser/parser_test.go:1192  TestCurrentArgsParsing  [CERTIFIED]\n  repl/repl.go:134  BeginRepl  [SPECULATIVE conf=0.15]\n  evaluator/evaluator.go:1269  CanCallMethod  [SPECULATIVE conf=0.15]\n  lexer/lexer.go:69  Lexer.ErrorLine  [SPECULATIVE conf=0.15]\n  object/object.go:167  Function.Inspect  [SPECULATIVE conf=0.2]\n  object/object.go:397  Array.Inspect  [SPECULATIVE conf=0.2]\n  object/object.go:446  Hash.Inspect  [SPECULATIVE conf=0.2]\n  util/util.go:72  InterpolateStringVars  [SPECULATIVE conf=0.15]\n  object/object.go:274  String.Kill  [SPECULATIVE conf=0.2]\n  lexer/lexer.go:90  Lexer.NextToken  [SPECULATIVE conf=0.15]\ncandidates (10):\n  ast/ast.go:13  Node.String  (Method)\n  ast/ast.go:63  Program.String  (Method)\n  ast/ast.go:85  AssignStatement.String  (Method)\n  ast/ast.go:119  BreakStatement.String  (Method)\n  ast/ast.go:129  ContinueStatement.String  (Method)\n  ast/ast.go:140  ReturnStatement.String  (Method)\n  ast/ast.go:161  ExpressionStatement.String  (Method)\n  ast/ast.go:175  BlockStatement.String  (Method)\n  ast/ast.go:193  Identifier.String  (Method)\n  ast/ast.go:204  Parameter.String  (Method)\ndefinition: ast/ast.go:13  Node.String  (Method)\nflows (1):\n  main -> String (lower bound)\nprimary_selection: ambiguous_preferred_order\nsymbol: String\nnote: partial: name-level graph facts, verify by reading the code; omitted: ambiguous_symbol, callers_truncated, query_result_byte_limit\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "String"
+     ],
+     "exit_code": 0,
+     "ms": 476.7,
+     "bytes": 1391,
+     "internal_error": false,
+     "head": "[GT] callers String",
+     "text": "[GT] callers String\ncaller_count: 162\ncallers_by_depth 1 (5):\n  parser/parser_test.go:1192  TestCurrentArgsParsing  [CERTIFIED]\n  ast/ast_test.go:26  TestString  [CERTIFIED]\n  repl/repl.go:134  BeginRepl  [SPECULATIVE conf=0.15]\n  evaluator/evaluator.go:1269  CanCallMethod  [SPECULATIVE conf=0.15]\n  lexer/lexer.go:69  Lexer.ErrorLine  [SPECULATIVE conf=0.15]\ncallers_by_depth 2 (5):\n  evaluator/evaluator.go:124  Eval  [CERTIFIED]\n  install/install.go:30  Install  [CERTIFIED]\n  terminal/terminal.go:35  NewTerminal  [CERTIFIED]\n  lexer/lexer.go:344  Lexer.Rewind  [CERTIFIED]\n  evaluator/evaluator_test.go:759  TestAssignStatements  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 32\nresolved_symbols (10):\n  ast/ast.go:13  Node.String  (Method)\n  ast/ast.go:63  Program.String  (Method)\n  ast/ast.go:85  AssignStatement.String  (Method)\n  ast/ast.go:119  BreakStatement.String  (Method)\n  ast/ast.go:129  ContinueStatement.String  (Method)\n  ast/ast.go:140  ReturnStatement.String  (Method)\n  ast/ast.go:161  ExpressionStatement.String  (Method)\n  ast/ast.go:175  BlockStatement.String  (Method)\n  ast/ast.go:193  Identifier.String  (Method)\n  ast/ast.go:204  Parameter.String  (Method)\nreturned_count: 40\nsymbol: String\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "String"
+     ],
+     "exit_code": 0,
+     "ms": 453.6,
+     "bytes": 1473,
+     "internal_error": false,
+     "head": "[GT] impact String",
+     "text": "[GT] impact String\ncaller_count: 300\ncallers_by_depth 1 (5):\n  parser/parser_test.go:1192  TestCurrentArgsParsing  [CERTIFIED]\n  ast/ast_test.go:26  TestString  [CERTIFIED]\n  repl/repl.go:134  BeginRepl  [SPECULATIVE conf=0.15]\n  evaluator/evaluator.go:1269  CanCallMethod  [SPECULATIVE conf=0.15]\n  lexer/lexer.go:69  Lexer.ErrorLine  [SPECULATIVE conf=0.15]\ncallers_by_depth 2 (5):\n  evaluator/evaluator.go:124  Eval  [CERTIFIED]\n  install/install.go:30  Install  [CERTIFIED]\n  terminal/terminal.go:35  NewTerminal  [CERTIFIED]\n  lexer/lexer.go:344  Lexer.Rewind  [CERTIFIED]\n  evaluator/evaluator_test.go:759  TestAssignStatements  [CERTIFIED]\ncallers_by_depth 3 (5):\n  evaluator/evaluator.go:67  BeginEval  [CERTIFIED]\n  terminal/terminal.go:116  Model.Init  [CERTIFIED]\n  parser/parser.go:165  New  [CERTIFIED]\n  parser/parser.go:1043  Parser.ParseHashLiteral  [CERTIFIED]\n  parser/parser.go:229  Parser.ParseProgram  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 32\nresolved_symbols (5):\n  ast/ast.go:13  Node.String  (Method)\n  ast/ast.go:63  Program.String  (Method)\n  ast/ast.go:85  AssignStatement.String  (Method)\n  ast/ast.go:119  BreakStatement.String  (Method)\n  ast/ast.go:129  ContinueStatement.String  (Method)\nreturned_count: 60\nsymbol: String\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "String"
+     ],
+     "exit_code": 0,
+     "ms": 668.0,
+     "bytes": 1326,
+     "internal_error": false,
+     "head": "[GT] references String",
+     "text": "[GT] references String\nreference_count: 85\nreferences_by_type CALLS (5):\n  ast/ast_test.go:9  TestString  [CERTIFIED]\n  parser/parser_test.go:1162  TestCurrentArgsParsing  [CERTIFIED]\n  ast/ast.go:63  Program.String  [SPECULATIVE conf=0.2]\n  ast/ast.go:85  AssignStatement.String  [SPECULATIVE conf=0.2]\n  ast/ast.go:140  ReturnStatement.String  [SPECULATIVE conf=0.2]\nreferences_by_type CONTAINS (5):\n  ast/ast.go:11  Node  [CERTIFIED]\n  ast/ast.go:51  Program  [CERTIFIED]\n  ast/ast.go:74  AssignStatement  [CERTIFIED]\n  ast/ast.go:113  BreakStatement  [CERTIFIED]\n  ast/ast.go:123  ContinueStatement  [CERTIFIED]\nresolved_nodes: 32\nresolved_symbols (10):\n  ast/ast.go:13  Node.String  (Method)\n  ast/ast.go:63  Program.String  (Method)\n  ast/ast.go:85  AssignStatement.String  (Method)\n  ast/ast.go:119  BreakStatement.String  (Method)\n  ast/ast.go:129  ContinueStatement.String  (Method)\n  ast/ast.go:140  ReturnStatement.String  (Method)\n  ast/ast.go:161  ExpressionStatement.String  (Method)\n  ast/ast.go:175  BlockStatement.String  (Method)\n  ast/ast.go:193  Identifier.String  (Method)\n  ast/ast.go:204  Parameter.String  (Method)\nreturned_count: 25\nsymbol: String\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, resolved_nodes_truncated, query_result_byte_limit"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "String"
+     ],
+     "exit_code": 0,
+     "ms": 563.4,
+     "bytes": 729,
+     "internal_error": false,
+     "head": "[GT] definition String",
+     "text": "[GT] definition String\ndefinition_count: 32\ndefinitions (10):\n  ast/ast.go:13  Node.String  (Method)\n  ast/ast.go:63  Program.String  (Method)\n  ast/ast.go:85  AssignStatement.String  (Method)\n  ast/ast.go:119  BreakStatement.String  (Method)\n  ast/ast.go:129  ContinueStatement.String  (Method)\n  ast/ast.go:140  ReturnStatement.String  (Method)\n  ast/ast.go:161  ExpressionStatement.String  (Method)\n  ast/ast.go:175  BlockStatement.String  (Method)\n  ast/ast.go:193  Identifier.String  (Method)\n  ast/ast.go:204  Parameter.String  (Method)\nsymbol: String\nnote: partial: name-level graph facts, verify by reading the code; omitted: definitions_truncated, query_result_byte_limit, query_result_truncated:answer.definitions:10/20"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "String"
+     ],
+     "exit_code": 1,
+     "ms": 1171.7,
+     "bytes": 55,
+     "internal_error": false,
+     "head": "[GT] calls in String: no answer (no_callsites_recorded)",
+     "text": "[GT] calls in String: no answer (no_callsites_recorded)"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "validateArgs"
+     ],
+     "exit_code": 0,
+     "ms": 1116.8,
+     "bytes": 1300,
+     "internal_error": false,
+     "head": "[GT] context validateArgs",
+     "text": "[GT] context validateArgs\ncallee_count: 6\ncallees (6):\n  util/util.go:534  Contains  [CERTIFIED]\n  evaluator/evaluator.go:530  newError  [CERTIFIED]\n  object/object.go:535  Object.Inspect  [SPECULATIVE conf=0.2]\n  terminal/util.go:535  Lines.Join  [SPECULATIVE conf=0.2]\n  ast/ast.go:534  Node.String  [SPECULATIVE conf=0.15]\n  object/object.go:534  Object.Type  [SPECULATIVE conf=0.2]\ncaller_count: 63\ncallers (10):\n  evaluator/functions.go:1761  anyFn  [CERTIFIED]\n  evaluator/functions.go:766  applyStringCase  [CERTIFIED]\n  evaluator/functions.go:1028  argFn  [CERTIFIED]\n  evaluator/functions.go:1771  betweenFn  [CERTIFIED]\n  evaluator/functions.go:1068  callFn  [CERTIFIED]\n  evaluator/functions.go:783  cdFn  [CERTIFIED]\n  evaluator/functions.go:905  ceilFn  [CERTIFIED]\n  evaluator/functions.go:1078  chunkFn  [CERTIFIED]\n  evaluator/functions.go:806  clampFn  [CERTIFIED]\n  evaluator/functions.go:1435  diff  [CERTIFIED]\ncandidates (1):\n  evaluator/functions.go:528  validateArgs  (Function)\ndefinition: evaluator/functions.go:528  validateArgs  (Function)\nflows (1):\n  jsonFn -> linePosition (lower bound)\nprimary_selection: unique\nsymbol: validateArgs\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "validateArgs"
+     ],
+     "exit_code": 0,
+     "ms": 470.4,
+     "bytes": 1411,
+     "internal_error": false,
+     "head": "[GT] callers validateArgs",
+     "text": "[GT] callers validateArgs\ncaller_count: 72\ncallers_by_depth 1 (10):\n  evaluator/functions.go:1761  anyFn  [CERTIFIED]\n  evaluator/functions.go:766  applyStringCase  [CERTIFIED]\n  evaluator/functions.go:1028  argFn  [CERTIFIED]\n  evaluator/functions.go:1771  betweenFn  [CERTIFIED]\n  evaluator/functions.go:1068  callFn  [CERTIFIED]\n  evaluator/functions.go:783  cdFn  [CERTIFIED]\n  evaluator/functions.go:905  ceilFn  [CERTIFIED]\n  evaluator/functions.go:1078  chunkFn  [CERTIFIED]\n  evaluator/functions.go:806  clampFn  [CERTIFIED]\n  evaluator/functions.go:1435  diff  [CERTIFIED]\ncallers_by_depth 2 (9):\n  evaluator/functions.go:752  camelFn  [CERTIFIED]\n  evaluator/functions.go:1467  diffFn  [CERTIFIED]\n  evaluator/functions.go:1472  diffSymmetricFn  [CERTIFIED]\n  evaluator/functions.go:1511  flattenDeepFn  [CERTIFIED]\n  evaluator/functions.go:1506  flattenFn  [CERTIFIED]\n  evaluator/functions.go:762  kebabFn  [CERTIFIED]\n  evaluator/functions.go:2271  requireFn  [CERTIFIED]\n  evaluator/functions.go:757  snakeFn  [CERTIFIED]\n  evaluator/functions.go:2235  sourceFn  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 1\nresolved_symbols (1):\n  evaluator/functions.go:528  validateArgs  (Function)\nreturned_count: 29\nsymbol: validateArgs\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:10/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "validateArgs"
+     ],
+     "exit_code": 0,
+     "ms": 480.5,
+     "bytes": 1453,
+     "internal_error": false,
+     "head": "[GT] impact validateArgs",
+     "text": "[GT] impact validateArgs\ncaller_count: 72\ncallers_by_depth 1 (10):\n  evaluator/functions.go:1761  anyFn  [CERTIFIED]\n  evaluator/functions.go:766  applyStringCase  [CERTIFIED]\n  evaluator/functions.go:1028  argFn  [CERTIFIED]\n  evaluator/functions.go:1771  betweenFn  [CERTIFIED]\n  evaluator/functions.go:1068  callFn  [CERTIFIED]\n  evaluator/functions.go:783  cdFn  [CERTIFIED]\n  evaluator/functions.go:905  ceilFn  [CERTIFIED]\n  evaluator/functions.go:1078  chunkFn  [CERTIFIED]\n  evaluator/functions.go:806  clampFn  [CERTIFIED]\n  evaluator/functions.go:1435  diff  [CERTIFIED]\ncallers_by_depth 2 (9):\n  evaluator/functions.go:752  camelFn  [CERTIFIED]\n  evaluator/functions.go:1467  diffFn  [CERTIFIED]\n  evaluator/functions.go:1472  diffSymmetricFn  [CERTIFIED]\n  evaluator/functions.go:1511  flattenDeepFn  [CERTIFIED]\n  evaluator/functions.go:1506  flattenFn  [CERTIFIED]\n  evaluator/functions.go:762  kebabFn  [CERTIFIED]\n  evaluator/functions.go:2271  requireFn  [CERTIFIED]\n  evaluator/functions.go:757  snakeFn  [CERTIFIED]\n  evaluator/functions.go:2235  sourceFn  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 1\nresolved_symbols (1):\n  evaluator/functions.go:528  validateArgs  (Function)\nreturned_count: 29\nsymbol: validateArgs\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:10/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "validateArgs"
+     ],
+     "exit_code": 0,
+     "ms": 467.5,
+     "bytes": 912,
+     "internal_error": false,
+     "head": "[GT] references validateArgs",
+     "text": "[GT] references validateArgs\nreference_count: 63\nreferences_by_type CALLS (10):\n  evaluator/functions.go:613  lenFn  [CERTIFIED]\n  evaluator/functions.go:630  randFn  [CERTIFIED]\n  evaluator/functions.go:648  exitFn  [CERTIFIED]\n  evaluator/functions.go:678  flagFn  [CERTIFIED]\n  evaluator/functions.go:765  applyStringCase  [CERTIFIED]\n  evaluator/functions.go:775  cdFn  [CERTIFIED]\n  evaluator/functions.go:805  clampFn  [CERTIFIED]\n  evaluator/functions.go:854  intFn  [CERTIFIED]\n  evaluator/functions.go:867  roundFn  [CERTIFIED]\n  evaluator/functions.go:893  floorFn  [CERTIFIED]\nresolved_nodes: 1\nresolved_symbols (1):\n  evaluator/functions.go:528  validateArgs  (Function)\nreturned_count: 20\nsymbol: validateArgs\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, query_result_byte_limit, query_result_truncated:answer.references_by_type.CALLS:10/20"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "validateArgs"
+     ],
+     "exit_code": 0,
+     "ms": 504.2,
+     "bytes": 245,
+     "internal_error": false,
+     "head": "[GT] definition validateArgs",
+     "text": "[GT] definition validateArgs\ndefinition_count: 1\ndefinitions (1):\n  evaluator/functions.go:528  validateArgs  (Function)\nsymbol: validateArgs\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "validateArgs"
+     ],
+     "exit_code": 0,
+     "ms": 1081.9,
+     "bytes": 1640,
+     "internal_error": false,
+     "head": "[GT] calls in validateArgs",
+     "text": "[GT] calls in validateArgs\ncalls (12):\n  evaluator/functions.go:529  len -> unresolved (external or unknown) [empty, static]\n  evaluator/functions.go:529  len -> unresolved (external or unknown) [empty, static]\n  evaluator/functions.go:529  len -> unresolved (external or unknown) [empty, static]\n  evaluator/functions.go:530  newError -> one of: newError (evaluator/evaluator.go:45) [incomplete, static]\n  evaluator/functions.go:530  len -> unresolved (external or unknown) [empty, static]\n  evaluator/functions.go:534  Contains -> one of: Contains (util/util.go:16) [incomplete, virtual]\n  evaluator/functions.go:534  string -> one of: Node.String (ast/ast.go:13); Program.String (ast/ast.go:63); AssignStatement.String (ast/ast.go:85); BreakStatement.String (ast/ast.go:119); +28 more [ambiguous, static]\n  evaluator/functions.go:534  Type -> one of: Number.Type (object/object.go:91); Boolean.Type (object/object.go:115); Null.Type (object/object.go:123); ReturnValue.Type (object/object.go:132); +6 more [ambiguous, virtual]\n  evaluator/functions.go:534  Contains -> one of: Contains (util/util.go:16) [incomplete, virtual]\n  evaluator/functions.go:535  newError -> one of: newError (evaluator/evaluator.go:45) [incomplete, static]\n  evaluator/functions.go:535  Inspect -> one of: Number.Inspect (object/object.go:97); Boolean.Inspect (object/object.go:116); Null.Inspect (object/object.go:124); ReturnValue.Inspect (object/object.go:133); +6 more [ambiguous, virtual]\n  evaluator/functions.go:535  Join -> one of: Lines.Join (terminal/util.go:93) [incomplete, virtual]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "Inspect"
+     ],
+     "exit_code": 0,
+     "ms": 1118.1,
+     "bytes": 1661,
+     "internal_error": false,
+     "head": "[GT] context Inspect",
+     "text": "[GT] context Inspect\nadditional_definitions: 10\ncaller_count: 48\ncallers (10):\n  object/object.go:71  GenerateEqualityString  [CERTIFIED]\n  object/object.go:133  ReturnValue.Inspect  [CERTIFIED]\n  evaluator/evaluator.go:1421  evalArrayIndexExpression  [CERTIFIED]\n  evaluator/evaluator.go:871  evalInExpression  [CERTIFIED]\n  evaluator/evaluator.go:1362  evalStringIndexExpression  [CERTIFIED]\n  evaluator/evaluator.go:638  evalTildePrefixOperatorExpression  [CERTIFIED]\n  util/util.go:51  GetEnvVar  [SPECULATIVE conf=0.2]\n  util/util.go:103  InterpolateStringVars  [SPECULATIVE conf=0.2]\n  object/object.go:106  Number.Json  [SPECULATIVE conf=0.2]\n  object/object.go:117  Boolean.Json  [SPECULATIVE conf=0.2]\ncandidates (11):\n  object/object.go:58  Object.Inspect  (Method)\n  object/object.go:97  Number.Inspect  (Method)\n  object/object.go:116  Boolean.Inspect  (Method)\n  object/object.go:124  Null.Inspect  (Method)\n  object/object.go:133  ReturnValue.Inspect  (Method)\n  object/object.go:141  Error.Inspect  (Method)\n  object/object.go:162  Function.Inspect  (Method)\n  object/object.go:225  String.Inspect  (Method)\n  object/object.go:332  Builtin.Inspect  (Method)\n  object/object.go:385  Array.Inspect  (Method)\n  object/object.go:432  Hash.Inspect  (Method)\ndefinition: object/object.go:58  Object.Inspect  (Method)\nflows (5):\n  Eval -> Inspect\n  Mapify -> Inspect\n  Eval -> Inspect\n  Eval -> Inspect\n  Eval -> Inspect\nprimary_selection: ambiguous_preferred_order\nsymbol: Inspect\nnote: partial: name-level graph facts, verify by reading the code; omitted: ambiguous_symbol, callers_truncated, flows_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "Inspect"
+     ],
+     "exit_code": 0,
+     "ms": 482.4,
+     "bytes": 1461,
+     "internal_error": false,
+     "head": "[GT] callers Inspect",
+     "text": "[GT] callers Inspect\ncaller_count: 115\ncallers_by_depth 1 (5):\n  object/object.go:71  GenerateEqualityString  [CERTIFIED]\n  evaluator/evaluator.go:1421  evalArrayIndexExpression  [CERTIFIED]\n  evaluator/evaluator.go:871  evalInExpression  [CERTIFIED]\n  evaluator/evaluator.go:1362  evalStringIndexExpression  [CERTIFIED]\n  evaluator/evaluator.go:638  evalTildePrefixOperatorExpression  [CERTIFIED]\ncallers_by_depth 2 (5):\n  repl/repl.go:134  BeginRepl  [CERTIFIED]\n  object/object.go:78  Equal  [CERTIFIED]\n  evaluator/evaluator.go:90  Eval  [CERTIFIED]\n  util/util.go:169  Mapify  [CERTIFIED]\n  util/util_test.go:106  TestInterpolateStringVars  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 11\nresolved_symbols (11):\n  object/object.go:58  Object.Inspect  (Method)\n  object/object.go:97  Number.Inspect  (Method)\n  object/object.go:116  Boolean.Inspect  (Method)\n  object/object.go:124  Null.Inspect  (Method)\n  object/object.go:133  ReturnValue.Inspect  (Method)\n  object/object.go:141  Error.Inspect  (Method)\n  object/object.go:162  Function.Inspect  (Method)\n  object/object.go:225  String.Inspect  (Method)\n  object/object.go:332  Builtin.Inspect  (Method)\n  object/object.go:385  Array.Inspect  (Method)\n  object/object.go:432  Hash.Inspect  (Method)\nreturned_count: 40\nsymbol: Inspect\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "Inspect"
+     ],
+     "exit_code": 0,
+     "ms": 491.7,
+     "bytes": 1493,
+     "internal_error": false,
+     "head": "[GT] impact Inspect",
+     "text": "[GT] impact Inspect\ncaller_count: 139\ncallers_by_depth 1 (5):\n  object/object.go:71  GenerateEqualityString  [CERTIFIED]\n  evaluator/evaluator.go:1421  evalArrayIndexExpression  [CERTIFIED]\n  evaluator/evaluator.go:871  evalInExpression  [CERTIFIED]\n  evaluator/evaluator.go:1362  evalStringIndexExpression  [CERTIFIED]\n  evaluator/evaluator.go:638  evalTildePrefixOperatorExpression  [CERTIFIED]\ncallers_by_depth 2 (5):\n  repl/repl.go:134  BeginRepl  [CERTIFIED]\n  object/object.go:78  Equal  [CERTIFIED]\n  evaluator/evaluator.go:90  Eval  [CERTIFIED]\n  util/util.go:169  Mapify  [CERTIFIED]\n  util/util_test.go:106  TestInterpolateStringVars  [CERTIFIED]\ncallers_by_depth 3 (5):\n  evaluator/evaluator.go:67  BeginEval  [CERTIFIED]\n  terminal/terminal.go:34  NewTerminal  [CERTIFIED]\n  util/util_test.go:119  TestMapify  [CERTIFIED]\n  evaluator/evaluator.go:1240  applyMethod  [CERTIFIED]\n  evaluator/functions.go:752  camelFn  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 11\nresolved_symbols (5):\n  object/object.go:58  Object.Inspect  (Method)\n  object/object.go:97  Number.Inspect  (Method)\n  object/object.go:116  Boolean.Inspect  (Method)\n  object/object.go:124  Null.Inspect  (Method)\n  object/object.go:133  ReturnValue.Inspect  (Method)\nreturned_count: 60\nsymbol: Inspect\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "Inspect"
+     ],
+     "exit_code": 0,
+     "ms": 423.2,
+     "bytes": 1140,
+     "internal_error": false,
+     "head": "[GT] references Inspect",
+     "text": "[GT] references Inspect\nreference_count: 53\nreferences_by_type CALLS (5):\n  evaluator/evaluator.go:633  evalTildePrefixOperatorExpression  [CERTIFIED]\n  evaluator/evaluator.go:843  evalInExpression  [CERTIFIED]\n  evaluator/evaluator.go:1333  evalStringIndexExpression  [CERTIFIED]\n  evaluator/evaluator.go:1396  evalArrayIndexExpression  [CERTIFIED]\n  object/object.go:70  GenerateEqualityString  [CERTIFIED]\nreferences_by_type CONTAINS (5):\n  object/object.go:56  Object  [CERTIFIED]\n  object/object.go:86  Number  [CERTIFIED]\n  object/object.go:110  Boolean  [CERTIFIED]\n  object/object.go:119  Null  [CERTIFIED]\n  object/object.go:127  ReturnValue  [CERTIFIED]\nresolved_nodes: 11\nresolved_symbols (5):\n  object/object.go:58  Object.Inspect  (Method)\n  object/object.go:97  Number.Inspect  (Method)\n  object/object.go:116  Boolean.Inspect  (Method)\n  object/object.go:124  Null.Inspect  (Method)\n  object/object.go:133  ReturnValue.Inspect  (Method)\nreturned_count: 25\nsymbol: Inspect\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, resolved_nodes_truncated, query_result_byte_limit"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "Inspect"
+     ],
+     "exit_code": 0,
+     "ms": 448.5,
+     "bytes": 684,
+     "internal_error": false,
+     "head": "[GT] definition Inspect",
+     "text": "[GT] definition Inspect\ndefinition_count: 11\ndefinitions (11):\n  object/object.go:58  Object.Inspect  (Method)\n  object/object.go:97  Number.Inspect  (Method)\n  object/object.go:116  Boolean.Inspect  (Method)\n  object/object.go:124  Null.Inspect  (Method)\n  object/object.go:133  ReturnValue.Inspect  (Method)\n  object/object.go:141  Error.Inspect  (Method)\n  object/object.go:162  Function.Inspect  (Method)\n  object/object.go:225  String.Inspect  (Method)\n  object/object.go:332  Builtin.Inspect  (Method)\n  object/object.go:385  Array.Inspect  (Method)\n  object/object.go:432  Hash.Inspect  (Method)\nsymbol: Inspect\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "Inspect"
+     ],
+     "exit_code": 1,
+     "ms": 1031.4,
+     "bytes": 56,
+     "internal_error": false,
+     "head": "[GT] calls in Inspect: no answer (no_callsites_recorded)",
+     "text": "[GT] calls in Inspect: no answer (no_callsites_recorded)"
+    },
+    {
+     "tool": "gt-tests",
+     "args": [
+      "ast/ast.go"
+     ],
+     "exit_code": 1,
+     "ms": 308.8,
+     "bytes": 56,
+     "internal_error": false,
+     "head": "[GT] tests for ast/ast.go: no answer (no_covering_tests)",
+     "text": "[GT] tests for ast/ast.go: no answer (no_covering_tests)"
+    },
+    {
+     "tool": "gt-module",
+     "args": [
+      "ast/ast.go"
+     ],
+     "exit_code": 0,
+     "ms": 5.0,
+     "bytes": 137,
+     "internal_error": false,
+     "head": "[GT] module cluster ast/ast.go",
+     "text": "[GT] module cluster ast/ast.go\ncommunities (1):\n  ast/\nfile: ast/ast.go\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-check",
+     "args": [
+      "ast/ast.go"
+     ],
+     "exit_code": 0,
+     "ms": 844.8,
+     "bytes": 143,
+     "internal_error": false,
+     "head": "[GT] syntax ast/ast.go",
+     "text": "[GT] syntax ast/ast.go\nchecker (3):\n  gofmt\n  -e\n  ast/ast.go\nlanguage: .go\npath: ast/ast.go\nreason: clean_exit\nsource_bytes: 16414\nverdict: ok"
+    },
+    {
+     "tool": "gt-cochange",
+     "args": [
+      "ast/ast.go"
+     ],
+     "exit_code": 1,
+     "ms": 4.0,
+     "bytes": 58,
+     "internal_error": false,
+     "head": "[GT] co-change ast/ast.go: no answer (no_cochange_history)",
+     "text": "[GT] co-change ast/ast.go: no answer (no_cochange_history)"
+    },
+    {
+     "tool": "gt-changes",
+     "args": [
+      "ast/ast.go"
+     ],
+     "exit_code": 1,
+     "ms": 1171.3,
+     "bytes": 80,
+     "internal_error": false,
+     "head": "[GT] impact of edits ast/ast.go: no answer (changed_symbols_unmapped:ast/ast.go)",
+     "text": "[GT] impact of edits ast/ast.go: no answer (changed_symbols_unmapped:ast/ast.go)"
+    },
+    {
+     "tool": "gt-slice",
+     "args": [
+      "String",
+      "14"
+     ],
+     "exit_code": 1,
+     "ms": 481.1,
+     "bytes": 62,
+     "internal_error": false,
+     "head": "[GT] slice String 14: no answer (line_outside_function:String)",
+     "text": "[GT] slice String 14: no answer (line_outside_function:String)"
+    },
+    {
+     "tool": "gt-shape",
+     "args": [
+      "String"
+     ],
+     "exit_code": 1,
+     "ms": 424.3,
+     "bytes": 54,
+     "internal_error": false,
+     "head": "[GT] shape String: no answer (no_verifiable_contracts)",
+     "text": "[GT] shape String: no answer (no_verifiable_contracts)"
+    },
+    {
+     "tool": "gt-api",
+     "args": [
+      "String"
+     ],
+     "exit_code": 1,
+     "ms": 491.2,
+     "bytes": 51,
+     "internal_error": false,
+     "head": "[GT] api impact String: no answer (route_not_found)",
+     "text": "[GT] api impact String: no answer (route_not_found)"
+    },
+    {
+     "tool": "gt-rename",
+     "args": [
+      "String",
+      "String_renamed"
+     ],
+     "exit_code": 0,
+     "ms": 495.8,
+     "bytes": 1560,
+     "internal_error": false,
+     "head": "[GT] rename String String_renamed",
+     "text": "[GT] rename String String_renamed\ndefinitions (10):\n  ast/ast.go:13  String  (Method)\n  ast/ast.go:63  String  (Method)\n  ast/ast.go:85  String  (Method)\n  ast/ast.go:119  String  (Method)\n  ast/ast.go:129  String  (Method)\n  ast/ast.go:140  String  (Method)\n  ast/ast.go:161  String  (Method)\n  ast/ast.go:175  String  (Method)\n  ast/ast.go:193  String  (Method)\n  ast/ast.go:204  String  (Method)\nedit_site_count: 95\nedit_sites_by_type CALLS (6):\n  ast/ast.go:67  [SPECULATIVE conf=0.2]\n  ast/ast.go:89  [CERTIFIED]\n  ast/ast.go:91  [SPECULATIVE conf=0.2]\n  ast/ast.go:146  [SPECULATIVE conf=0.2]\n  ast/ast.go:163  [SPECULATIVE conf=0.2]\n  ast/ast.go:179  [SPECULATIVE conf=0.2]\nedit_sites_by_type CONTAINS (10):\n  ast/ast.go:0  [CERTIFIED]\n  ast/ast.go:0  [CERTIFIED]\n  ast/ast.go:0  [CERTIFIED]\n  ast/ast.go:0  [CERTIFIED]\n  ast/ast.go:0  [CERTIFIED]\n  ast/ast.go:0  [CERTIFIED]\n  ast/ast.go:0  [CERTIFIED]\n  ast/ast.go:0  [CERTIFIED]\n  ast/ast.go:0  [CERTIFIED]\n  ast/ast.go:0  [CERTIFIED]\nfiles_to_touch (17):\n  ast/ast.go\n  ast/ast_test.go\n  evaluator/evaluator.go\n  evaluator/evaluator_test.go\n  evaluator/functions.go\n  install/install.go\n  js/js.go\n  lexer/lexer.go\n  object/object.go\n  parser/parser.go\n  parser/parser_test.go\n  repl/repl.go\n  terminal/history.go\n  terminal/terminal.go\n  util/check_update.go\n  util/util.go\n  util/util_test.go\nnew_name: String_renamed\nsymbol: String\nnote: partial: name-level graph facts, verify by reading the code; omitted: edit_sites_truncated:CALLS, rename_definitions_truncated, text_references_not_enumerated"
+    },
+    {
+     "tool": "gt-taint",
+     "args": [
+      "validateArgs",
+      "String"
+     ],
+     "exit_code": 0,
+     "ms": 962.5,
+     "bytes": 374,
+     "internal_error": false,
+     "head": "[GT] taint validateArgs String",
+     "text": "[GT] taint validateArgs String\ndataflow_omissions (2):\n  dataflow_python_only:evaluator/functions.go\n  dataflow_source_unresolved:validateArgs\nreachable_symbol_count: 4\nsink: String\nsource: validateArgs\nnote: partial: name-level graph facts, verify by reading the code; omitted: name_match_edges_excluded, statement_level_dataflow_unavailable, symbol_level_reachability_only"
+    }
+   ],
+   "augment": [
+    {
+     "symbol": "String",
+     "hit": true,
+     "bytes": 455,
+     "ms": 1534.9,
+     "text": "[GT] graph context for your search:\n  Node.String (Method) ast/ast.go:13\n    ambiguous: 31 other definition(s) share this name\n    called by: TestCurrentArgsParsing (parser/parser_test.go:1192), BeginRepl (repl/repl.go:134) [SPECULATIVE], CanCallMethod (evaluator/evaluator.go:1269) [SPECULATIVE], Lexer.ErrorLine (lexer/lexer.go:69) [SPECULATIVE], Function.Inspect (object/object.go:167) [SPECULATIVE] (+74 more)\n    in flow: main -> String (lower bound)"
+    },
+    {
+     "symbol": "validateArgs",
+     "hit": true,
+     "bytes": 596,
+     "ms": 1124.0,
+     "text": "[GT] graph context for your search:\n  validateArgs (Function) evaluator/functions.go:528\n    called by: anyFn (evaluator/functions.go:1761), applyStringCase (evaluator/functions.go:766), argFn (evaluator/functions.go:1028), betweenFn (evaluator/functions.go:1771), callFn (evaluator/functions.go:1068) (+58 more)\n    calls: Contains (util/util.go:534), newError (evaluator/evaluator.go:530), Object.Inspect (object/object.go:535) [SPECULATIVE], Lines.Join (terminal/util.go:535) [SPECULATIVE], Node.String (ast/ast.go:534) [SPECULATIVE] (+1 more)\n    in flow: jsonFn -> linePosition (lower bound)"
+    },
+    {
+     "symbol": "Inspect",
+     "hit": true,
+     "bytes": 470,
+     "ms": 1160.2,
+     "text": "[GT] graph context for your search:\n  Object.Inspect (Method) object/object.go:58\n    ambiguous: 10 other definition(s) share this name\n    called by: GenerateEqualityString (object/object.go:71), ReturnValue.Inspect (object/object.go:133), evalArrayIndexExpression (evaluator/evaluator.go:1421), evalInExpression (evaluator/evaluator.go:871), evalStringIndexExpression (evaluator/evaluator.go:1362) (+43 more)\n    in flow: Eval -> Inspect\n    in flow: Mapify -> Inspect"
+    },
+    {
+     "symbol": "ParseProgram",
+     "hit": true,
+     "bytes": 560,
+     "ms": 1215.9,
+     "text": "[GT] graph context for your search:\n  Parser.ParseProgram (Method) parser/parser.go:219\n    called by: Run (runner/runner.go:20) [CANDIDATE], TestAssignStatements (parser/parser_test.go:28) [CANDIDATE], TestBacktickCommandParsing (parser/parser_test.go:1073) [CANDIDATE], TestBooleanExpression (parser/parser_test.go:418) [CANDIDATE], TestCallExpressionParameterParsing (parser/parser_test.go:1329) [CANDIDATE] (+43 more)\n    calls: Parser.curTokenIs (parser/parser.go:223), Parser.nextToken (parser/parser.go:229), Parser.parseStatement (parser/parser.go:225)"
+    },
+    {
+     "symbol": "newError",
+     "hit": true,
+     "bytes": 459,
+     "ms": 1136.7,
+     "text": "[GT] graph context for your search:\n  newError (Function) evaluator/evaluator.go:45\n    called by: applyFunction (evaluator/evaluator.go:1227), applyMathFunction (evaluator/functions.go:927), applyMethod (evaluator/evaluator.go:1251), betweenFn (evaluator/functions.go:1781), cdFn (evaluator/functions.go:778) (+43 more)\n    calls: Lexer.ErrorLine (lexer/lexer.go:47) [CANDIDATE]\n    in flow: Eval -> newError\n    in flow: jsonFn -> linePosition (lower bound)"
+    }
+   ]
+  },
+  {
+   "task": "fd-deterministic-multi-key-sorting",
+   "repository": "https://github.com/sharkdp/fd",
+   "commit": "227883606023d62275fb48701aeac90f2b604143",
+   "language": "rust",
+   "index_seconds": 5.0,
+   "node_counts": {
+    "Callsite": 1906,
+    "Class": 35,
+    "CompletenessFact": 16364,
+    "Constant": 12,
+    "File": 34,
+    "Function": 209,
+    "ImplBlock": 32,
+    "Macro": 4,
+    "Method": 113,
+    "Module": 30,
+    "QueryPolicyVersion": 2,
+    "TypeAlias": 2,
+    "UnresolvedFact": 1795
+   },
+   "edge_counts": {
+    "ACCESSES": 54,
+    "CALLS": 572,
+    "CANDIDATE_TARGET": 1542,
+    "CONTAINS": 113,
+    "CO_SERIALIZES": 1,
+    "DATA_FLOW": 3,
+    "HAS_CALLSITE": 1906,
+    "HAS_COMPLETENESS_FACT": 16364,
+    "HAS_UNRESOLVED_FACT": 1795,
+    "IMPORTS": 63,
+    "PARAM_TYPE": 59,
+    "PRECEDES": 6,
+    "RAISES": 4,
+    "READS": 53,
+    "RETURNS_TYPE": 15,
+    "SELECTED_TARGET": 111,
+    "WRITES": 6
+   },
+   "top_symbols": [
+    {
+     "name": "path",
+     "file": "src/dir_entry.rs",
+     "line": 128,
+     "callers": 14
+    },
+    {
+     "name": "is_empty",
+     "file": "src/filesystem.rs",
+     "line": 44,
+     "callers": 12
+    },
+    {
+     "name": "from",
+     "file": "src/exit_codes.rs",
+     "line": 15,
+     "callers": 11
+    },
+    {
+     "name": "push",
+     "file": "src/exec/command.rs",
+     "line": 26,
+     "callers": 11
+    },
+    {
+     "name": "into_iter",
+     "file": "src/walk.rs",
+     "line": 69,
+     "callers": 7
+    }
+   ],
+   "tools_answered": 24,
+   "tools_run": 35,
+   "internal_errors": 0,
+   "tool_ms_p50": 119.4,
+   "tool_ms_max": 672.4,
+   "augment_hits": 4,
+   "augment_runs": 5,
+   "tools": [
+    {
+     "tool": "gt-query",
+     "args": [
+      "Add deterministic multi-key sorting to fd"
+     ],
+     "exit_code": 0,
+     "ms": 186.5,
+     "bytes": 640,
+     "internal_error": false,
+     "head": "[GT] query Add deterministic multi-key sorting to fd",
+     "text": "[GT] query Add deterministic multi-key sorting to fd\nranked (8):\n  tests/testenv/mod.rs:76  find_fd_exe  (Function)\n  tests/tests.rs:316  test_multi_file  (Function)\n  tests/tests.rs:1771  test_exec_multi  (Function)\n  tests/tests.rs:1922  test_exec_batch_multi  (Function)\n  tests/tests.rs:340  test_multi_file_with_missing  (Function)\n  src/filter/time.rs:57  TimeFilter.applies_to  (Method)\n  src/filesystem.rs:103  osstr_to_bytes  (Function)\n  src/filesystem.rs:109  osstr_to_bytes  (Function)\nnote: partial: name-level graph facts, verify by reading the code; omitted: source_unavailable:dense\nnext: gt-context <symbol> for the top hit"
+    },
+    {
+     "tool": "gt-flows",
+     "args": [],
+     "exit_code": 0,
+     "ms": 672.4,
+     "bytes": 1227,
+     "internal_error": false,
+     "head": "[GT] flows",
+     "text": "[GT] flows\nmatched: 75\nprocess_count: 75\nprocesses (5):\n  absolute_path (src/filesystem.rs:23) -> path_absolute_form (src/filesystem.rs:14)\n  strip_cwd_prefix (src/cli.rs:742) -> no_search_paths (src/cli.rs:715)\n  main (src/main.rs:61) -> run (src/main.rs:74) -> construct_config (src/main.rs:195) -> extract_command (src/main.rs:333) -> new_batch (src/exec/mod.rs:51) -> new (src/exec/mod.rs:223) -> parse (src/fmt/mod.rs:58) -> token_from_pattern_id (src/fmt/mod.rs:201) (lower bound, unwitnessed)\n  main (src/main.rs:61) -> run (src/main.rs:74) -> construct_config (src/main.rs:195) -> extract_command (src/main.rs:333) -> new_batch (src/exec/mod.rs:51) -> new (src/exec/mod.rs:223) -> push (src/exec/mod.rs:176) -> generate (src/fmt/mod.rs:112) -> ...(+2) (lower bound, unwitnessed)\n  main (src/main.rs:61) -> run (src/main.rs:74) -> construct_config (src/main.rs:195) -> extract_command (src/main.rs:333) -> determine_ls_command (src/main.rs:350) -> new (src/hyperlink.rs:8) -> PathUrl (src/hyperlink.rs:5) (lower bound, unwitnessed)\ntruncated: True\nnote: partial: name-level graph facts, verify by reading the code; omitted: process_library_truncated, query_result_byte_limit, query_result_truncated:answer.processes:5/10"
+    },
+    {
+     "tool": "gt-routes",
+     "args": [],
+     "exit_code": 1,
+     "ms": 112.5,
+     "bytes": 55,
+     "internal_error": false,
+     "head": "[GT] routes: no answer (no matching facts in the graph)",
+     "text": "[GT] routes: no answer (no matching facts in the graph)"
+    },
+    {
+     "tool": "gt-tools",
+     "args": [],
+     "exit_code": 1,
+     "ms": 106.4,
+     "bytes": 49,
+     "internal_error": false,
+     "head": "[GT] tool handlers: no answer (no_tools_detected)",
+     "text": "[GT] tool handlers: no answer (no_tools_detected)"
+    },
+    {
+     "tool": "gt-verify",
+     "args": [],
+     "exit_code": 1,
+     "ms": 11.8,
+     "bytes": 56,
+     "internal_error": false,
+     "head": "[GT] last test result: no answer (no_execution_recorded)",
+     "text": "[GT] last test result: no answer (no_execution_recorded)"
+    },
+    {
+     "tool": "gt-failures",
+     "args": [],
+     "exit_code": 1,
+     "ms": 2.1,
+     "bytes": 57,
+     "internal_error": false,
+     "head": "[GT] recurring failures: no answer (no_failures_recorded)",
+     "text": "[GT] recurring failures: no answer (no_failures_recorded)"
+    },
+    {
+     "tool": "gt-help",
+     "args": [],
+     "exit_code": 0,
+     "ms": 2.3,
+     "bytes": 1593,
+     "internal_error": false,
+     "head": "[GT] commands",
+     "text": "[GT] commands\ntools (23):\n  gt-query \"<concept or error text>\"  - rank files and symbols relevant to a concept\n  gt-context <symbol> [file]  - definition, callers, callees and flows of one symbol\n  gt-callers <symbol> [depth]  - who calls this symbol, by call depth\n  gt-impact <symbol> [file]  - what may break if this symbol changes (callers to depth 3)\n  gt-refs <symbol> [file]  - graph references to a symbol\n  gt-def <symbol> [file]  - where a symbol is defined\n  gt-flows [\"<concept>\"]  - execution flows (entry point -> steps)\n  gt-tests <file> [file...]  - tests that cover the given source files\n  gt-routes [route|handler|file filter]  - HTTP routes, handlers, middleware and injections\n  gt-slice <function> <line> [backward|forward]  - statements that affect (or are affected by) a line\n  gt-taint <source-symbol> [sink-symbol]  - call paths from a source to a sink\n  gt-verify  - the last test/build result GT observed, vs the task baseline\n  gt-changes [file...]  - callers and tests affected by your edits so far (or by the given files)\n  gt-check <file>  - parse a file you edited and report syntax errors\n  gt-help  - list every GT command\n  gt-api <route|handler>  - clients and callers of an HTTP route or handler\n  gt-shape <interface|class> [file]  - does each implementation still match the interface\n  gt-calls <function> [file]  - how each call inside a function resolved (target, ambiguous, external)\n  gt-module <file>  - the cluster of files this file belongs with\n  gt-cochange <file>  - files that historically change together with this one\n  ... 3 more not shown"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "path"
+     ],
+     "exit_code": 0,
+     "ms": 589.7,
+     "bytes": 689,
+     "internal_error": false,
+     "head": "[GT] context path",
+     "text": "[GT] context path\nadditional_definitions: 1\ncallee_count: 1\ncallees (1):\n  src/dir_entry.rs:44  DirEntry.path  [CANDIDATE conf=0.6]\ncaller_count: 1\ncallers (1):\n  src/dir_entry.rs:129  DirEntry.path  [SPECULATIVE conf=0.2]\ncandidates (2):\n  src/dir_entry.rs:42  DirEntry.path  (Method)\n  src/dir_entry.rs:128  DirEntry.path  (Method)\ndefinition: src/dir_entry.rs:42  DirEntry.path  (Method)\nflows (3):\n  main -> path (lower bound)\n  partial_cmp -> path (lower bound)\n  main -> path (lower bound)\nprimary_selection: ambiguous_preferred_order\nsymbol: path\nnote: partial: name-level graph facts, verify by reading the code; omitted: ambiguous_symbol\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "path"
+     ],
+     "exit_code": 0,
+     "ms": 132.9,
+     "bytes": 1437,
+     "internal_error": false,
+     "head": "[GT] callers path",
+     "text": "[GT] callers path\ncaller_count: 58\ncallers_by_depth 1 (6):\n  src/dir_entry.rs:123  DirEntry.cmp  [CERTIFIED]\n  src/dir_entry.rs:107  DirEntry.eq  [CERTIFIED]\n  src/output.rs:19  print_entry  [CERTIFIED]\n  src/dir_entry.rs:59  DirEntry.stripped_path  [CERTIFIED]\n  tests/testenv/mod.rs:189  TestEnv.create_broken_symlink  [CANDIDATE conf=0.6]\n  tests/testenv/mod.rs:67  create_config_directory_with_global_ignore  [CANDIDATE conf=0.6]\ncallers_by_depth 2 (10):\n  tests/testenv/mod.rs:326  TestEnv.assert_error_subdirectory  [CERTIFIED]\n  tests/testenv/mod.rs:224  TestEnv.assert_success_and_get_output  [CERTIFIED]\n  tests/testenv/mod.rs:171  TestEnv.global_ignore_file  [CERTIFIED]\n  src/dir_entry.rs:68  DirEntry.into_stripped_path  [CERTIFIED]\n  tests/testenv/mod.rs:149  TestEnv.new  [CERTIFIED]\n  src/dir_entry.rs:116  DirEntry.partial_cmp  [CERTIFIED]\n  src/output.rs:91  print_entry_colorized  [CERTIFIED]\n  src/output.rs:75  print_entry_format  [CERTIFIED]\n  src/output.rs:172  print_entry_uncolorized  [CERTIFIED]\n  src/output.rs:140  print_entry_uncolorized_base  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 2\nresolved_symbols (2):\n  src/dir_entry.rs:42  DirEntry.path  (Method)\n  src/dir_entry.rs:128  DirEntry.path  (Method)\nreturned_count: 33\nsymbol: path\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:6/13"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "path"
+     ],
+     "exit_code": 0,
+     "ms": 119.0,
+     "bytes": 1537,
+     "internal_error": false,
+     "head": "[GT] impact path",
+     "text": "[GT] impact path\ncaller_count: 148\ncallers_by_depth 1 (6):\n  src/dir_entry.rs:123  DirEntry.cmp  [CERTIFIED]\n  src/dir_entry.rs:107  DirEntry.eq  [CERTIFIED]\n  src/output.rs:19  print_entry  [CERTIFIED]\n  src/dir_entry.rs:59  DirEntry.stripped_path  [CERTIFIED]\n  tests/testenv/mod.rs:189  TestEnv.create_broken_symlink  [CANDIDATE conf=0.6]\n  tests/testenv/mod.rs:67  create_config_directory_with_global_ignore  [CANDIDATE conf=0.6]\ncallers_by_depth 2 (5):\n  tests/testenv/mod.rs:326  TestEnv.assert_error_subdirectory  [CERTIFIED]\n  tests/testenv/mod.rs:224  TestEnv.assert_success_and_get_output  [CERTIFIED]\n  tests/testenv/mod.rs:171  TestEnv.global_ignore_file  [CERTIFIED]\n  src/dir_entry.rs:68  DirEntry.into_stripped_path  [CERTIFIED]\n  tests/testenv/mod.rs:149  TestEnv.new  [CERTIFIED]\ncallers_by_depth 3 (5):\n  src/fmt/mod.rs:240  all_placeholders  [CERTIFIED]\n  tests/testenv/mod.rs:297  TestEnv.assert_error  [CERTIFIED]\n  tests/testenv/mod.rs:289  TestEnv.assert_failure  [CERTIFIED]\n  tests/testenv/mod.rs:281  TestEnv.assert_failure_with_error  [CERTIFIED]\n  tests/testenv/mod.rs:255  TestEnv.assert_output_raw  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 2\nresolved_symbols (2):\n  src/dir_entry.rs:42  DirEntry.path  (Method)\n  src/dir_entry.rs:128  DirEntry.path  (Method)\nreturned_count: 53\nsymbol: path\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:6/13\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "path"
+     ],
+     "exit_code": 0,
+     "ms": 114.1,
+     "bytes": 1011,
+     "internal_error": false,
+     "head": "[GT] references path",
+     "text": "[GT] references path\nreference_count: 18\nreferences_by_type CALLS (7):\n  src/dir_entry.rs:57  DirEntry.stripped_path  [CERTIFIED]\n  src/dir_entry.rs:106  DirEntry.eq  [CERTIFIED]\n  src/dir_entry.rs:122  DirEntry.cmp  [CERTIFIED]\n  src/output.rs:16  print_entry  [CERTIFIED]\n  src/dir_entry.rs:42  DirEntry.path  [CANDIDATE conf=0.6]\n  src/filesystem.rs:44  is_empty  [CANDIDATE conf=0.6]\n  src/filetypes.rs:21  FileTypes.should_ignore  [CANDIDATE conf=0.6]\nreferences_by_type CONTAINS (2):\n  src/dir_entry.rs:18  DirEntry  [CERTIFIED]\n  src/dir_entry.rs:18  DirEntry  [CERTIFIED]\nreferences_by_type DATA_FLOW (1):\n  tests/testenv/mod.rs:300  TestEnv.run_command  [CANDIDATE conf=0.6]\nresolved_nodes: 2\nresolved_symbols (2):\n  src/dir_entry.rs:42  DirEntry.path  (Method)\n  src/dir_entry.rs:128  DirEntry.path  (Method)\nreturned_count: 18\nsymbol: path\nnote: partial: name-level graph facts, verify by reading the code; omitted: query_result_byte_limit, query_result_truncated:answer.references_by_type.CALLS:7/15"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "path"
+     ],
+     "exit_code": 0,
+     "ms": 107.5,
+     "bytes": 231,
+     "internal_error": false,
+     "head": "[GT] definition path",
+     "text": "[GT] definition path\ndefinition_count: 2\ndefinitions (2):\n  src/dir_entry.rs:42  DirEntry.path  (Method)\n  src/dir_entry.rs:128  DirEntry.path  (Method)\nsymbol: path\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "path"
+     ],
+     "exit_code": 0,
+     "ms": 391.7,
+     "bytes": 313,
+     "internal_error": false,
+     "head": "[GT] calls in path",
+     "text": "[GT] calls in path\ncalls (2):\n  src/dir_entry.rs:44  path -> one of: DirEntry.path (src/dir_entry.rs:42); DirEntry.path (src/dir_entry.rs:128) [ambiguous, virtual]\n  src/dir_entry.rs:45  as_path -> unresolved (external or unknown) [empty, virtual]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "is_empty"
+     ],
+     "exit_code": 0,
+     "ms": 552.0,
+     "bytes": 1329,
+     "internal_error": false,
+     "head": "[GT] context is_empty",
+     "text": "[GT] context is_empty\ncallee_count: 3\ncallees (3):\n  src/dir_entry.rs:45  DirEntry.file_type  [CANDIDATE conf=0.6]\n  src/dir_entry.rs:53  DirEntry.metadata  [CANDIDATE conf=0.6]\n  src/dir_entry.rs:47  DirEntry.path  [CANDIDATE conf=0.6]\ncaller_count: 12\ncallers (10):\n  src/main.rs:170  build_pattern_regex  [SPECULATIVE conf=0.2]\n  src/main.rs:230  construct_config  [SPECULATIVE conf=0.2]\n  src/filesystem.rs:131  default_path_separator  [SPECULATIVE conf=0.2]\n  src/exec/mod.rs:244  CommandTemplate.new  [SPECULATIVE conf=0.2]\n  src/cli.rs:716  Opts.no_search_paths  [SPECULATIVE conf=0.2]\n  src/fmt/mod.rs:78  FormatTemplate.parse  [SPECULATIVE conf=0.2]\n  src/walk.rs:236  ReceiverBuffer.poll  [SPECULATIVE conf=0.2]\n  src/main.rs:84  run  [SPECULATIVE conf=0.2]\n  src/cli.rs:679  Opts.search_paths  [SPECULATIVE conf=0.2]\n  src/filetypes.rs:31  FileTypes.should_ignore  [SPECULATIVE conf=0.2]\ncandidates (1):\n  src/filesystem.rs:44  is_empty  (Function)\ndefinition: src/filesystem.rs:44  is_empty  (Function)\nflows (4):\n  main -> metadata (lower bound)\n  main -> path (lower bound)\n  main -> path (lower bound)\n  main -> metadata (lower bound)\nprimary_selection: unique\nsymbol: is_empty\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "is_empty"
+     ],
+     "exit_code": 0,
+     "ms": 138.7,
+     "bytes": 1491,
+     "internal_error": false,
+     "head": "[GT] callers is_empty",
+     "text": "[GT] callers is_empty\ncaller_count: 25\ncallers_by_depth 1 (12):\n  src/main.rs:170  build_pattern_regex  [SPECULATIVE conf=0.2]\n  src/main.rs:230  construct_config  [SPECULATIVE conf=0.2]\n  src/filesystem.rs:131  default_path_separator  [SPECULATIVE conf=0.2]\n  src/exec/mod.rs:244  CommandTemplate.new  [SPECULATIVE conf=0.2]\n  src/cli.rs:716  Opts.no_search_paths  [SPECULATIVE conf=0.2]\n  src/fmt/mod.rs:78  FormatTemplate.parse  [SPECULATIVE conf=0.2]\n  src/walk.rs:236  ReceiverBuffer.poll  [SPECULATIVE conf=0.2]\n  src/main.rs:84  run  [SPECULATIVE conf=0.2]\n  src/cli.rs:679  Opts.search_paths  [SPECULATIVE conf=0.2]\n  src/filetypes.rs:31  FileTypes.should_ignore  [SPECULATIVE conf=0.2]\n  src/walk.rs:581  WorkerState.spawn_senders  [SPECULATIVE conf=0.2]\n  src/exec/command.rs:35  OutputBuffer.write  [SPECULATIVE conf=0.2]\ncallers_by_depth 2 (6):\n  src/fmt/mod.rs:240  all_placeholders  [CERTIFIED]\n  src/exec/command.rs:87  execute_commands  [CERTIFIED]\n  src/main.rs:62  main  [CERTIFIED]\n  src/exec/mod.rs:62  CommandSet.new_batch  [CERTIFIED]\n  src/fmt/mod.rs:220  parse_no_placeholders  [CERTIFIED]\n  src/fmt/mod.rs:229  parse_only_brace_escapes  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 1\nresolved_symbols (1):\n  src/filesystem.rs:44  is_empty  (Function)\nreturned_count: 25\nsymbol: is_empty\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.2:6/13"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "is_empty"
+     ],
+     "exit_code": 0,
+     "ms": 119.2,
+     "bytes": 1387,
+     "internal_error": false,
+     "head": "[GT] impact is_empty",
+     "text": "[GT] impact is_empty\ncaller_count: 29\ncallers_by_depth 1 (6):\n  src/main.rs:170  build_pattern_regex  [SPECULATIVE conf=0.2]\n  src/main.rs:230  construct_config  [SPECULATIVE conf=0.2]\n  src/filesystem.rs:131  default_path_separator  [SPECULATIVE conf=0.2]\n  src/exec/mod.rs:244  CommandTemplate.new  [SPECULATIVE conf=0.2]\n  src/cli.rs:716  Opts.no_search_paths  [SPECULATIVE conf=0.2]\n  src/fmt/mod.rs:78  FormatTemplate.parse  [SPECULATIVE conf=0.2]\ncallers_by_depth 2 (6):\n  src/fmt/mod.rs:240  all_placeholders  [CERTIFIED]\n  src/exec/command.rs:87  execute_commands  [CERTIFIED]\n  src/main.rs:62  main  [CERTIFIED]\n  src/exec/mod.rs:62  CommandSet.new_batch  [CERTIFIED]\n  src/fmt/mod.rs:220  parse_no_placeholders  [CERTIFIED]\n  src/fmt/mod.rs:229  parse_only_brace_escapes  [CERTIFIED]\ncallers_by_depth 3 (4):\n  src/exec/mod.rs:90  CommandSet.execute  [CERTIFIED]\n  src/main.rs:344  extract_command  [CERTIFIED]\n  src/walk.rs:438  WorkerState.receive  [CANDIDATE conf=0.6]\n  src/walk.rs:685  scan  [CANDIDATE conf=0.6]\nmax_depth: 3\nresolved_nodes: 1\nresolved_symbols (1):\n  src/filesystem.rs:44  is_empty  (Function)\nreturned_count: 29\nsymbol: is_empty\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:6/12\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "is_empty"
+     ],
+     "exit_code": 0,
+     "ms": 123.0,
+     "bytes": 1069,
+     "internal_error": false,
+     "head": "[GT] references is_empty",
+     "text": "[GT] references is_empty\nreference_count: 12\nreferences_by_type CALLS (12):\n  src/cli.rs:677  Opts.search_paths  [SPECULATIVE conf=0.2]\n  src/cli.rs:715  Opts.no_search_paths  [SPECULATIVE conf=0.2]\n  src/exec/command.rs:30  OutputBuffer.write  [SPECULATIVE conf=0.2]\n  src/exec/mod.rs:223  CommandTemplate.new  [SPECULATIVE conf=0.2]\n  src/filesystem.rs:128  default_path_separator  [SPECULATIVE conf=0.2]\n  src/filetypes.rs:21  FileTypes.should_ignore  [SPECULATIVE conf=0.2]\n  src/fmt/mod.rs:58  FormatTemplate.parse  [SPECULATIVE conf=0.2]\n  src/main.rs:74  run  [SPECULATIVE conf=0.2]\n  src/main.rs:169  build_pattern_regex  [SPECULATIVE conf=0.2]\n  src/main.rs:195  construct_config  [SPECULATIVE conf=0.2]\n  src/walk.rs:198  ReceiverBuffer.poll  [SPECULATIVE conf=0.2]\n  src/walk.rs:443  WorkerState.spawn_senders  [SPECULATIVE conf=0.2]\nresolved_nodes: 1\nresolved_symbols (1):\n  src/filesystem.rs:44  is_empty  (Function)\nreturned_count: 12\nsymbol: is_empty\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "is_empty"
+     ],
+     "exit_code": 0,
+     "ms": 108.1,
+     "bytes": 227,
+     "internal_error": false,
+     "head": "[GT] definition is_empty",
+     "text": "[GT] definition is_empty\ndefinition_count: 1\ndefinitions (1):\n  src/filesystem.rs:44  is_empty  (Function)\nsymbol: is_empty\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "is_empty"
+     ],
+     "exit_code": 0,
+     "ms": 392.4,
+     "bytes": 1203,
+     "internal_error": false,
+     "head": "[GT] calls in is_empty",
+     "text": "[GT] calls in is_empty\ncalls (11):\n  src/filesystem.rs:45  file_type -> one of: DirEntry.file_type (src/dir_entry.rs:74); DirEntry.file_type (src/dir_entry.rs:148) [ambiguous, virtual]\n  src/filesystem.rs:46  is_dir -> unresolved (external or unknown) [empty, virtual]\n  src/filesystem.rs:47  read_dir -> unresolved (external or unknown) [empty, virtual]\n  src/filesystem.rs:47  path -> one of: DirEntry.path (src/dir_entry.rs:42); DirEntry.path (src/dir_entry.rs:128) [ambiguous, virtual]\n  src/filesystem.rs:48  is_none -> unresolved (external or unknown) [empty, virtual]\n  src/filesystem.rs:48  next -> unresolved (external or unknown) [empty, virtual]\n  src/filesystem.rs:52  is_file -> unresolved (external or unknown) [empty, virtual]\n  src/filesystem.rs:53  unwrap_or -> unresolved (external or unknown) [empty, virtual]\n  src/filesystem.rs:53  map -> unresolved (external or unknown) [empty, virtual]\n  src/filesystem.rs:53  metadata -> one of: DirEntry.metadata (src/dir_entry.rs:81); DirEntry.metadata (src/dir_entry.rs:152) [ambiguous, virtual]\n  src/filesystem.rs:53  len -> unresolved (external or unknown) [empty, virtual]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "from"
+     ],
+     "exit_code": 0,
+     "ms": 467.4,
+     "bytes": 1157,
+     "internal_error": false,
+     "head": "[GT] context from",
+     "text": "[GT] context from\ncaller_count: 11\ncallers (10):\n  src/exit_codes.rs:27  ExitCode.is_error  [CERTIFIED]\n  src/main.rs:177  build_pattern_regex  [CANDIDATE conf=0.6]\n  src/main.rs:318  construct_config  [CANDIDATE conf=0.6]\n  src/regex_helper.rs:21  hir_has_uppercase_char  [CANDIDATE conf=0.6]\n  src/fmt/input.rs:26  dirname  [SPECULATIVE conf=0.2]\n  tests/testenv/mod.rs:78  find_fd_exe  [SPECULATIVE conf=0.2]\n  src/fmt/mod.rs:139  FormatTemplate.generate  [SPECULATIVE conf=0.2]\n  src/cli.rs:709  Opts.normalize_path  [SPECULATIVE conf=0.2]\n  src/output.rs:106  print_entry_colorized  [SPECULATIVE conf=0.2]\n  src/fmt/input.rs:16  remove_extension  [SPECULATIVE conf=0.2]\ncandidates (1):\n  src/exit_codes.rs:15  i32.from  (Method)\ndefinition: src/exit_codes.rs:15  i32.from  (Method)\nflows (5):\n  main -> from (lower bound)\n  tokens_with_literal_braces -> from (lower bound)\n  main -> from (lower bound)\n  main -> from (lower bound)\n  main -> from (lower bound)\nprimary_selection: unique\nsymbol: from\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, flows_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "from"
+     ],
+     "exit_code": 0,
+     "ms": 140.3,
+     "bytes": 1400,
+     "internal_error": false,
+     "head": "[GT] callers from",
+     "text": "[GT] callers from\ncaller_count: 23\ncallers_by_depth 1 (11):\n  src/exit_codes.rs:27  ExitCode.is_error  [CERTIFIED]\n  src/main.rs:177  build_pattern_regex  [CANDIDATE conf=0.6]\n  src/main.rs:318  construct_config  [CANDIDATE conf=0.6]\n  src/regex_helper.rs:21  hir_has_uppercase_char  [CANDIDATE conf=0.6]\n  src/fmt/input.rs:26  dirname  [SPECULATIVE conf=0.2]\n  tests/testenv/mod.rs:78  find_fd_exe  [SPECULATIVE conf=0.2]\n  src/fmt/mod.rs:139  FormatTemplate.generate  [SPECULATIVE conf=0.2]\n  src/cli.rs:709  Opts.normalize_path  [SPECULATIVE conf=0.2]\n  src/output.rs:106  print_entry_colorized  [SPECULATIVE conf=0.2]\n  src/fmt/input.rs:16  remove_extension  [SPECULATIVE conf=0.2]\n  tests/testenv/mod.rs:213  TestEnv.system_root  [SPECULATIVE conf=0.2]\ncallers_by_depth 2 (6):\n  tests/testenv/mod.rs:150  TestEnv.new  [CERTIFIED]\n  src/regex_helper.rs:10  pattern_has_uppercase_char  [CERTIFIED]\n  src/output.rs:28  print_entry  [CERTIFIED]\n  src/output.rs:74  print_entry_format  [CERTIFIED]\n  src/exec/mod.rs:181  CommandBuilder.push  [CERTIFIED]\n  src/main.rs:98  run  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 1\nresolved_symbols (1):\n  src/exit_codes.rs:15  i32.from  (Method)\nreturned_count: 23\nsymbol: from\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.2:6/12"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "from"
+     ],
+     "exit_code": 0,
+     "ms": 133.5,
+     "bytes": 1304,
+     "internal_error": false,
+     "head": "[GT] impact from",
+     "text": "[GT] impact from\ncaller_count: 125\ncallers_by_depth 1 (5):\n  src/exit_codes.rs:27  ExitCode.is_error  [CERTIFIED]\n  src/main.rs:177  build_pattern_regex  [CANDIDATE conf=0.6]\n  src/main.rs:318  construct_config  [CANDIDATE conf=0.6]\n  src/regex_helper.rs:21  hir_has_uppercase_char  [CANDIDATE conf=0.6]\n  src/fmt/input.rs:26  dirname  [SPECULATIVE conf=0.2]\ncallers_by_depth 2 (6):\n  tests/testenv/mod.rs:150  TestEnv.new  [CERTIFIED]\n  src/regex_helper.rs:10  pattern_has_uppercase_char  [CERTIFIED]\n  src/output.rs:28  print_entry  [CERTIFIED]\n  src/output.rs:74  print_entry_format  [CERTIFIED]\n  src/exec/mod.rs:181  CommandBuilder.push  [CERTIFIED]\n  src/main.rs:98  run  [CERTIFIED]\ncallers_by_depth 3 (5):\n  tests/tests.rs:1627  format  [CERTIFIED]\n  tests/tests.rs:50  get_test_env_with_abs_path  [CERTIFIED]\n  src/main.rs:62  main  [CERTIFIED]\n  tests/tests.rs:138  test_and_bad_pattern  [CERTIFIED]\n  tests/tests.rs:105  test_and_basic  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 1\nresolved_symbols (1):\n  src/exit_codes.rs:15  i32.from  (Method)\nreturned_count: 43\nsymbol: from\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/11\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "from"
+     ],
+     "exit_code": 0,
+     "ms": 139.6,
+     "bytes": 1061,
+     "internal_error": false,
+     "head": "[GT] references from",
+     "text": "[GT] references from\nreference_count: 12\nreferences_by_type CALLS (11):\n  src/exit_codes.rs:26  ExitCode.is_error  [CERTIFIED]\n  src/main.rs:169  build_pattern_regex  [CANDIDATE conf=0.6]\n  src/main.rs:195  construct_config  [CANDIDATE conf=0.6]\n  src/regex_helper.rs:15  hir_has_uppercase_char  [CANDIDATE conf=0.6]\n  src/cli.rs:704  Opts.normalize_path  [SPECULATIVE conf=0.2]\n  src/fmt/input.rs:12  remove_extension  [SPECULATIVE conf=0.2]\n  src/fmt/input.rs:22  dirname  [SPECULATIVE conf=0.2]\n  src/fmt/mod.rs:112  FormatTemplate.generate  [SPECULATIVE conf=0.2]\n  src/output.rs:83  print_entry_colorized  [SPECULATIVE conf=0.2]\n  tests/testenv/mod.rs:76  find_fd_exe  [SPECULATIVE conf=0.2]\n  tests/testenv/mod.rs:211  TestEnv.system_root  [SPECULATIVE conf=0.2]\nreferences_by_type CONTAINS (1):\n  src/exit_codes.rs:14  i32  [CERTIFIED]\nresolved_nodes: 1\nresolved_symbols (1):\n  src/exit_codes.rs:15  i32.from  (Method)\nreturned_count: 12\nsymbol: from\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "from"
+     ],
+     "exit_code": 0,
+     "ms": 109.3,
+     "bytes": 217,
+     "internal_error": false,
+     "head": "[GT] definition from",
+     "text": "[GT] definition from\ndefinition_count: 1\ndefinitions (1):\n  src/exit_codes.rs:15  i32.from  (Method)\nsymbol: from\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "from"
+     ],
+     "exit_code": 1,
+     "ms": 488.6,
+     "bytes": 53,
+     "internal_error": false,
+     "head": "[GT] calls in from: no answer (no_callsites_recorded)",
+     "text": "[GT] calls in from: no answer (no_callsites_recorded)"
+    },
+    {
+     "tool": "gt-tests",
+     "args": [
+      "src/dir_entry.rs"
+     ],
+     "exit_code": 1,
+     "ms": 191.9,
+     "bytes": 62,
+     "internal_error": false,
+     "head": "[GT] tests for src/dir_entry.rs: no answer (no_covering_tests)",
+     "text": "[GT] tests for src/dir_entry.rs: no answer (no_covering_tests)"
+    },
+    {
+     "tool": "gt-module",
+     "args": [
+      "src/dir_entry.rs"
+     ],
+     "exit_code": 0,
+     "ms": 4.2,
+     "bytes": 149,
+     "internal_error": false,
+     "head": "[GT] module cluster src/dir_entry.rs",
+     "text": "[GT] module cluster src/dir_entry.rs\ncommunities (1):\n  src/\nfile: src/dir_entry.rs\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-check",
+     "args": [
+      "src/dir_entry.rs"
+     ],
+     "exit_code": 1,
+     "ms": 39.9,
+     "bytes": 65,
+     "internal_error": false,
+     "head": "[GT] syntax src/dir_entry.rs: no answer (syntax_language_removed)",
+     "text": "[GT] syntax src/dir_entry.rs: no answer (syntax_language_removed)"
+    },
+    {
+     "tool": "gt-cochange",
+     "args": [
+      "src/dir_entry.rs"
+     ],
+     "exit_code": 1,
+     "ms": 4.5,
+     "bytes": 64,
+     "internal_error": false,
+     "head": "[GT] co-change src/dir_entry.rs: no answer (no_cochange_history)",
+     "text": "[GT] co-change src/dir_entry.rs: no answer (no_cochange_history)"
+    },
+    {
+     "tool": "gt-changes",
+     "args": [
+      "src/dir_entry.rs"
+     ],
+     "exit_code": 0,
+     "ms": 489.9,
+     "bytes": 283,
+     "internal_error": false,
+     "head": "[GT] impact of edits src/dir_entry.rs",
+     "text": "[GT] impact of edits src/dir_entry.rs\nfiles (1):\n  src/dir_entry.rs\nnote: partial: name-level graph facts, verify by reading the code; omitted: changed_symbols_unmapped:src/dir_entry.rs, patch_analyzer_disabled, semantic_impact_not_complete\nnext: gt-tests <file> for the listed files"
+    },
+    {
+     "tool": "gt-slice",
+     "args": [
+      "path",
+      "129"
+     ],
+     "exit_code": 1,
+     "ms": 119.4,
+     "bytes": 58,
+     "internal_error": false,
+     "head": "[GT] slice path 129: no answer (unsupported_language:rust)",
+     "text": "[GT] slice path 129: no answer (unsupported_language:rust)"
+    },
+    {
+     "tool": "gt-shape",
+     "args": [
+      "path"
+     ],
+     "exit_code": 1,
+     "ms": 118.8,
+     "bytes": 52,
+     "internal_error": false,
+     "head": "[GT] shape path: no answer (no_verifiable_contracts)",
+     "text": "[GT] shape path: no answer (no_verifiable_contracts)"
+    },
+    {
+     "tool": "gt-api",
+     "args": [
+      "path"
+     ],
+     "exit_code": 1,
+     "ms": 118.7,
+     "bytes": 49,
+     "internal_error": false,
+     "head": "[GT] api impact path: no answer (route_not_found)",
+     "text": "[GT] api impact path: no answer (route_not_found)"
+    },
+    {
+     "tool": "gt-rename",
+     "args": [
+      "path",
+      "path_renamed"
+     ],
+     "exit_code": 0,
+     "ms": 119.3,
+     "bytes": 1283,
+     "internal_error": false,
+     "head": "[GT] rename path path_renamed",
+     "text": "[GT] rename path path_renamed\ndefinitions (2):\n  src/dir_entry.rs:42  path  (Method)\n  src/dir_entry.rs:128  path  (Method)\nedit_site_count: 18\nedit_sites_by_type CALLS (15):\n  src/dir_entry.rs:44  [CANDIDATE conf=0.6]\n  src/dir_entry.rs:59  [CERTIFIED]\n  src/dir_entry.rs:107  [CERTIFIED]\n  src/dir_entry.rs:123  [CERTIFIED]\n  src/dir_entry.rs:129  [SPECULATIVE conf=0.2]\n  src/filesystem.rs:47  [CANDIDATE conf=0.6]\n  src/filetypes.rs:30  [CANDIDATE conf=0.6]\n  src/output.rs:19  [CERTIFIED]\n  src/walk.rs:471  [CANDIDATE conf=0.6]\n  tests/testenv/mod.rs:36  [CANDIDATE conf=0.6]\n  tests/testenv/mod.rs:67  [CANDIDATE conf=0.6]\n  tests/testenv/mod.rs:189  [CANDIDATE conf=0.6]\n  tests/testenv/mod.rs:201  [CANDIDATE conf=0.6]\n  tests/testenv/mod.rs:212  [CANDIDATE conf=0.6]\n  tests/testenv/mod.rs:303  [CANDIDATE conf=0.6]\nedit_sites_by_type CONTAINS (2):\n  src/dir_entry.rs:0  [CERTIFIED]\n  src/dir_entry.rs:0  [CERTIFIED]\nedit_sites_by_type DATA_FLOW (1):\n  tests/testenv/mod.rs:303  [CANDIDATE conf=0.6]\nfiles_to_touch (6):\n  src/dir_entry.rs\n  src/filesystem.rs\n  src/filetypes.rs\n  src/output.rs\n  src/walk.rs\n  tests/testenv/mod.rs\nnew_name: path_renamed\nsymbol: path\nnote: partial: name-level graph facts, verify by reading the code; omitted: text_references_not_enumerated"
+    },
+    {
+     "tool": "gt-taint",
+     "args": [
+      "is_empty",
+      "path"
+     ],
+     "exit_code": 0,
+     "ms": 306.8,
+     "bytes": 412,
+     "internal_error": false,
+     "head": "[GT] taint is_empty path",
+     "text": "[GT] taint is_empty path\ndataflow_omissions (2):\n  dataflow_python_only:src/filesystem.rs\n  dataflow_source_unresolved:is_empty\npaths_found: 1\nreachable_symbol_count: 3\nsink: path\nsource: is_empty\nuncertain_paths (1):\n  ['is_empty', 'path']\nnote: partial: name-level graph facts, verify by reading the code; omitted: name_match_edges_excluded, statement_level_dataflow_unavailable, symbol_level_reachability_only"
+    }
+   ],
+   "augment": [
+    {
+     "symbol": "path",
+     "hit": true,
+     "bytes": 345,
+     "ms": 600.5,
+     "text": "[GT] graph context for your search:\n  DirEntry.path (Method) src/dir_entry.rs:42\n    ambiguous: 1 other definition(s) share this name\n    called by: DirEntry.path (src/dir_entry.rs:129) [SPECULATIVE]\n    calls: DirEntry.path (src/dir_entry.rs:44) [CANDIDATE]\n    in flow: main -> path (lower bound)\n    in flow: partial_cmp -> path (lower bound)"
+    },
+    {
+     "symbol": "is_empty",
+     "hit": true,
+     "bytes": 627,
+     "ms": 419.9,
+     "text": "[GT] graph context for your search:\n  is_empty (Function) src/filesystem.rs:44\n    called by: build_pattern_regex (src/main.rs:170) [SPECULATIVE], construct_config (src/main.rs:230) [SPECULATIVE], default_path_separator (src/filesystem.rs:131) [SPECULATIVE], CommandTemplate.new (src/exec/mod.rs:244) [SPECULATIVE], Opts.no_search_paths (src/cli.rs:716) [SPECULATIVE] (+7 more)\n    calls: DirEntry.file_type (src/dir_entry.rs:45) [CANDIDATE], DirEntry.metadata (src/dir_entry.rs:53) [CANDIDATE], DirEntry.path (src/dir_entry.rs:47) [CANDIDATE]\n    in flow: main -> metadata (lower bound)\n    in flow: main -> path (lower bound)"
+    },
+    {
+     "symbol": "from",
+     "hit": false,
+     "bytes": 0,
+     "ms": 0.1,
+     "text": ""
+    },
+    {
+     "symbol": "push",
+     "hit": true,
+     "bytes": 611,
+     "ms": 392.7,
+     "text": "[GT] graph context for your search:\n  OutputBuffer.push (Method) src/exec/command.rs:26\n    ambiguous: 1 other definition(s) share this name\n    called by: execute_commands (src/exec/command.rs:84), all_placeholders (src/fmt/mod.rs:266) [CANDIDATE], determine_ls_command (src/main.rs:402) [CANDIDATE], extract_time_constraints (src/main.rs:438) [CANDIDATE], FormatTemplate.generate (src/fmt/mod.rs:121) [CANDIDATE] (+6 more)\n    calls: CommandBuilder.push (src/exec/mod.rs:27) [CANDIDATE]\n    in flow: main -> file_name (lower bound)\n    in flow: tokens_with_literal_braces_and_placeholder -> push (lower bound)"
+    },
+    {
+     "symbol": "into_iter",
+     "hit": true,
+     "bytes": 475,
+     "ms": 531.2,
+     "text": "[GT] graph context for your search:\n  Batch.into_iter (Method) src/walk.rs:69\n    called by: batch (src/exec/job.rs:51) [CANDIDATE], format_output_error (tests/testenv/mod.rs:94) [CANDIDATE], merge_exitcodes (src/exit_codes.rs:47) [CANDIDATE], CommandSet.new (src/exec/mod.rs:44) [CANDIDATE], CommandSet.new_batch (src/exec/mod.rs:59) [CANDIDATE] (+2 more)\n    calls: Batch.lock (src/walk.rs:70)\n    in flow: scan -> lock (lower bound)\n    in flow: main -> lock (lower bound)"
+    }
+   ]
+  },
+  {
+   "task": "csstree-shorthand-expansion-compression",
+   "repository": "https://github.com/csstree/csstree",
+   "commit": "88e3d965c0b1628642a30a841745b410d6835052",
+   "language": "javascript",
+   "index_seconds": 16.9,
+   "node_counts": {
+    "Callsite": 3889,
+    "Class": 27,
+    "CompletenessFact": 30877,
+    "File": 204,
+    "Function": 787,
+    "Method": 114,
+    "QueryPolicyVersion": 2,
+    "UnresolvedFact": 3258
+   },
+   "edge_counts": {
+    "ACCESSES": 78,
+    "CALLS": 1428,
+    "CANDIDATE_TARGET": 4874,
+    "CONTAINS": 114,
+    "CO_SERIALIZES": 4,
+    "DATA_FLOW": 13,
+    "HAS_CALLSITE": 3889,
+    "HAS_COMPLETENESS_FACT": 30877,
+    "HAS_UNRESOLVED_FACT": 3258,
+    "IMPORTS": 334,
+    "PRECEDES": 17,
+    "READS": 68,
+    "RE_EXPORTS": 139,
+    "SELECTED_TARGET": 631,
+    "WRITES": 26
+   },
+   "top_symbols": [
+    {
+     "name": "push",
+     "file": "lib/utils/List.js",
+     "line": 397,
+     "callers": 73
+    },
+    {
+     "name": "parse",
+     "file": "lib/definition-syntax/parse.js",
+     "line": 578,
+     "callers": 64
+    },
+    {
+     "name": "charCodeAt",
+     "file": "lib/definition-syntax/scanner.js",
+     "line": 18,
+     "callers": 58
+    },
+    {
+     "name": "error",
+     "file": "lib/definition-syntax/scanner.js",
+     "line": 59,
+     "callers": 42
+    },
+    {
+     "name": "walk",
+     "file": "lib/definition-syntax/walk.js",
+     "line": 7,
+     "callers": 38
+    }
+   ],
+   "tools_answered": 26,
+   "tools_run": 35,
+   "internal_errors": 0,
+   "tool_ms_p50": 287.2,
+   "tool_ms_max": 2299.0,
+   "augment_hits": 4,
+   "augment_runs": 5,
+   "tools": [
+    {
+     "tool": "gt-query",
+     "args": [
+      "Add shorthand expansion and compression to the lexer"
+     ],
+     "exit_code": 0,
+     "ms": 352.4,
+     "bytes": 1019,
+     "internal_error": false,
+     "head": "[GT] query Add shorthand expansion and compression to the lexer",
+     "text": "[GT] query Add shorthand expansion and compression to the lexer\nranked (10):\n  lib/__tests/list.js:789  it: add empty list to non-empty  (Function)\n  lib/__tests/list.js:777  it: add non-empty list to empty list  (Function)\n  lib/__tests/list.js:753  it: add non-empty list to non-empty list  (Function)\n  lib/__tests/list.js:603  it: insert the item before an item that doesn\\'t belong to list  (Function)\n  lib/__tests/list.js:553  it: insert the item before an item that doesn\\'t belong to list  (Function)\n  lib/__tests/lexer-match-property.js:42  it: vendor prefix and hack  (Function)\n  lib/__tests/list.js:579  it: insert in the middle  (Function)\n  lib/__tests/list.js:528  it: insert in the middle  (Function)\n  lib/__tests/definition-syntax-generate.js:145  it: all the node types  (Function)\n  lib/__tests/names.js:215  it: should return the same object  (Function)\nnote: partial: name-level graph facts, verify by reading the code; omitted: source_unavailable:dense\nnext: gt-context <symbol> for the top hit"
+    },
+    {
+     "tool": "gt-flows",
+     "args": [],
+     "exit_code": 0,
+     "ms": 2299.0,
+     "bytes": 1515,
+     "internal_error": false,
+     "head": "[GT] flows",
+     "text": "[GT] flows\nmatched: 75\nprocess_count: 75\nprocesses (10):\n  matchProperty (lib/lexer/Lexer.js:358) -> matchSyntax (lib/lexer/Lexer.js:75) -> matchAsTree (lib/lexer/match.js:585) -> reverseList (lib/lexer/match.js:17)\n  encode (lib/utils/ident.js:49) -> isName (lib/tokenizer/char-code-definitions.js:60) -> isNameStart (lib/tokenizer/char-code-definitions.js:54) -> isNonAscii (lib/tokenizer/char-code-definitions.js:48)\n  checkAtrulePrelude (lib/lexer/Lexer.js:280) -> matchSyntax (lib/lexer/Lexer.js:75) -> valueHasVar (lib/lexer/Lexer.js:45)\n  checkStructure (lib/lexer/Lexer.js:154) -> walk (lib/definition-syntax/walk.js:7) -> ensureFunction (lib/definition-syntax/walk.js:3)\n  checkAtrulePrelude (lib/lexer/Lexer.js:280) -> matchSyntax (lib/lexer/Lexer.js:75) -> buildMatchResult (lib/lexer/Lexer.js:66)\n  pop (lib/utils/List.js:400) -> remove (lib/utils/List.js:366) -> updateCursors (lib/utils/List.js:68)\n  shift (lib/utils/List.js:406) -> remove (lib/utils/List.js:366) -> updateCursors (lib/utils/List.js:68)\n  validate (lib/lexer/Lexer.js:442) -> walk (lib/definition-syntax/walk.js:7) -> ensureFunction (lib/definition-syntax/walk.js:3)\n  match (lib/lexer/Lexer.js:381) -> matchSyntax (lib/lexer/Lexer.js:75) -> valueHasVar (lib/lexer/Lexer.js:45)\n  matchAsList (lib/lexer/match.js:552) -> internalMatch (lib/lexer/match.js:92) -> areStringsEqualCaseInsensitive (lib/lexer/match.js:32)\ntruncated: True\nnote: partial: name-level graph facts, verify by reading the code; omitted: process_library_truncated"
+    },
+    {
+     "tool": "gt-routes",
+     "args": [],
+     "exit_code": 1,
+     "ms": 249.7,
+     "bytes": 55,
+     "internal_error": false,
+     "head": "[GT] routes: no answer (no matching facts in the graph)",
+     "text": "[GT] routes: no answer (no matching facts in the graph)"
+    },
+    {
+     "tool": "gt-tools",
+     "args": [],
+     "exit_code": 1,
+     "ms": 256.6,
+     "bytes": 49,
+     "internal_error": false,
+     "head": "[GT] tool handlers: no answer (no_tools_detected)",
+     "text": "[GT] tool handlers: no answer (no_tools_detected)"
+    },
+    {
+     "tool": "gt-verify",
+     "args": [],
+     "exit_code": 1,
+     "ms": 10.4,
+     "bytes": 56,
+     "internal_error": false,
+     "head": "[GT] last test result: no answer (no_execution_recorded)",
+     "text": "[GT] last test result: no answer (no_execution_recorded)"
+    },
+    {
+     "tool": "gt-failures",
+     "args": [],
+     "exit_code": 1,
+     "ms": 2.1,
+     "bytes": 57,
+     "internal_error": false,
+     "head": "[GT] recurring failures: no answer (no_failures_recorded)",
+     "text": "[GT] recurring failures: no answer (no_failures_recorded)"
+    },
+    {
+     "tool": "gt-help",
+     "args": [],
+     "exit_code": 0,
+     "ms": 2.2,
+     "bytes": 1593,
+     "internal_error": false,
+     "head": "[GT] commands",
+     "text": "[GT] commands\ntools (23):\n  gt-query \"<concept or error text>\"  - rank files and symbols relevant to a concept\n  gt-context <symbol> [file]  - definition, callers, callees and flows of one symbol\n  gt-callers <symbol> [depth]  - who calls this symbol, by call depth\n  gt-impact <symbol> [file]  - what may break if this symbol changes (callers to depth 3)\n  gt-refs <symbol> [file]  - graph references to a symbol\n  gt-def <symbol> [file]  - where a symbol is defined\n  gt-flows [\"<concept>\"]  - execution flows (entry point -> steps)\n  gt-tests <file> [file...]  - tests that cover the given source files\n  gt-routes [route|handler|file filter]  - HTTP routes, handlers, middleware and injections\n  gt-slice <function> <line> [backward|forward]  - statements that affect (or are affected by) a line\n  gt-taint <source-symbol> [sink-symbol]  - call paths from a source to a sink\n  gt-verify  - the last test/build result GT observed, vs the task baseline\n  gt-changes [file...]  - callers and tests affected by your edits so far (or by the given files)\n  gt-check <file>  - parse a file you edited and report syntax errors\n  gt-help  - list every GT command\n  gt-api <route|handler>  - clients and callers of an HTTP route or handler\n  gt-shape <interface|class> [file]  - does each implementation still match the interface\n  gt-calls <function> [file]  - how each call inside a function resolved (target, ambiguous, external)\n  gt-module <file>  - the cluster of files this file belongs with\n  gt-cochange <file>  - files that historically change together with this one\n  ... 3 more not shown"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "push"
+     ],
+     "exit_code": 0,
+     "ms": 865.1,
+     "bytes": 1220,
+     "internal_error": false,
+     "head": "[GT] context push",
+     "text": "[GT] context push\ncallee_count: 2\ncallees (2):\n  lib/utils/List.js:398  List.createItem  [CERTIFIED]\n  lib/utils/List.js:398  List.insert  [CERTIFIED]\ncaller_count: 73\ncallers (10):\n  lib/__tests/exports.js:127  it: walker  [CERTIFIED]\n  lib/lexer/generic.js:465  anyValue  [CANDIDATE conf=0.6]\n  lib/lexer/Lexer.js:156  Lexer.checkStructure  [CANDIDATE conf=0.6]\n  lib/lexer/generic.js:217  consumeFunction  [CANDIDATE conf=0.6]\n  lib/__tests/clone.js:17  createCloneTest  [CANDIDATE conf=0.6]\n  lib/__tests/list.js:27  createIteratorStateCollector  [CANDIDATE conf=0.6]\n  lib/__tests/list.js:128  createIteratorWithModificationTests  [CANDIDATE conf=0.6]\n  lib/parser/create.js:380  createParser  [CANDIDATE conf=0.6]\n  lib/__tests/walk.js:83  createWalkDeclarationsTest  [CANDIDATE conf=0.6]\n  lib/__tests/walk.js:51  createWalkTest  [CANDIDATE conf=0.6]\ncandidates (1):\n  lib/utils/List.js:397  List.push  (Method)\ndefinition: lib/utils/List.js:397  List.push  (Method)\nflows (2):\n  push -> createItem\n  parse -> updateCursors (lower bound)\nprimary_selection: unique\nsymbol: push\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "push"
+     ],
+     "exit_code": 0,
+     "ms": 279.4,
+     "bytes": 1252,
+     "internal_error": false,
+     "head": "[GT] callers push",
+     "text": "[GT] callers push\ncaller_count: 117\ncallers_by_depth 1 (5):\n  lib/__tests/exports.js:127  it: walker  [CERTIFIED]\n  lib/lexer/generic.js:465  anyValue  [CANDIDATE conf=0.6]\n  lib/lexer/Lexer.js:156  Lexer.checkStructure  [CANDIDATE conf=0.6]\n  lib/lexer/generic.js:217  consumeFunction  [CANDIDATE conf=0.6]\n  lib/__tests/clone.js:17  createCloneTest  [CANDIDATE conf=0.6]\ncallers_by_depth 2 (10):\n  lib/__tests/list.js:67  createIteratorTests  [CERTIFIED]\n  lib/syntax/create.js:10  createSyntax  [CERTIFIED]\n  lib/__tests/definition-syntax-match.js:99  createSyntaxTest  [CERTIFIED]\n  lib/__tests/walk.js:591  file  [CERTIFIED]\n  lib/__tests/walk.js:604  file  [CERTIFIED]\n  lib/__tests/walk.js:617  file  [CERTIFIED]\n  lib/__tests/walk.js:631  file  [CERTIFIED]\n  lib/__tests/walk.js:644  file  [CERTIFIED]\n  lib/lexer/Lexer.js:397  Lexer.findDeclarationValueFragments  [CERTIFIED]\n  lib/lexer/Lexer.js:394  Lexer.findValueFragments  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 1\nresolved_symbols (1):\n  lib/utils/List.js:397  List.push  (Method)\nreturned_count: 40\nsymbol: push\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "push"
+     ],
+     "exit_code": 0,
+     "ms": 297.6,
+     "bytes": 1334,
+     "internal_error": false,
+     "head": "[GT] impact push",
+     "text": "[GT] impact push\ncaller_count: 184\ncallers_by_depth 1 (5):\n  lib/__tests/exports.js:127  it: walker  [CERTIFIED]\n  lib/lexer/generic.js:465  anyValue  [CANDIDATE conf=0.6]\n  lib/lexer/Lexer.js:156  Lexer.checkStructure  [CANDIDATE conf=0.6]\n  lib/lexer/generic.js:217  consumeFunction  [CANDIDATE conf=0.6]\n  lib/__tests/clone.js:17  createCloneTest  [CANDIDATE conf=0.6]\ncallers_by_depth 2 (5):\n  lib/__tests/list.js:67  createIteratorTests  [CERTIFIED]\n  lib/syntax/create.js:10  createSyntax  [CERTIFIED]\n  lib/__tests/definition-syntax-match.js:99  createSyntaxTest  [CERTIFIED]\n  lib/__tests/walk.js:591  file  [CERTIFIED]\n  lib/__tests/walk.js:604  file  [CERTIFIED]\ncallers_by_depth 3 (5):\n  lib/__tests/lexer-match-result.js:10  ast  [CERTIFIED]\n  lib/lexer/match-graph.js:518  buildMatchGraph  [CERTIFIED]\n  lib/lexer/Lexer.js:294  Lexer.checkAtrulePrelude  [CERTIFIED]\n  lib/syntax/create.js:55  config  [CERTIFIED]\n  lib/lexer/generic.js:689  createDemensionTypes  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 1\nresolved_symbols (1):\n  lib/utils/List.js:397  List.push  (Method)\nreturned_count: 60\nsymbol: push\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "push"
+     ],
+     "exit_code": 0,
+     "ms": 287.2,
+     "bytes": 1248,
+     "internal_error": false,
+     "head": "[GT] references push",
+     "text": "[GT] references push\nreference_count: 74\nreferences_by_type CALLS (10):\n  lib/__tests/exports.js:123  it: walker  [CERTIFIED]\n  lib/__tests/clone.js:9  createCloneTest  [CANDIDATE conf=0.6]\n  lib/__tests/definition-syntax-walk.js:7  it: pass a single walk function  [CANDIDATE conf=0.6]\n  lib/__tests/definition-syntax-walk.js:38  it: pass a pair of walk functions  [CANDIDATE conf=0.6]\n  lib/__tests/fixture/generate-auto-emit-ws.js:42  leftValue  [CANDIDATE conf=0.6]\n  lib/__tests/list.js:21  createIteratorStateCollector  [CANDIDATE conf=0.6]\n  lib/__tests/list.js:102  createIteratorWithModificationTests  [CANDIDATE conf=0.6]\n  lib/__tests/list.js:481  it: #push()  [CANDIDATE conf=0.6]\n  lib/__tests/parse.js:166  it: should call onParseError when handler is passed  [CANDIDATE conf=0.6]\n  lib/__tests/parse.js:341  it: with no locations  [CANDIDATE conf=0.6]\nreferences_by_type CONTAINS (1):\n  lib/utils/List.js:19  List  [CERTIFIED]\nresolved_nodes: 1\nresolved_symbols (1):\n  lib/utils/List.js:397  List.push  (Method)\nreturned_count: 21\nsymbol: push\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, query_result_byte_limit, query_result_truncated:answer.references_by_type.CALLS:10/20"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "push"
+     ],
+     "exit_code": 0,
+     "ms": 279.3,
+     "bytes": 219,
+     "internal_error": false,
+     "head": "[GT] definition push",
+     "text": "[GT] definition push\ndefinition_count: 1\ndefinitions (1):\n  lib/utils/List.js:397  List.push  (Method)\nsymbol: push\nnote: partial: name-level graph facts, verify by reading the code; omitted: certified_semantics:partial"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "push"
+     ],
+     "exit_code": 0,
+     "ms": 961.4,
+     "bytes": 343,
+     "internal_error": false,
+     "head": "[GT] calls in push",
+     "text": "[GT] calls in push\ncalls (2):\n  lib/utils/List.js:398  insert -> one of: List.insert (lib/utils/List.js:314) [incomplete, virtual]\n  lib/utils/List.js:398  createItem -> one of: List.createItem (lib/utils/List.js:20); List.createItem (lib/utils/List.js:33) [ambiguous, virtual]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "parse"
+     ],
+     "exit_code": 0,
+     "ms": 978.1,
+     "bytes": 1179,
+     "internal_error": false,
+     "head": "[GT] context parse",
+     "text": "[GT] context parse\nadditional_definitions: 64\ncallee_count: 2\ncallees (2):\n  lib/definition-syntax/parse.js:580  readImplicitGroup  [CERTIFIED]\n  lib/definition-syntax/scanner.js:583  Scanner.error  [CANDIDATE conf=0.6]\ncaller_count: 64\ncallers (2):\n  lib/__tests/lexer-match-result.js:10  ast  [CERTIFIED]\n  lib/lexer/match-graph.js:518  buildMatchGraph  [CERTIFIED]\ncandidates (5):\n  lib/definition-syntax/parse.js:578  parse  (Function)\n  lib/syntax/node/AnPlusB.js:106  parse  (Function)\n  lib/syntax/node/Atrule.js:36  parse  (Function)\n  lib/syntax/node/AtrulePrelude.js:12  parse  (Function)\n  lib/syntax/node/AttributeSelector.js:86  parse  (Function)\ndefinition: lib/definition-syntax/parse.js:578  parse  (Function)\nflows (5):\n  constructor -> readMultiplierRange\n  constructor -> charCodeAt (lower bound)\n  constructor -> substringToPos (lower bound)\n  consumeValue -> findWsEnd (lower bound)\n  constructor -> error (lower bound)\nprimary_selection: ambiguous_preferred_order\nsymbol: parse\nnote: partial: name-level graph facts, verify by reading the code; omitted: ambiguous_symbol, callers_truncated, query_result_byte_limit\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "parse"
+     ],
+     "exit_code": 0,
+     "ms": 280.6,
+     "bytes": 1047,
+     "internal_error": false,
+     "head": "[GT] callers parse",
+     "text": "[GT] callers parse\ncaller_count: 123\ncallers_by_depth 1 (2):\n  lib/__tests/lexer-match-result.js:10  ast  [CERTIFIED]\n  lib/lexer/match-graph.js:518  buildMatchGraph  [CERTIFIED]\ncallers_by_depth 2 (5):\n  lib/lexer/Lexer.js:248  Lexer.addAtrule_  [CERTIFIED]\n  lib/lexer/Lexer.js:265  Lexer.addProperty_  [CERTIFIED]\n  lib/lexer/Lexer.js:272  Lexer.addType_  [CERTIFIED]\n  lib/lexer/Lexer.js:151  Lexer.constructor  [CERTIFIED]\n  lib/__tests/definition-syntax-match.js:62  createSyntaxMatchHanlder  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 65\nresolved_symbols (5):\n  lib/definition-syntax/parse.js:578  parse  (Function)\n  lib/syntax/node/AnPlusB.js:106  parse  (Function)\n  lib/syntax/node/Atrule.js:36  parse  (Function)\n  lib/syntax/node/AtrulePrelude.js:12  parse  (Function)\n  lib/syntax/node/AttributeSelector.js:86  parse  (Function)\nreturned_count: 40\nsymbol: parse\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:2/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "parse"
+     ],
+     "exit_code": 0,
+     "ms": 278.1,
+     "bytes": 1047,
+     "internal_error": false,
+     "head": "[GT] impact parse",
+     "text": "[GT] impact parse\ncaller_count: 134\ncallers_by_depth 1 (2):\n  lib/__tests/lexer-match-result.js:10  ast  [CERTIFIED]\n  lib/lexer/match-graph.js:518  buildMatchGraph  [CERTIFIED]\ncallers_by_depth 2 (2):\n  lib/lexer/Lexer.js:248  Lexer.addAtrule_  [CERTIFIED]\n  lib/lexer/Lexer.js:265  Lexer.addProperty_  [CERTIFIED]\ncallers_by_depth 3 (2):\n  lib/syntax/create.js:12  createSyntax  [CERTIFIED]\n  lib/__tests/definition-syntax-match.js:79  createSyntaxTest  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 65\nresolved_symbols (5):\n  lib/definition-syntax/parse.js:578  parse  (Function)\n  lib/syntax/node/AnPlusB.js:106  parse  (Function)\n  lib/syntax/node/Atrule.js:36  parse  (Function)\n  lib/syntax/node/AtrulePrelude.js:12  parse  (Function)\n  lib/syntax/node/AttributeSelector.js:86  parse  (Function)\nreturned_count: 51\nsymbol: parse\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:2/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "parse"
+     ],
+     "exit_code": 0,
+     "ms": 280.5,
+     "bytes": 857,
+     "internal_error": false,
+     "head": "[GT] references parse",
+     "text": "[GT] references parse\nreference_count: 84\nreferences_by_type CALLS (2):\n  lib/__tests/clone.js:29  parse  [CERTIFIED]\n  lib/__tests/common.js:16  it: should expose version  [CERTIFIED]\nreferences_by_type IMPORTS (2):\n  lib/lexer/match-graph.js:1  lib/lexer/match-graph.js  [CERTIFIED]\n  lib/__tests/clone.js:1  lib/__tests/clone.js  [CANDIDATE conf=0.6]\nresolved_nodes: 65\nresolved_symbols (5):\n  lib/definition-syntax/parse.js:578  parse  (Function)\n  lib/syntax/node/AnPlusB.js:106  parse  (Function)\n  lib/syntax/node/Atrule.js:36  parse  (Function)\n  lib/syntax/node/AtrulePrelude.js:12  parse  (Function)\n  lib/syntax/node/AttributeSelector.js:86  parse  (Function)\nreturned_count: 40\nsymbol: parse\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, resolved_nodes_truncated, query_result_byte_limit"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "parse"
+     ],
+     "exit_code": 0,
+     "ms": 307.9,
+     "bytes": 772,
+     "internal_error": false,
+     "head": "[GT] definition parse",
+     "text": "[GT] definition parse\ndefinition_count: 65\ndefinitions (10):\n  lib/definition-syntax/parse.js:578  parse  (Function)\n  lib/syntax/node/AnPlusB.js:106  parse  (Function)\n  lib/syntax/node/Atrule.js:36  parse  (Function)\n  lib/syntax/node/AtrulePrelude.js:12  parse  (Function)\n  lib/syntax/node/AttributeSelector.js:86  parse  (Function)\n  lib/syntax/node/Block.js:45  parse  (Function)\n  lib/syntax/node/Brackets.js:12  parse  (Function)\n  lib/syntax/node/CDC.js:6  parse  (Function)\n  lib/syntax/node/CDO.js:6  parse  (Function)\n  lib/syntax/node/ClassSelector.js:11  parse  (Function)\nsymbol: parse\nnote: partial: name-level graph facts, verify by reading the code; omitted: definitions_truncated, query_result_byte_limit, query_result_truncated:answer.definitions:10/20"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "parse"
+     ],
+     "exit_code": 0,
+     "ms": 909.6,
+     "bytes": 370,
+     "internal_error": false,
+     "head": "[GT] calls in parse",
+     "text": "[GT] calls in parse\ncalls (2):\n  lib/definition-syntax/parse.js:580  readImplicitGroup -> readImplicitGroup (lib/definition-syntax/parse.js:389) [CERTIFIED] [selected, static]\n  lib/definition-syntax/parse.js:583  error -> one of: Scanner.error (lib/definition-syntax/scanner.js:59) [incomplete, virtual]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-context",
+     "args": [
+      "charCodeAt"
+     ],
+     "exit_code": 0,
+     "ms": 939.8,
+     "bytes": 1509,
+     "internal_error": false,
+     "head": "[GT] context charCodeAt",
+     "text": "[GT] context charCodeAt\nadditional_definitions: 1\ncallee_count: 1\ncallees (1):\n  lib/lexer/generic.js:19  charCodeAt  [SPECULATIVE conf=0.2]\ncaller_count: 58\ncallers (10):\n  lib/definition-syntax/scanner.js:22  Scanner.charCode  [CERTIFIED]\n  lib/definition-syntax/scanner.js:28  Scanner.nextCharCode  [CERTIFIED]\n  lib/definition-syntax/scanner.js:31  Scanner.nextNonWsCode  [CERTIFIED]\n  lib/lexer/generic-an-plus-b.js:111  anPlusB  [CANDIDATE conf=0.6]\n  lib/lexer/match.js:38  areStringsEqualCaseInsensitive  [CANDIDATE conf=0.6]\n  lib/lexer/generic.js:131  charCodeAt  [CANDIDATE conf=0.6]\n  lib/lexer/generic-an-plus-b.js:35  checkInteger  [CANDIDATE conf=0.6]\n  lib/syntax/node/AnPlusB.js:18  checkInteger  [CANDIDATE conf=0.6]\n  lib/tokenizer/utils.js:23  cmpChar  [CANDIDATE conf=0.6]\n  lib/tokenizer/utils.js:43  cmpStr  [CANDIDATE conf=0.6]\ncandidates (2):\n  lib/definition-syntax/scanner.js:18  Scanner.charCodeAt  (Method)\n  lib/lexer/generic.js:130  charCodeAt  (Function)\ndefinition: lib/definition-syntax/scanner.js:18  Scanner.charCodeAt  (Method)\nflows (5):\n  constructor -> charCodeAt (lower bound)\n  constructor -> charCodeAt (lower bound)\n  decode -> charCodeAt (lower bound)\n  urange -> charCodeAt (lower bound)\n  createMap -> charCodeAt (lower bound)\nprimary_selection: ambiguous_preferred_order\nsymbol: charCodeAt\nnote: partial: name-level graph facts, verify by reading the code; omitted: ambiguous_symbol, callers_truncated, flows_truncated\nnext: gt-impact <symbol> before editing it"
+    },
+    {
+     "tool": "gt-callers",
+     "args": [
+      "charCodeAt"
+     ],
+     "exit_code": 0,
+     "ms": 263.2,
+     "bytes": 1340,
+     "internal_error": false,
+     "head": "[GT] callers charCodeAt",
+     "text": "[GT] callers charCodeAt\ncaller_count: 133\ncallers_by_depth 1 (5):\n  lib/definition-syntax/scanner.js:22  Scanner.charCode  [CERTIFIED]\n  lib/lexer/generic.js:302  dashedIdent  [CERTIFIED]\n  lib/lexer/generic.js:344  hexColor  [CERTIFIED]\n  lib/lexer/generic.js:357  idSelector  [CERTIFIED]\n  lib/lexer/generic.js:592  integer  [CERTIFIED]\ncallers_by_depth 2 (10):\n  lib/lexer/match-graph.js:142  buildGroupMatchGraph  [CERTIFIED]\n  lib/tokenizer/utils.js:96  consumeEscaped  [CERTIFIED]\n  lib/syntax/create.js:12  createSyntax  [CERTIFIED]\n  lib/lexer/generic.js:315  customPropertyName  [CERTIFIED]\n  lib/lexer/generic.js:490  dimension  [CERTIFIED]\n  lib/definition-syntax/scanner.js:50  Scanner.eat  [CERTIFIED]\n  lib/lexer/generic.js:135  eqStr  [CERTIFIED]\n  lib/syntax/node/String.js:18  generate  [CERTIFIED]\n  lib/utils/names.js:45  getKeywordDescriptor  [CERTIFIED]\n  lib/tokenizer/OffsetToLocation.js:58  OffsetToLocation.getLocation  [CERTIFIED]\nmax_depth: 2\nresolved_nodes: 2\nresolved_symbols (2):\n  lib/definition-syntax/scanner.js:18  Scanner.charCodeAt  (Method)\n  lib/lexer/generic.js:130  charCodeAt  (Function)\nreturned_count: 40\nsymbol: charCodeAt\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20"
+    },
+    {
+     "tool": "gt-impact",
+     "args": [
+      "charCodeAt"
+     ],
+     "exit_code": 0,
+     "ms": 280.5,
+     "bytes": 1402,
+     "internal_error": false,
+     "head": "[GT] impact charCodeAt",
+     "text": "[GT] impact charCodeAt\ncaller_count: 176\ncallers_by_depth 1 (5):\n  lib/definition-syntax/scanner.js:22  Scanner.charCode  [CERTIFIED]\n  lib/lexer/generic.js:302  dashedIdent  [CERTIFIED]\n  lib/lexer/generic.js:344  hexColor  [CERTIFIED]\n  lib/lexer/generic.js:357  idSelector  [CERTIFIED]\n  lib/lexer/generic.js:592  integer  [CERTIFIED]\ncallers_by_depth 2 (5):\n  lib/lexer/match-graph.js:142  buildGroupMatchGraph  [CERTIFIED]\n  lib/tokenizer/utils.js:96  consumeEscaped  [CERTIFIED]\n  lib/syntax/create.js:12  createSyntax  [CERTIFIED]\n  lib/lexer/generic.js:315  customPropertyName  [CERTIFIED]\n  lib/lexer/generic.js:490  dimension  [CERTIFIED]\ncallers_by_depth 3 (5):\n  lib/lexer/match-graph.js:390  buildMatchGraphInternal  [CERTIFIED]\n  lib/syntax/create.js:55  config  [CERTIFIED]\n  lib/tokenizer/TokenStream.js:43  TokenStream.constructor  [CERTIFIED]\n  lib/lexer/generic.js:689  createDemensionTypes  [CERTIFIED]\n  lib/lexer/generic.js:280  customIdent  [CERTIFIED]\nmax_depth: 3\nresolved_nodes: 2\nresolved_symbols (2):\n  lib/definition-syntax/scanner.js:18  Scanner.charCodeAt  (Method)\n  lib/lexer/generic.js:130  charCodeAt  (Function)\nreturned_count: 60\nsymbol: charCodeAt\nnote: partial: name-level graph facts, verify by reading the code; omitted: callers_truncated, query_result_byte_limit, query_result_truncated:answer.callers_by_depth.1:5/20\nnext: gt-tests <file> to find tests to run"
+    },
+    {
+     "tool": "gt-refs",
+     "args": [
+      "charCodeAt"
+     ],
+     "exit_code": 0,
+     "ms": 282.9,
+     "bytes": 1179,
+     "internal_error": false,
+     "head": "[GT] references charCodeAt",
+     "text": "[GT] references charCodeAt\nreference_count: 65\nreferences_by_type CALLS (10):\n  lib/definition-syntax/scanner.js:21  Scanner.charCode  [CERTIFIED]\n  lib/definition-syntax/scanner.js:27  Scanner.nextCharCode  [CERTIFIED]\n  lib/definition-syntax/scanner.js:30  Scanner.nextNonWsCode  [CERTIFIED]\n  lib/lexer/generic.js:149  isPostfixIeHack  [CERTIFIED]\n  lib/lexer/generic.js:296  dashedIdent  [CERTIFIED]\n  lib/lexer/generic.js:331  hexColor  [CERTIFIED]\n  lib/lexer/generic.js:352  idSelector  [CERTIFIED]\n  lib/lexer/generic.js:585  integer  [CERTIFIED]\n  lib/definition-syntax/parse.js:143  maybeMultiplied  [CANDIDATE conf=0.6]\n  lib/definition-syntax/parse.js:269  readType  [CANDIDATE conf=0.6]\nreferences_by_type CONTAINS (1):\n  lib/definition-syntax/scanner.js:12  Scanner  [CERTIFIED]\nresolved_nodes: 2\nresolved_symbols (2):\n  lib/definition-syntax/scanner.js:18  Scanner.charCodeAt  (Method)\n  lib/lexer/generic.js:130  charCodeAt  (Function)\nreturned_count: 21\nsymbol: charCodeAt\nnote: partial: name-level graph facts, verify by reading the code; omitted: references_truncated:CALLS, query_result_byte_limit, query_result_truncated:answer.references_by_type.CALLS:10/20"
+    },
+    {
+     "tool": "gt-def",
+     "args": [
+      "charCodeAt"
+     ],
+     "exit_code": 0,
+     "ms": 307.5,
+     "bytes": 267,
+     "internal_error": false,
+     "head": "[GT] definition charCodeAt",
+     "text": "[GT] definition charCodeAt\ndefinition_count: 2\ndefinitions (2):\n  lib/definition-syntax/scanner.js:18  Scanner.charCodeAt  (Method)\n  lib/lexer/generic.js:130  charCodeAt  (Function)\nsymbol: charCodeAt\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-calls",
+     "args": [
+      "charCodeAt"
+     ],
+     "exit_code": 0,
+     "ms": 950.2,
+     "bytes": 241,
+     "internal_error": false,
+     "head": "[GT] calls in charCodeAt",
+     "text": "[GT] calls in charCodeAt\ncalls (1):\n  lib/definition-syntax/scanner.js:19  charCodeAt -> one of: Scanner.charCodeAt (lib/definition-syntax/scanner.js:18) [incomplete, virtual]\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-tests",
+     "args": [
+      "lib/utils/List.js"
+     ],
+     "exit_code": 1,
+     "ms": 386.7,
+     "bytes": 63,
+     "internal_error": false,
+     "head": "[GT] tests for lib/utils/List.js: no answer (no_covering_tests)",
+     "text": "[GT] tests for lib/utils/List.js: no answer (no_covering_tests)"
+    },
+    {
+     "tool": "gt-module",
+     "args": [
+      "lib/utils/List.js"
+     ],
+     "exit_code": 0,
+     "ms": 4.4,
+     "bytes": 151,
+     "internal_error": false,
+     "head": "[GT] module cluster lib/utils/List.js",
+     "text": "[GT] module cluster lib/utils/List.js\ncommunities (1):\n  lib/\nfile: lib/utils/List.js\nnote: partial: name-level graph facts, verify by reading the code"
+    },
+    {
+     "tool": "gt-check",
+     "args": [
+      "lib/utils/List.js"
+     ],
+     "exit_code": 0,
+     "ms": 401.1,
+     "bytes": 168,
+     "internal_error": false,
+     "head": "[GT] syntax lib/utils/List.js",
+     "text": "[GT] syntax lib/utils/List.js\nchecker (3):\n  node\n  --check\n  lib/utils/List.js\nlanguage: .js\npath: lib/utils/List.js\nreason: clean_exit\nsource_bytes: 13264\nverdict: ok"
+    },
+    {
+     "tool": "gt-cochange",
+     "args": [
+      "lib/utils/List.js"
+     ],
+     "exit_code": 1,
+     "ms": 4.2,
+     "bytes": 65,
+     "internal_error": false,
+     "head": "[GT] co-change lib/utils/List.js: no answer (no_cochange_history)",
+     "text": "[GT] co-change lib/utils/List.js: no answer (no_cochange_history)"
+    },
+    {
+     "tool": "gt-changes",
+     "args": [
+      "lib/utils/List.js"
+     ],
+     "exit_code": 1,
+     "ms": 850.1,
+     "bytes": 94,
+     "internal_error": false,
+     "head": "[GT] impact of edits lib/utils/List.js: no answer (changed_symbols_unmapped:lib/utils/List.js)",
+     "text": "[GT] impact of edits lib/utils/List.js: no answer (changed_symbols_unmapped:lib/utils/List.js)"
+    },
+    {
+     "tool": "gt-slice",
+     "args": [
+      "push",
+      "398"
+     ],
+     "exit_code": 0,
+     "ms": 292.8,
+     "bytes": 211,
+     "internal_error": false,
+     "head": "[GT] slice push 398",
+     "text": "[GT] slice push 398\ndirection: backward\nline: 398\nslice_count: 1\nslices (1):\n  lib/utils/List.js\nsymbol: push\nnote: partial: name-level graph facts, verify by reading the code; omitted: slice_limitations_present"
+    },
+    {
+     "tool": "gt-shape",
+     "args": [
+      "push"
+     ],
+     "exit_code": 1,
+     "ms": 314.6,
+     "bytes": 52,
+     "internal_error": false,
+     "head": "[GT] shape push: no answer (no_verifiable_contracts)",
+     "text": "[GT] shape push: no answer (no_verifiable_contracts)"
+    },
+    {
+     "tool": "gt-api",
+     "args": [
+      "push"
+     ],
+     "exit_code": 1,
+     "ms": 269.3,
+     "bytes": 49,
+     "internal_error": false,
+     "head": "[GT] api impact push: no answer (route_not_found)",
+     "text": "[GT] api impact push: no answer (route_not_found)"
+    },
+    {
+     "tool": "gt-rename",
+     "args": [
+      "push",
+      "push_renamed"
+     ],
+     "exit_code": 0,
+     "ms": 280.4,
+     "bytes": 1619,
+     "internal_error": false,
+     "head": "[GT] rename push push_renamed",
+     "text": "[GT] rename push push_renamed\ndefinitions (1):\n  lib/utils/List.js:397  push  (Method)\nedit_site_count: 74\nedit_sites_by_type CALLS (12):\n  lib/__tests/clone.js:17  [CANDIDATE conf=0.6]\n  lib/__tests/definition-syntax-walk.js:11  [CANDIDATE conf=0.6]\n  lib/__tests/definition-syntax-walk.js:43  [CANDIDATE conf=0.6]\n  lib/__tests/exports.js:127  [CERTIFIED]\n  lib/__tests/fixture/generate-auto-emit-ws.js:50  [CANDIDATE conf=0.6]\n  lib/__tests/list.js:27  [CANDIDATE conf=0.6]\n  lib/__tests/list.js:128  [CANDIDATE conf=0.6]\n  lib/__tests/list.js:484  [CANDIDATE conf=0.6]\n  lib/__tests/parse.js:170  [CANDIDATE conf=0.6]\n  lib/__tests/parse.js:345  [CANDIDATE conf=0.6]\n  lib/__tests/parse.js:379  [CANDIDATE conf=0.6]\n  lib/__tests/parse.js:420  [CANDIDATE conf=0.6]\nedit_sites_by_type CONTAINS (1):\n  lib/utils/List.js:0  [CERTIFIED]\nfiles_to_touch (36):\n  lib/__tests/clone.js\n  lib/__tests/definition-syntax-walk.js\n  lib/__tests/exports.js\n  lib/__tests/fixture/generate-auto-emit-ws.js\n  lib/__tests/list.js\n  lib/__tests/parse.js\n  lib/__tests/tokenizer.js\n  lib/__tests/walk.js\n  lib/definition-syntax/parse.js\n  lib/lexer/Lexer.js\n  lib/lexer/generic.js\n  lib/lexer/match.js\n  lib/lexer/prepare-tokens.js\n  lib/lexer/search.js\n  lib/lexer/structure.js\n  lib/parser/create.js\n  lib/parser/sequence.js\n  lib/syntax/atrule/container.js\n  lib/syntax/atrule/import.js\n  lib/syntax/node/Block.js\n  ... 16 more not shown\nnew_name: push_renamed\nsymbol: push\nnote: partial: name-level graph facts, verify by reading the code; omitted: edit_sites_truncated:CALLS, text_references_not_enumerated, query_result_byte_limit"
+    },
+    {
+     "tool": "gt-taint",
+     "args": [
+      "parse",
+      "push"
+     ],
+     "exit_code": 0,
+     "ms": 610.3,
+     "bytes": 1439,
+     "internal_error": false,
+     "head": "[GT] taint parse push",
+     "text": "[GT] taint parse push\ndataflow_omissions (30):\n  dataflow_python_only:lib/__tests/clone.js\n  dataflow_python_only:lib/__tests/find.js\n  dataflow_python_only:lib/__tests/lexer-match-atrule-descriptor.js\n  dataflow_python_only:lib/__tests/lexer-match-atrule-prelude.js\n  dataflow_python_only:lib/__tests/lexer-match-property.js\n  dataflow_python_only:lib/__tests/lexer-match-type.js\n  dataflow_python_only:lib/__tests/walk.js\n  dataflow_python_only:lib/definition-syntax/parse.js\n  dataflow_python_only:lib/syntax/node/AnPlusB.js\n  dataflow_python_only:lib/syntax/node/Atrule.js\n  dataflow_python_only:lib/syntax/node/AtrulePrelude.js\n  dataflow_python_only:lib/syntax/node/AttributeSelector.js\n  dataflow_python_only:lib/syntax/node/Block.js\n  dataflow_python_only:lib/syntax/node/Brackets.js\n  dataflow_python_only:lib/syntax/node/CDC.js\n  dataflow_python_only:lib/syntax/node/CDO.js\n  dataflow_python_only:lib/syntax/node/ClassSelector.js\n  dataflow_python_only:lib/syntax/node/Combinator.js\n  dataflow_python_only:lib/syntax/node/Comment.js\n  dataflow_python_only:lib/syntax/node/Condition.js\n  ... 10 more not shown\npaths_found: 2\nreachable_symbol_count: 45\nsink: push\nsource: parse\nuncertain_paths (2):\n  ['parse', 'push']\n  ['parse', 'readImplicitGroup', 'push']\nnote: partial: name-level graph facts, verify by reading the code; omitted: name_match_edges_excluded, statement_level_dataflow_unavailable, symbol_level_reachability_only"
+    }
+   ],
+   "augment": [
+    {
+     "symbol": "push",
+     "hit": true,
+     "bytes": 533,
+     "ms": 1293.8,
+     "text": "[GT] graph context for your search:\n  List.push (Method) lib/utils/List.js:397\n    called by: it: walker (lib/__tests/exports.js:127), anyValue (lib/lexer/generic.js:465) [CANDIDATE], Lexer.checkStructure (lib/lexer/Lexer.js:156) [CANDIDATE], consumeFunction (lib/lexer/generic.js:217) [CANDIDATE], createCloneTest (lib/__tests/clone.js:17) [CANDIDATE] (+68 more)\n    calls: List.createItem (lib/utils/List.js:398), List.insert (lib/utils/List.js:398)\n    in flow: push -> createItem\n    in flow: parse -> updateCursors (lower bound)"
+    },
+    {
+     "symbol": "parse",
+     "hit": true,
+     "bytes": 493,
+     "ms": 1083.5,
+     "text": "[GT] graph context for your search:\n  parse (Function) lib/definition-syntax/parse.js:578\n    ambiguous: 64 other definition(s) share this name\n    called by: ast (lib/__tests/lexer-match-result.js:10), buildMatchGraph (lib/lexer/match-graph.js:518) (+62 more)\n    calls: readImplicitGroup (lib/definition-syntax/parse.js:580), Scanner.error (lib/definition-syntax/scanner.js:583) [CANDIDATE]\n    in flow: constructor -> readMultiplierRange\n    in flow: constructor -> charCodeAt (lower bound)"
+    },
+    {
+     "symbol": "charCodeAt",
+     "hit": true,
+     "bytes": 650,
+     "ms": 933.4,
+     "text": "[GT] graph context for your search:\n  Scanner.charCodeAt (Method) lib/definition-syntax/scanner.js:18\n    ambiguous: 1 other definition(s) share this name\n    called by: Scanner.charCode (lib/definition-syntax/scanner.js:22), Scanner.nextCharCode (lib/definition-syntax/scanner.js:28), Scanner.nextNonWsCode (lib/definition-syntax/scanner.js:31), anPlusB (lib/lexer/generic-an-plus-b.js:111) [CANDIDATE], areStringsEqualCaseInsensitive (lib/lexer/match.js:38) [CANDIDATE] (+53 more)\n    calls: charCodeAt (lib/lexer/generic.js:19) [SPECULATIVE]\n    in flow: constructor -> charCodeAt (lower bound)\n    in flow: constructor -> charCodeAt (lower bound)"
+    },
+    {
+     "symbol": "error",
+     "hit": false,
+     "bytes": 0,
+     "ms": 0.1,
+     "text": ""
+    },
+    {
+     "symbol": "walk",
+     "hit": true,
+     "bytes": 499,
+     "ms": 925.1,
+     "text": "[GT] graph context for your search:\n  walk (Function) lib/definition-syntax/walk.js:7\n    called by: Lexer.checkStructure (lib/lexer/Lexer.js:162), createCloneTest (lib/__tests/clone.js:17), expectedWalk (lib/__tests/walk.js:28), file (lib/__tests/walk.js:592), file (lib/__tests/walk.js:605) (+33 more)\n    calls: ensureFunction (lib/definition-syntax/walk.js:44), List.forEach (lib/utils/List.js:13) [CANDIDATE]\n    in flow: checkStructure -> ensureFunction\n    in flow: validate -> ensureFunction"
+    }
+   ]
+  }
+ ]
+}

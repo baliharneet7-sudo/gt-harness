@@ -42,7 +42,7 @@ FIXTURE_CALLS: dict[str, list[str]] = {
 
 # Surfaces whose fixture has no data to report: a named no-answer is the
 # correct behaviour (no test was run; no git history; no recurring failure).
-NAMED_NO_ANSWER_OK = {"gt-tests", "gt-cochange", "gt-verify", "gt-failures",
+NAMED_NO_ANSWER_OK = {"gt-cochange", "gt-verify", "gt-failures",
                       "gt-module", "gt-tools"}
 
 

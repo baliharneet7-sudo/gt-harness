@@ -120,9 +120,58 @@ def _run_flows(session: "GTSession", args: list[str]) -> CapabilityResult:
     return structure.processes(session, " ".join(args), limit=10)
 
 
+_TEST_REACH_DEPTH = 3
+_TEST_REACH_LIMIT = 25
+_TEST_REACH_QUERY = (
+    "WITH RECURSIVE reach(id, depth) AS ("
+    " SELECT id, 0 FROM nodes WHERE file_path = ? AND label IN ('Function', 'Method')"
+    " UNION SELECT e.source_id, r.depth + 1 FROM edges e JOIN reach r ON e.target_id = r.id"
+    " WHERE e.type = 'CALLS' AND r.depth < ?)"
+    " SELECT n.file_path, n.qualified_name, n.name, n.start_line, MIN(r.depth)"
+    " FROM reach r JOIN nodes n ON n.id = r.id"
+    " WHERE n.is_test = 1 AND r.depth > 0"
+    " GROUP BY n.id ORDER BY MIN(r.depth), n.file_path, n.start_line LIMIT ?"
+)
+
+
+def _tests_by_reachability(session: "GTSession", files: list[str]) -> list[dict[str, Any]]:
+    """Test functions that reach the files' functions within a few CALLS hops.
+
+    The certified covering selector returned nothing on 5/5 real repositories
+    (adaptix, awilix, abs, fd, csstree) although each has hundreds of is_test
+    functions calling into the code; this is the graph's own answer to the
+    same question, labelled as reachability rather than coverage."""
+    from gt_engine.capabilities._query import graph_conn
+
+    conn = graph_conn(session)
+    if conn is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for path in files:
+            for file_path, qualified, name, line, depth in conn.execute(
+                _TEST_REACH_QUERY, (path, _TEST_REACH_DEPTH, _TEST_REACH_LIMIT)
+            ):
+                rows.append({"file_path": file_path, "line": line,
+                             "name": f"{qualified or name} ({depth} call hop(s) away)"})
+    finally:
+        conn.close()
+    return rows[:_TEST_REACH_LIMIT]
+
+
 def _run_tests(session: "GTSession", args: list[str]) -> CapabilityResult:
     _need(args, 1, TOOLS["gt-tests"].usage)
-    return change.affected_tests(session, list(args))
+    result = change.affected_tests(session, list(args))
+    covering = (result.answer or {}).get("tests") if isinstance(result.answer, dict) else None
+    if covering:
+        return result
+    reached = _tests_by_reachability(session, list(args))
+    if not reached:
+        return result
+    return wrap(session, "affected_tests", semantics="heuristic",
+                answer={"tests reaching these files": reached},
+                omissions=("covering_selector_empty",
+                           f"graph_reachability_depth_{_TEST_REACH_DEPTH}"))
 
 
 def _run_routes(session: "GTSession", args: list[str]) -> CapabilityResult:
@@ -323,6 +372,8 @@ def _shape_query(answer: Any, _args: list[str]) -> Any:
 
 def _shape_tests(answer: Any, _args: list[str]) -> Any:
     if not isinstance(answer, dict):
+        return answer
+    if "tests reaching these files" in answer:
         return answer
     return {"covering tests": [
         {"file_path": row.get("file"), "confidence": row.get("confidence")}
