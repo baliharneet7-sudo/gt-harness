@@ -3351,6 +3351,22 @@ class MiniSweAdapter(GroundtruthController):
                     phase="initial_index",
                 )
                 self._note_index_memory_pressure(receipt)
+                status = str(getattr(getattr(receipt, "status", ""), "value", "") or "")
+                from gt_engine.attached_delivery import is_attached
+
+                if is_attached() and status != "not_applicable":
+                    # An attached run whose graph never built ran as the
+                    # stock agent: counting it as GT would credit GT with a
+                    # run it did not touch (TB2 sanitize-git-repo, run
+                    # 36303712349: the memory guard killed the index). A
+                    # workspace with no source at all is not a GT failure -
+                    # there was nothing to build - so it stays valid.
+                    self.attached_treatment_invalid = (
+                        "initial_index_failed:"
+                        + (getattr(receipt, "error_type", "") or status or "unsuccessful")
+                    )
+                    self.store.append("attached_treatment_invalid",
+                                      reason=self.attached_treatment_invalid)
             else:
                 adopted = self.engine_state.publish_graph(
                     graph_path=receipt.graph_db,

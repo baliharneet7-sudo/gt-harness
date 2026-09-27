@@ -1565,3 +1565,26 @@ def test_d6_refresh_nested_enrichment_prune_and_seal_certifies(
 
     caps = sim.capabilities()
     assert caps["lsp_promotion"][0] == "WORKING", caps["lsp_promotion"]
+
+
+def test_attached_run_without_its_startup_graph_is_treatment_invalid(tmp_path, monkeypatch):
+    """An attached run whose index failed ran as the stock agent; a workspace
+    with no source at all is not a GT failure and stays valid."""
+    from gt_engine.attached_delivery import ATTACHED, DELIVERY_MODE_ENV
+
+    monkeypatch.setenv(DELIVERY_MODE_ENV, ATTACHED)
+    for status, error_type, expected in (
+        (IndexBuildStatus.BUILD_FAILED, "memory_guard_triggered",
+         "initial_index_failed:memory_guard_triggered"),
+        (IndexBuildStatus.NOT_APPLICABLE, "", ""),
+    ):
+        adapter = _adapter(tmp_path / status.value)
+        adapter._startup_index = _DoneFuture(IndexBuildReceipt(
+            status, error_type=error_type, error_diagnostic="x"))
+        try:
+            adapter._poll_startup_index()
+            assert (getattr(adapter, "attached_treatment_invalid", "") or "") == expected
+            rows = _journal_rows(adapter, "attached_treatment_invalid")
+            assert bool(rows) is bool(expected)
+        finally:
+            adapter.close_graph_lifecycle()
