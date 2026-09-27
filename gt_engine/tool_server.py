@@ -893,6 +893,19 @@ def refresh_if_stale(session: "GTSession") -> None:
         and session.capability_active("graph_refresh")
         and session.capability_active("graph_queries")
     ):
+        schedule = getattr(adapter, "schedule_background_graph_build", None)
+        if callable(schedule) and getattr(adapter, "_background_graph_builder", None):
+            # No graph at all: adopt a build that has landed, else start one
+            # in the background and answer from what exists now. A from-
+            # scratch build never runs inline on a read (it stalled boa for
+            # 32 minutes); only an existing graph's incremental amend does.
+            adapter._poll_startup_index()
+            state = getattr(adapter, "engine_state", None)
+            has_graph = bool(getattr(state, "graph_path", "")) or bool(
+                (getattr(adapter, "_unadopted_graph", ("", "")) or ("", ""))[0])
+            if not has_graph:
+                schedule()
+                return
         adapter.refresh_graph(phase="graph_query")
 
 

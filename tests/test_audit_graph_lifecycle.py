@@ -1607,3 +1607,21 @@ def test_a_later_graph_publication_clears_the_startup_failure_flag(tmp_path, mon
         assert _journal_rows(adapter, "attached_treatment_recovered")
     finally:
         adapter.close_graph_lifecycle()
+
+
+def test_background_graph_build_is_bounded_and_skips_when_a_graph_exists(tmp_path):
+    adapter = _adapter(tmp_path)
+    try:
+        builds = []
+        adapter._background_graph_builder = lambda: builds.append(1) or _DoneFuture(
+            IndexBuildReceipt(IndexBuildStatus.BUILD_FAILED, error_type="x"))
+        assert adapter.schedule_background_graph_build() is True
+        assert adapter.schedule_background_graph_build() is False  # one in flight
+        adapter._startup_index = None
+        assert adapter.schedule_background_graph_build() is True
+        adapter._startup_index = None
+        assert adapter.schedule_background_graph_build() is False  # cap reached
+        assert len(builds) == adapter.MAX_BACKGROUND_GRAPH_BUILDS == 2
+        assert len(_journal_rows(adapter, "graph_background_build_scheduled")) == 2
+    finally:
+        adapter.close_graph_lifecycle()

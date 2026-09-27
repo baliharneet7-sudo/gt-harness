@@ -1240,6 +1240,7 @@ def build_agent(
                 )
 
     adapter._startup_index = _StartupIndex(_initial_index)
+    adapter._background_graph_builder = lambda: _StartupIndex(_initial_index)
     adapter._startup_finalize = _finalize_startup
     adapter.store.append("execution_transport", synthetic_transport=synthetic_transport)
     delivery_path = (

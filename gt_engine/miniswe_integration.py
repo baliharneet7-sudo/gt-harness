@@ -514,6 +514,10 @@ class MiniSweAdapter(GroundtruthController):
         # amend parent when agent edits beat it to the revision.
         self._startup_index: Any | None = None
         self._startup_finalize: Any | None = None
+        # A no-argument factory returning a started index future (the runner's
+        # own startup builder); set by the runner, used by attached reads.
+        self._background_graph_builder: Any | None = None
+        self._background_build_count = 0
         self._unadopted_graph: tuple[str, str] = ("", "")
         # Consecutive amend_failed:* refusals, keyed on the parent path they
         # failed against. Only the serving-boundary amend escalates them; the
@@ -3304,6 +3308,33 @@ class MiniSweAdapter(GroundtruthController):
             suite_scope=suite_scope,
         )
         return promote and suite_scope
+
+    #: Background from-scratch graph builds an attached run may start from a
+    #: read when it has no graph at all. Bounded: a repository the producer
+    #: cannot index in the task's lifetime must not rebuild forever.
+    MAX_BACKGROUND_GRAPH_BUILDS = 2
+
+    def schedule_background_graph_build(self) -> bool:
+        """Start a from-scratch index off the owner thread; never block.
+
+        Recovering a missing graph inline stalled DeepSWE boa (run
+        36312794672) for 1,935 s inside one grep augmentation - the agent sat
+        idle, the recovered graph landed near the end, and the task timed
+        out. The build now runs on the same one-shot future the startup
+        index uses; the next read after it lands adopts it through
+        _poll_startup_index and the revision gate.
+        """
+        if self._startup_index is not None or self._background_graph_builder is None:
+            return False
+        if self.engine_state.graph_path or self._unadopted_graph[0]:
+            return False
+        if self._background_build_count >= self.MAX_BACKGROUND_GRAPH_BUILDS:
+            return False
+        self._background_build_count += 1
+        self._startup_index = self._background_graph_builder()
+        self.store.append("graph_background_build_scheduled",
+                          attempt=self._background_build_count)
+        return True
 
     def _poll_startup_index(self) -> None:
         """Adopt the asynchronously-built initial index once it lands.

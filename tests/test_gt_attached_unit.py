@@ -541,3 +541,30 @@ def test_attached_startup_graph_is_not_held_behind_the_dense_sidecar(monkeypatch
     monkeypatch.setenv(DELIVERY_MODE_ENV, PUSH)
     assert run._startup_embedding_budget(10_500) == 0.35 * 10_500
     assert run._startup_embedding_budget(None) is None
+
+
+def test_a_read_with_no_graph_schedules_a_background_build_and_never_blocks():
+    """Inline from-scratch recovery stalled DeepSWE boa for 1,935 s inside one
+    grep augmentation. With a builder available a graph-less read schedules
+    the build and returns; only an existing graph is amended inline."""
+    from types import SimpleNamespace
+
+    from gt_engine.tool_server import refresh_if_stale
+
+    calls = []
+    adapter = SimpleNamespace(
+        graph_db=None, graph_fresh=False,
+        engine_state=SimpleNamespace(graph_path=""), _unadopted_graph=("", ""),
+        _background_graph_builder=object(),
+        _poll_startup_index=lambda: calls.append("poll"),
+        schedule_background_graph_build=lambda: calls.append("schedule") or True,
+        refresh_graph=lambda *, phase: calls.append("BLOCKING refresh"),
+    )
+    session = SimpleNamespace(_engine=adapter, capability_active=lambda name: True)
+    refresh_if_stale(session)
+    assert calls == ["poll", "schedule"]
+
+    calls.clear()
+    adapter.engine_state.graph_path = "g.db"   # a stale existing graph amends inline
+    refresh_if_stale(session)
+    assert calls == ["poll", "BLOCKING refresh"]
