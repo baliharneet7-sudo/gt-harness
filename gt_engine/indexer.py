@@ -1886,8 +1886,18 @@ def _publish_candidate(
     excluded_roots: tuple[Path, ...] = (), diagnostics: list[str] | None = None,
     build_mode: str = "full", parent_graph_sha256: str = "",
     amended_paths: tuple[str, ...] = (),
+    frozen_input: bool = False,
 ) -> str | None:
     """Certify and publish a staged graph, or record why it could not be.
+
+    ``frozen_input``: the producer read a hash-verified snapshot whose digest
+    IS ``reuse_key``, so the graph describes exactly the source it certifies
+    no matter what the live tree did meanwhile. Re-hashing the live tree then
+    only measures the agent's own concurrent edits: DeepSWE aiomonitor (run
+    36336203906) lost three consecutive startup graphs this way and ran with
+    none. Whether the graph is CURRENT is decided at adoption
+    (``publish_graph`` against the source revision), where a raced graph
+    becomes the amend parent instead of being discarded.
 
     Shared by the full index and the incremental amend so both produce the same
     sealed evidence, the same certification manifest and the same atomic
@@ -1990,7 +2000,7 @@ def _publish_candidate(
             diagnostics.append("GT_INDEX_OUTPUT_INVALID")
         candidate.unlink(missing_ok=True)
         return None
-    if compute_index_reuse_key(root, excluded_roots=excluded_roots) != reuse_key:
+    if not frozen_input and compute_index_reuse_key(root, excluded_roots=excluded_roots) != reuse_key:
         candidate.unlink(missing_ok=True)
         raise ValueError("producer input superseded before publication")
     graph_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
@@ -2172,6 +2182,7 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
         ) as handle:
             candidate = Path(handle.name)
         candidate.unlink(missing_ok=True)
+        frozen_input = bool(excluded_roots)
         if excluded_roots:
             # The producer receives the same filtered, frozen input that was
             # hashed. Filtering only the reuse key would certify hidden state
@@ -2200,7 +2211,7 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
             candidate, root=root, logical_root=logical_root, gt_dir=gt_dir, db=db,
             reuse_key=reuse_key, identity=identity, process_result=process_result,
             build_attempts=build_attempts, excluded_roots=excluded_roots,
-            diagnostics=diagnostics,
+            diagnostics=diagnostics, frozen_input=frozen_input,
         )
         return published
     except Exception as exc:  # noqa: BLE001 - indexing failure means GT dormant, never a crash
