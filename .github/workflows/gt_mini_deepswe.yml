@@ -111,7 +111,13 @@ jobs:
           # abs-module-cache-flags's image is also the readiness fixture image.
           wanted = [t for t in os.environ["TASKS"].split(",") if t] + ["abs-module-cache-flags"]
           images = sorted({(rows[t]["container_image"], rows[t]["container_digest"]) for t in wanted})
-          matrix = [{"image": image, "digest": digest} for image, digest in images]
+          # Each image gets three independent jobs. A GitHub runner whose IP
+          # has exhausted public ECR's anonymous data quota can never copy on
+          # retry (DeepSWE rest15, run 36312794672: three images failed five
+          # retries each with "Data limit exceeded"); separate jobs usually
+          # land on other runners. A job finding the digest mirrored exits.
+          matrix = [{"image": image, "digest": digest, "attempt": attempt}
+                    for image, digest in images for attempt in (1, 2, 3)]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write("images=" + json.dumps({"include": matrix}, separators=(",", ":")) + chr(10))
           PY
@@ -153,7 +159,7 @@ jobs:
             echo "already mirrored: ${MIRROR}@${DIGEST}"; exit 0
           fi
           TAG="${SRC_IMAGE##*:}"
-          for delay in 0 60 120 240 480; do
+          for delay in 0 30 90; do
             sleep "$delay"
             if "$crane" copy "${SRC_IMAGE}@${DIGEST}" "${MIRROR}:${TAG}"; then
               got="$("$crane" digest "${MIRROR}@${DIGEST}")"
