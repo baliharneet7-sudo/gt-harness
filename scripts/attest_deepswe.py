@@ -77,6 +77,93 @@ def _default_suite() -> BenchmarkSuite:
     return replace(suite, canonical_task_ids=tuple(CANONICAL_TASK_IDS))
 
 
+# SWE-bench-Live runs a launch-time model. Its trusted route is the one the
+# plan rendered from the launch inputs and attested by sha256 (shipped beside
+# the plan as provider-route.json), never a checked-in manifest; DeepSWE keeps
+# its checked-in route.
+SWELIVE_ROUTE_FILENAME = "provider-route.json"
+DEEPSWE_ROUTE_PATH = ROOT / "config" / "provider_route.v1.json"
+SWELIVE_DELIVERY_MODES = frozenset({"attached", "push"})
+
+
+def _swelive_trusted_route(
+    root: Path, plan: dict[str, Any], errors: list[str]
+) -> tuple[dict[str, Any], str | None]:
+    """The rendered launch route, bound to the plan's recorded digest."""
+    try:
+        route, digest = load_route(root / SWELIVE_ROUTE_FILENAME)
+    except FileNotFoundError:
+        errors.append("planned_provider_route_missing")
+        return {}, None
+    except (OSError, ValueError, KeyError, TypeError):
+        errors.append("planned_provider_route_invalid")
+        return {}, None
+    if (
+        plan.get("provider_route_sha256") != digest
+        or plan.get("provider_route") != route
+    ):
+        errors.append("planned_provider_route_mismatch")
+    return route, digest
+
+
+def _swelive_shard(
+    plan: dict[str, Any], stage_tasks: list[str], errors: list[str]
+) -> list[str]:
+    """Re-derive the shard the plan claims to have dispatched."""
+    from scripts.build_swelive_catalog import shard_tasks
+
+    shard = plan.get("shard")
+    if shard is None:
+        return stage_tasks
+    if (
+        not isinstance(shard, dict)
+        or shard.get("method") != "strided"
+        or plan.get("stage_task_count") != len(stage_tasks)
+    ):
+        errors.append("planned_shard_invalid")
+        return []
+    try:
+        return shard_tasks(stage_tasks, shard.get("index"), shard.get("count"))
+    except ValueError:
+        errors.append("planned_shard_invalid")
+        return []
+
+
+def _swelive_launch_contract_errors(plan: dict[str, Any], expected: list[str]) -> list[str]:
+    from scripts.build_swelive_catalog import MATRIX_JOB_LIMIT, catalog_sha256
+
+    errors: list[str] = []
+    requested = plan.get("max_parallel_requested")
+    if (
+        type(requested) is not int
+        or not 1 <= requested <= MATRIX_JOB_LIMIT
+        or type(plan.get("max_parallel")) is not int
+        or plan.get("max_parallel") != min(requested, len(expected))
+        or len(expected) > MATRIX_JOB_LIMIT
+    ):
+        errors.append("planned_parallelism_mismatch")
+    temperature = plan.get("temperature")
+    if (
+        plan.get("gt_delivery_mode") not in SWELIVE_DELIVERY_MODES
+        or type(plan.get("step_limit")) is not int
+        or plan.get("step_limit") < 0
+        or isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(temperature)
+        or temperature < 0
+        or plan.get("gt_off_arm") is not False
+    ):
+        errors.append("planned_launch_contract_invalid")
+    catalog = plan.get("catalog")
+    try:
+        pinned = catalog_sha256()
+    except OSError:
+        pinned = None
+    if not isinstance(catalog, dict) or catalog.get("sha256") != pinned:
+        errors.append("planned_catalog_identity_mismatch")
+    return errors
+
+
 def _object(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -220,6 +307,8 @@ def attest_deepswe(
         except ValueError:
             expected_cohort = []
             errors.append("planned_cohort_stage_invalid")
+        if suite.suite_id == "swelive" and expected_cohort:
+            expected_cohort = _swelive_shard(plan, expected_cohort, errors)
         if plan.get("gate_task_id") != suite.gate_task_id:
             errors.append("planned_gate_task_mismatch")
         if plan.get("full_task_count") != len(suite.canonical_task_ids):
@@ -315,10 +404,13 @@ def attest_deepswe(
         observed_languages[language] = observed_languages.get(language, 0) + 1
     if plan.get("language_counts") != observed_languages:
         errors.append("planned_language_counts_mismatch")
+    swelive = suite.suite_id == "swelive"
     if (
         plan.get("attempts_per_task") != 1
-        or type(plan.get("max_parallel")) is not int
-        or plan.get("max_parallel") != min(20, len(expected))
+        # SWE-bench-Live concurrency is a launch input, checked against the
+        # plan's recorded request below; DeepSWE keeps its fixed rail.
+        or (not swelive and type(plan.get("max_parallel")) is not int)
+        or (not swelive and plan.get("max_parallel") != min(20, len(expected)))
         or plan.get("agent")
         != "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent"
         or plan.get("agent_scaffold") != "mini-swe-agent"
@@ -326,15 +418,11 @@ def attest_deepswe(
         or plan.get("treatment") != "groundtruth"
     ):
         errors.append("planned_execution_contract_mismatch")
-    route_name = (
-        # union-alpha's stealth preview was retired on 2026-09-17; the paid
-        # SWE-Live workflow now binds the muse-spark-1.2 manifest, and the
-        # attestation must load the same one it verifies against.
-        "provider_route_deepseek_v4_flash_0731_fp8.v1.json"
-        if suite.suite_id == "swelive"
-        else "provider_route.v1.json"
-    )
-    trusted_route, trusted_route_digest = load_route(ROOT / "config" / route_name)
+    if swelive:
+        errors.extend(_swelive_launch_contract_errors(plan, expected))
+        trusted_route, trusted_route_digest = _swelive_trusted_route(root, plan, errors)
+    else:
+        trusted_route, trusted_route_digest = load_route(DEEPSWE_ROUTE_PATH)
     if (
         plan.get("provider_route_id") != trusted_route.get("route_id")
         or plan.get("provider_route_sha256") != trusted_route_digest

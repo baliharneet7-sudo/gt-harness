@@ -1,5 +1,12 @@
-name: "SWE-Live GT smoke5: Union Alpha on 921bec20"
+name: "GT Harness: SWE-bench-Live Lite GT-on (launch-time model)"
+run-name: "SWE-Live GT ${{ inputs.cohort_stage }} | ${{ inputs.model }} | ${{ inputs.gt_delivery_mode }} | shard ${{ inputs.shard_index }}/${{ inputs.shard_count }}"
 
+# GT-on only. No GT-off arm exists here and none may be added: SWE-bench-Live
+# outcomes are reported absolute. The model, its OpenRouter routing and the GT
+# delivery mode are launch choices; the route the preflight certifies and every
+# task uses is rendered from them and attested by sha256. The cohort comes from
+# the pinned 300-instance Lite catalog (config/swelive_lite_catalog_v1.json),
+# sharded so no dispatch exceeds GitHub's 256-job matrix limit.
 on:
   workflow_dispatch:
     inputs:
@@ -9,10 +16,10 @@ on:
         type: boolean
         default: false
       cohort_stage:
-        description: "Run gate-one first; release remaining four only after an official grade"
+        description: "gate-one | remaining (needs prior_gate_run_id) | all | smoke5 | single | subset"
         required: false
         type: choice
-        options: [gate-one, remaining, all, single, subset]
+        options: [gate-one, remaining, all, smoke5, single, subset]
         default: gate-one
       single_task_id:
         description: "Required for single/subset: one task id, or a comma-separated list"
@@ -29,6 +36,61 @@ on:
         required: false
         type: string
         default: ""
+      model:
+        description: "OpenRouter model id chosen at launch (bare id, e.g. stealth/space-bunny-alpha)"
+        required: true
+        type: string
+      gt_delivery_mode:
+        description: "GT delivery: attached (gt-* tools + grep augmentation) or push (legacy injection)"
+        required: true
+        type: choice
+        options: [attached, push]
+        default: attached
+      provider_only:
+        description: "Comma list of OpenRouter provider tags; empty = OpenRouter chooses"
+        required: false
+        type: string
+        default: ""
+      quantization:
+        description: "Comma list of required quantizations (e.g. fp8); empty = none"
+        required: false
+        type: string
+        default: ""
+      allow_fallbacks:
+        description: "Allow OpenRouter provider fallbacks when provider_only is set"
+        required: false
+        type: boolean
+        default: false
+      reasoning_effort:
+        description: "minimal|low|medium|high|xhigh|max; empty = not sent"
+        required: false
+        type: string
+        default: ""
+      temperature:
+        description: "Sampling temperature"
+        required: false
+        type: string
+        default: "1.0"
+      step_limit:
+        description: "Agent step limit; 0 = time budget only"
+        required: false
+        type: string
+        default: "0"
+      max_parallel:
+        description: "Concurrent task legs (1-256)"
+        required: false
+        type: string
+        default: "20"
+      shard_index:
+        description: "1-based shard of the selected cohort (strided); all/remaining need 2+ shards"
+        required: false
+        type: string
+        default: "1"
+      shard_count:
+        description: "Number of shards the selected cohort is split into (each <= 256 legs)"
+        required: false
+        type: string
+        default: "1"
   workflow_call:
     inputs:
       approve_paid_run:
@@ -37,7 +99,7 @@ on:
         type: boolean
         default: false
       cohort_stage:
-        description: "Run gate-one first; release remaining four only after an official grade"
+        description: "gate-one | remaining (needs prior_gate_run_id) | all | smoke5 | single | subset"
         required: false
         type: string
         default: gate-one
@@ -56,6 +118,60 @@ on:
         required: false
         type: string
         default: ""
+      model:
+        description: "OpenRouter model id chosen at launch (bare id, e.g. stealth/space-bunny-alpha)"
+        required: true
+        type: string
+      gt_delivery_mode:
+        description: "GT delivery: attached or push"
+        required: false
+        type: string
+        default: attached
+      provider_only:
+        description: "Comma list of OpenRouter provider tags; empty = OpenRouter chooses"
+        required: false
+        type: string
+        default: ""
+      quantization:
+        description: "Comma list of required quantizations (e.g. fp8); empty = none"
+        required: false
+        type: string
+        default: ""
+      allow_fallbacks:
+        description: "Allow OpenRouter provider fallbacks when provider_only is set"
+        required: false
+        type: boolean
+        default: false
+      reasoning_effort:
+        description: "minimal|low|medium|high|xhigh|max; empty = not sent"
+        required: false
+        type: string
+        default: ""
+      temperature:
+        description: "Sampling temperature"
+        required: false
+        type: string
+        default: "1.0"
+      step_limit:
+        description: "Agent step limit; 0 = time budget only"
+        required: false
+        type: string
+        default: "0"
+      max_parallel:
+        description: "Concurrent task legs (1-256)"
+        required: false
+        type: string
+        default: "20"
+      shard_index:
+        description: "1-based shard of the selected cohort (strided)"
+        required: false
+        type: string
+        default: "1"
+      shard_count:
+        description: "Number of shards the selected cohort is split into"
+        required: false
+        type: string
+        default: "1"
 
 permissions:
   contents: read
@@ -75,7 +191,12 @@ jobs:
       source_sha: ${{ steps.source.outputs.sha }}
       task_count: ${{ steps.cohort.outputs.task_count }}
       task_order_sha256: ${{ steps.cohort.outputs.task_order_sha256 }}
+      max_parallel: ${{ steps.cohort.outputs.max_parallel }}
       model: ${{ steps.cohort.outputs.model }}
+      gt_delivery_mode: ${{ steps.cohort.outputs.gt_delivery_mode }}
+      reasoning_effort: ${{ steps.cohort.outputs.reasoning_effort }}
+      temperature: ${{ steps.cohort.outputs.temperature }}
+      step_limit: ${{ steps.cohort.outputs.step_limit }}
       provider_base_url: ${{ steps.cohort.outputs.provider_base_url }}
       provider_routing_json: ${{ steps.cohort.outputs.provider_routing_json }}
       dispatch_stagger_seconds: ${{ steps.cohort.outputs.dispatch_stagger_seconds }}
@@ -116,6 +237,35 @@ jobs:
           name: gt-harness-swelive-attestation-${{ inputs.prior_gate_run_id }}
           path: prior-gate
 
+      - name: Render the launch-time provider route
+        env:
+          MODEL: ${{ inputs.model }}
+          PROVIDER_ONLY: ${{ inputs.provider_only }}
+          QUANTIZATION: ${{ inputs.quantization }}
+          ALLOW_FALLBACKS: ${{ inputs.allow_fallbacks }}
+          REASONING_EFFORT: ${{ inputs.reasoning_effort }}
+        run: |
+          set -euo pipefail
+          # The model is a launch choice; the route the preflight certifies and
+          # every task uses is rendered from it and attested by sha256.
+          mkdir -p plan
+          python -m scripts.render_provider_route \
+            --model "$MODEL" \
+            --provider-only "$PROVIDER_ONLY" \
+            --quantization "$QUANTIZATION" \
+            --allow-fallbacks "$ALLOW_FALLBACKS" \
+            --reasoning-effort "$REASONING_EFFORT" \
+            --output plan/provider-route.json
+
+      - name: Verify the pinned Lite catalog and materialize its task packages
+        run: |
+          set -euo pipefail
+          # Offline: every catalog task is re-rendered from the checked-in
+          # dataset snapshot and must hash to its pinned task.toml digest; the
+          # suite manifest must derive from the catalog byte-for-byte.
+          python -m scripts.build_swelive_catalog verify
+          python -m scripts.build_swelive_catalog materialize --tasks all
+
       - name: Resolve and attest the SWE-bench-Live Lite cohort
         id: cohort
         env:
@@ -125,6 +275,13 @@ jobs:
           COHORT_STAGE: ${{ inputs.cohort_stage || 'gate-one' }}
           SINGLE_TASK_ID: ${{ inputs.single_task_id || '' }}
           PRIOR_GATE_RUN_ID: ${{ inputs.prior_gate_run_id || '' }}
+          MODEL: ${{ inputs.model }}
+          GT_DELIVERY_MODE: ${{ inputs.gt_delivery_mode || 'attached' }}
+          TEMPERATURE: ${{ inputs.temperature || '1.0' }}
+          STEP_LIMIT: ${{ inputs.step_limit || '0' }}
+          MAX_PARALLEL: ${{ inputs.max_parallel || '20' }}
+          SHARD_INDEX: ${{ inputs.shard_index || '1' }}
+          SHARD_COUNT: ${{ inputs.shard_count || '1' }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -143,6 +300,13 @@ jobs:
               validate_prior_gate,
               validate_stage_inputs,
           )
+          from scripts.build_swelive_catalog import (
+              MATRIX_JOB_LIMIT,
+              catalog_sha256,
+              load_catalog,
+              shard_tasks,
+              smoke5_task_ids,
+          )
           from scripts.resolve_harbor_budget import (
               GT_OVERHEAD_EXTENSION_SECONDS,
               SUPERVISOR_GRACE_SECONDS,
@@ -150,6 +314,22 @@ jobs:
               resolve_budget,
           )
           from scripts.provider_preflight import load_route
+
+          # The catalog identity is pinned here, not merely read: a rebuilt
+          # catalog must be reviewed into this line before it can be run.
+          EXPECTED_CATALOG_SHA256 = "0013f6b7acbd434be1e25ab64e45a0c12b59d7fdae6420483d57e56393438eb0"
+          # A GitHub-hosted job dies at 360 minutes whatever timeout-minutes
+          # says, and the trial's artifacts die with it. The task job runs
+          # at HOSTED_JOB_TIMEOUT_MINUTES; around the trial it spends staging
+          # (build/test the producer, pull the task image, wheelhouse, LSP
+          # servers), the pre-spend gold evaluator, Pier's verifier/collect,
+          # the independent official evaluator (each evaluator is itself
+          # bounded by --timeout 1800) and evidence sealing. The per-task
+          # execution budget is capped so all of it fits, and the cap is
+          # recorded per task.
+          HOSTED_JOB_TIMEOUT_MINUTES = 355
+          NON_TRIAL_RESERVE_SECONDS = (40 + 35 + 25 + 35 + 10) * 60
+          HOSTED_EXECUTION_CAP_SECONDS = HOSTED_JOB_TIMEOUT_MINUTES * 60 - NON_TRIAL_RESERVE_SECONDS
 
           suite = load_suite("swelive")
           import_manifest = json.loads(
@@ -159,6 +339,38 @@ jobs:
           if not re.fullmatch(r"[0-9a-f]{40}", str(gt_source_commit or "")):
               raise SystemExit("SWE-Live GT source commit is not declared")
           official_evaluator_commit = "ad79b850f15e33992e96f03f6e97f05ddf9aa0be"
+
+          # --- launch inputs ------------------------------------------------
+          model = os.environ["MODEL"].strip()
+          route_path = Path("plan/provider-route.json")
+          provider_route, provider_route_sha256 = load_route(route_path)
+          if not model or model.startswith("openai/") or provider_route["model"] != model:
+              raise SystemExit("model must be the bare OpenRouter id the route was rendered for")
+          delivery_mode = os.environ["GT_DELIVERY_MODE"].strip().lower()
+          if delivery_mode not in {"attached", "push"}:
+              raise SystemExit("gt_delivery_mode must be attached or push")
+          if not re.fullmatch(r"[0-9]+", os.environ["STEP_LIMIT"].strip()):
+              raise SystemExit("step_limit must be a non-negative integer (0 = time budget only)")
+          step_limit = int(os.environ["STEP_LIMIT"])
+          temperature = float(os.environ["TEMPERATURE"])
+          if temperature < 0:
+              raise SystemExit("temperature must be >= 0")
+          if not re.fullmatch(r"[1-9][0-9]*", os.environ["MAX_PARALLEL"].strip()):
+              raise SystemExit("max_parallel must be a positive integer")
+          max_parallel_requested = int(os.environ["MAX_PARALLEL"])
+          if max_parallel_requested > MATRIX_JOB_LIMIT:
+              raise SystemExit(f"max_parallel must be <= {MATRIX_JOB_LIMIT}")
+          for name in ("SHARD_INDEX", "SHARD_COUNT"):
+              if not re.fullmatch(r"[1-9][0-9]*", os.environ[name].strip()):
+                  raise SystemExit(f"{name.lower()} must be a positive integer")
+          shard_index = int(os.environ["SHARD_INDEX"])
+          shard_count = int(os.environ["SHARD_COUNT"])
+
+          # --- catalog and suite binding -------------------------------------
+          catalog = load_catalog()
+          catalog_digest = catalog_sha256()
+          if catalog_digest != EXPECTED_CATALOG_SHA256:
+              raise SystemExit("SWE-bench-Live catalog digest differs from the reviewed pin")
           manifest_path = Path("swelive-bench/manifest.json")
           manifest_bytes = manifest_path.read_bytes()
           manifest = json.loads(manifest_bytes)
@@ -167,22 +379,31 @@ jobs:
               raise SystemExit("invalid SWE-bench-Live manifest schema")
           if manifest.get("task_config_identity") != TASK_CONFIG_IDENTITY:
               raise SystemExit("SWE-bench-Live task config identity policy mismatch")
+          if (manifest.get("catalog") or {}).get("sha256") != catalog_digest:
+              raise SystemExit("SWE-bench-Live manifest is not bound to the pinned catalog")
           if manifest_sha256 != suite.benchmark_sha:
               raise SystemExit("SWE-bench-Live manifest digest drifted from the suite binding")
           tasks = [str(row["task_id"]) for row in manifest["tasks"]]
-          if tasks != list(suite.canonical_task_ids):
-              raise SystemExit("SWE-bench-Live manifest order drifted from the suite binding")
-          bench = Path("swelive-bench")
+          if tasks != list(suite.canonical_task_ids) or tasks != [
+              str(row["task_id"]) for row in catalog["tasks"]
+          ]:
+              raise SystemExit("SWE-bench-Live manifest order drifted from the suite/catalog")
+          # Packages rendered from the catalog by the step above.
+          rendered = Path("swelive-bench/rendered")
           trusted_tasks = {
               str(row["task_id"]): row for row in manifest["tasks"]
           }
 
+          # --- cohort selection ----------------------------------------------
           stage = os.environ["COHORT_STAGE"].strip() or GATE_STAGE
-          # The dispatch UI offers a fixed choice list, so "single" arrives as a
-          # bare word and the task travels beside it. The plan records the
-          # composed "single:<task>" form, which is what the attestation
-          # re-derives the cohort from.
-          if stage in ("single", "subset"):
+          # The dispatch UI offers a fixed choice list, so "single"/"subset"
+          # arrive as bare words and the tasks travel beside them. The plan
+          # records the composed "single:<task>"/"subset:<a,b>" form, which is
+          # what the attestation re-derives the cohort from. smoke5 is the
+          # historical five-task cohort: the catalog's first five rows.
+          if stage == "smoke5":
+              stage = "subset:" + ",".join(smoke5_task_ids(catalog))
+          elif stage in ("single", "subset"):
               named = os.environ.get("SINGLE_TASK_ID", "").strip()
               if not named:
                   raise SystemExit(f"{stage} stage requires single_task_id")
@@ -197,34 +418,48 @@ jobs:
                   source_sha=os.environ["SOURCE_SHA"],
                   prior_gate_run_id=prior_gate_run_id,
               )
-          selected_tasks = select_stage_tasks(suite, tasks, stage)
+          stage_tasks = select_stage_tasks(suite, tasks, stage)
+          try:
+              selected_tasks = shard_tasks(stage_tasks, shard_index, shard_count)
+          except ValueError as exc:
+              raise SystemExit(str(exc))
+          if len(selected_tasks) > MATRIX_JOB_LIMIT:
+              raise SystemExit(
+                  f"{len(selected_tasks)} legs exceed the {MATRIX_JOB_LIMIT}-job matrix "
+                  f"limit; dispatch shard_count >= {-(-len(stage_tasks) // MATRIX_JOB_LIMIT)}"
+              )
+          max_parallel = min(max_parallel_requested, len(selected_tasks))
 
           full_language_counts = {}
           for task in tasks:
-              config = bench / "tasks" / task / "task.toml"
-              if not config.is_file():
-                  raise SystemExit(f"missing SWE-bench-Live task: {task}")
-              with config.open("rb") as handle:
-                  task_config = tomllib.load(handle)
-              language = str((task_config.get("metadata") or {}).get("language") or "unknown")
+              language = str(trusted_tasks[task].get("language") or "unknown")
               full_language_counts[language] = full_language_counts.get(language, 0) + 1
 
           language_counts = {}
           matrix = []
+          stage_cap = stage_timeout_cap_seconds(suite, stage)
           for ordinal, task in enumerate(selected_tasks, start=1):
-              config = bench / "tasks" / task / "task.toml"
+              config = rendered / task / "task.toml"
               if not config.is_file():
                   raise SystemExit(f"missing SWE-bench-Live task: {task}")
               with config.open("rb") as handle:
                   task_config = tomllib.load(handle)
               language = str((task_config.get("metadata") or {}).get("language") or "unknown")
               language_counts[language] = language_counts.get(language, 0) + 1
+              uncapped = resolve_budget(
+                  config,
+                  multiplier=5.0,
+                  max_timeout_sec=stage_cap,
+                  overhead_extension_sec=GT_OVERHEAD_EXTENSION_SECONDS,
+              )
+              capped = float(uncapped["execution_budget_sec"]) > HOSTED_EXECUTION_CAP_SECONDS
+              hosted_cap = HOSTED_EXECUTION_CAP_SECONDS - GT_OVERHEAD_EXTENSION_SECONDS
               budget = resolve_budget(
                   config,
                   multiplier=5.0,
-                  max_timeout_sec=stage_timeout_cap_seconds(suite, stage),
+                  max_timeout_sec=min(stage_cap, hosted_cap) if stage_cap else hosted_cap,
                   overhead_extension_sec=GT_OVERHEAD_EXTENSION_SECONDS,
-              )
+              ) if capped else uncapped
               # Pier applies this multiplier to task.toml's timeout. Keep the
               # outer enforcement identical to the resolved/capped plan.
               budget["timeout_multiplier"] = (
@@ -251,6 +486,9 @@ jobs:
                           30,
                           int(float(budget["execution_budget_sec"]) - SUPERVISOR_GRACE_SECONDS),
                       ),
+                      "hosted_execution_cap_seconds": HOSTED_EXECUTION_CAP_SECONDS,
+                      "execution_budget_capped": capped,
+                      "uncapped_execution_budget_seconds": int(uncapped["execution_budget_sec"]),
                       "task_config_sha256": budget["task_config_sha256"],
                       "container_image": manifest_task["container_image"],
                       "container_digest": manifest_task["container_digest"],
@@ -258,12 +496,9 @@ jobs:
               )
           treatment = os.environ["TREATMENT"].strip().lower()
           if treatment != "groundtruth":
-              raise SystemExit("paid smoke is GT-only; no GT-off baseline exists for SWE-bench-Live")
-          provider_route, provider_route_sha256 = load_route(
-              Path("config/provider_route_deepseek_v4_flash_0731_fp8.v1.json")
-          )
-          # Same declared cohort pacing as the DeepSWE workflow: smaller
-          # matrix, identical jitterless-retry exposure inside each leg.
+              raise SystemExit("paid run is GT-only; no GT-off baseline exists for SWE-bench-Live")
+          # Same declared cohort pacing as the DeepSWE workflow: identical
+          # jitterless-retry exposure inside each leg, read from the route.
           pacing = dict(provider_route.get("retry_pacing") or {})
           try:
               cohort_pacing = {
@@ -301,11 +536,19 @@ jobs:
                   "commit": official_evaluator_commit,
               },
               "benchmark_sha": manifest_sha256,
+              "catalog": {
+                  "path": "config/swelive_lite_catalog_v1.json",
+                  "sha256": catalog_digest,
+                  "task_count": catalog["task_count"],
+                  "excluded": catalog["excluded"],
+              },
               "task_config_identity": TASK_CONFIG_IDENTITY,
               "task_ids": selected_tasks,
               "task_count": len(selected_tasks),
               "task_order_sha256": hashlib.sha256(("\n".join(selected_tasks) + "\n").encode()).hexdigest(),
               "cohort_stage": stage,
+              "shard": {"index": shard_index, "count": shard_count, "method": "strided"},
+              "stage_task_count": len(stage_tasks),
               "gate_task_id": suite.gate_task_id,
               "full_task_count": len(tasks),
               "full_task_order_sha256": hashlib.sha256(("\n".join(tasks) + "\n").encode()).hexdigest(),
@@ -313,12 +556,20 @@ jobs:
               "prior_gate": prior_gate,
               "language_counts": language_counts,
               "attempts_per_task": 1,
-              "max_parallel": min(20, len(selected_tasks)),
+              "max_parallel": max_parallel,
+              "max_parallel_requested": max_parallel_requested,
+              "hosted_job_timeout_minutes": HOSTED_JOB_TIMEOUT_MINUTES,
               "cohort_pacing": cohort_pacing,
               "agent": "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent",
               "agent_scaffold": "mini-swe-agent",
               "agent_scaffold_version": "2.4.6",
               "treatment": treatment,
+              "gt_off_arm": False,
+              "gt_delivery_mode": delivery_mode,
+              "step_limit": step_limit,
+              "temperature": temperature,
+              "reasoning_effort": provider_route.get("reasoning_effort", ""),
+              "provider_route": provider_route,
               "provider_route_id": provider_route["route_id"],
               "provider_route_sha256": provider_route_sha256,
               "requested_model": provider_route["model"],
@@ -340,40 +591,44 @@ jobs:
               },
               "matrix": matrix,
           }
-          Path("swelive-plan.json").write_text(
+          Path("plan/swelive-plan.json").write_text(
               json.dumps(receipt, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
+          # The job matrix carries only what a task leg reads; the full rows
+          # (digests, caps) live in the uploaded plan. At 256 legs the full
+          # rows exceed the 128 KiB a single environment string may hold.
+          leg_keys = (
+              "ordinal", "task", "container_image", "container_digest",
+              "agent_timeout_multiplier", "time_budget_seconds",
+          )
+          legs = [{key: row[key] for key in leg_keys} for row in matrix]
+          outputs = {
+              "matrix": json.dumps({"include": legs}, separators=(",", ":")),
+              "task_count": len(selected_tasks),
+              "task_order_sha256": receipt["task_order_sha256"],
+              "max_parallel": max_parallel,
+              "model": provider_route["model"],
+              "gt_delivery_mode": delivery_mode,
+              "reasoning_effort": provider_route.get("reasoning_effort", ""),
+              "temperature": temperature,
+              "step_limit": step_limit,
+              "provider_base_url": provider_route["base_url"],
+              "provider_routing_json": json.dumps(
+                  provider_route["provider_routing"], separators=(",", ":")
+              ),
+              **cohort_pacing,
+          }
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("matrix=" + json.dumps({"include": matrix}, separators=(",", ":")) + "\n")
-              output.write(f"task_count={len(selected_tasks)}\n")
-              output.write(f"task_order_sha256={receipt['task_order_sha256']}\n")
-              output.write(f"model={provider_route['model']}\n")
-              output.write(f"provider_base_url={provider_route['base_url']}\n")
-              output.write(
-                  f"dispatch_stagger_seconds={cohort_pacing['dispatch_stagger_seconds']}\n"
-              )
-              output.write(
-                  f"retry_jitter_max_seconds={cohort_pacing['retry_jitter_max_seconds']}\n"
-              )
-              output.write(
-                  f"retry_after_cap_seconds={cohort_pacing['retry_after_cap_seconds']}\n"
-              )
-              output.write(
-                  f"model_retry_attempts={cohort_pacing['model_retry_attempts']}\n"
-              )
-              output.write(
-                  "provider_routing_json="
-                  + json.dumps(provider_route["provider_routing"], separators=(",", ":"))
-                  + "\n"
-              )
+              for key, value in outputs.items():
+                  output.write(f"{key}={value}\n")
           PY
 
-      - name: Upload the immutable SWE-bench-Live plan
+      - name: Upload the immutable SWE-bench-Live plan and rendered route
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: gt-harness-swelive-plan-${{ github.run_id }}
-          path: swelive-plan.json
+          path: plan/
           if-no-files-found: error
 
   readiness:
@@ -428,27 +683,31 @@ jobs:
     needs: [plan, readiness, readiness_binding]
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      TASK_MATRIX: ${{ needs.plan.outputs.matrix }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.plan.outputs.source_sha }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      - name: Download the immutable plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: gt-harness-swelive-plan-${{ github.run_id }}
+          path: plan
+
       - name: Verify all exact task-image manifests without provider access
         run: |
           set -euo pipefail
-          printf '%s' "$TASK_MATRIX" | jq -c '.include[]' | while read -r TASK_ROW; do
-            TASK="$(printf '%s' "$TASK_ROW" | jq -r '.task')"
-            IMAGE="$(printf '%s' "$TASK_ROW" | jq -r '.container_image')"
-            DIGEST="$(printf '%s' "$TASK_ROW" | jq -r '.container_digest')"
-            test -n "$TASK" && test -n "$IMAGE"
-            printf '%s' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
-            IMAGE_REF="${IMAGE}@${DIGEST}"
-            RAW_MANIFEST="$(mktemp)"
-            docker buildx imagetools inspect --raw "$IMAGE_REF" > "$RAW_MANIFEST"
-            test -s "$RAW_MANIFEST"
-            OBSERVED="$(sha256sum "$RAW_MANIFEST" | awk '{print $1}')"
-            test "sha256:${OBSERVED}" = "${DIGEST}"
-            printf '%s %s\n' "$TASK" "$IMAGE_REF"
-            rm -f "$RAW_MANIFEST"
-          done
+          # One anonymous registry HEAD per planned image, BY DIGEST: a 200
+          # served under the pinned digest proves that exact manifest is still
+          # pullable. HEADs do not count against Docker Hub's anonymous pull
+          # limit, which one manifest GET per task from this single runner (up
+          # to 256) would exhaust. Content integrity is enforced again where
+          # it is consumed: each task job pulls image@digest.
+          python -m scripts.build_swelive_catalog confirm-images --plan plan/swelive-plan.json
 
   provider_gate:
     # Approval guard marker: if: ${{ inputs.approve_paid_run == true }}
@@ -470,17 +729,26 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Download the immutable plan and the rendered launch route
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: gt-harness-swelive-plan-${{ github.run_id }}
+          path: plan
+
       - name: Verify credential, account limit, and exact model before the matrix
         id: preflight
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
           PLANNED_TASK_COUNT: ${{ needs.plan.outputs.task_count }}
+          MODEL: ${{ needs.plan.outputs.model }}
         run: |
           set -euo pipefail
           # --expected-tasks or the funds gate prices a single task and
-          # clears a key that cannot pay for the rest of the cohort.
+          # clears a key that cannot pay for the rest of the cohort. The
+          # manifest is the route rendered from the launch inputs, never a
+          # checked-in one.
           python -m scripts.provider_preflight \
-            --manifest config/provider_route_deepseek_v4_flash_0731_fp8.v1.json \
+            --manifest plan/provider-route.json \
             --source-sha "${{ needs.plan.outputs.source_sha }}" \
             --output provider-gate.json \
             --expected-tasks "${{ needs.plan.outputs.task_count }}" \
@@ -520,6 +788,15 @@ jobs:
                   f"{planned}"
               )
               raise SystemExit(1)
+          # The gate certified the route the plan rendered and attested, for
+          # the model chosen at launch - not some other manifest.
+          route = json.loads(Path("plan/provider-route.json").read_text(encoding="utf-8"))
+          if receipt.get("model") != route.get("model") or route.get("model") != os.environ["MODEL"]:
+              print("::error title=Provider route::preflight model differs from the launch route")
+              raise SystemExit(1)
+          if receipt.get("provider_routing") != route.get("provider_routing"):
+              print("::error title=Provider route::preflight routing differs from the launch route")
+              raise SystemExit(1)
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               output.write(f"context_window_tokens={receipt['context_window_tokens']}\n")
               output.write(f"reserved_output_tokens={receipt['reserved_output_tokens']}\n")
@@ -539,21 +816,25 @@ jobs:
     if: ${{ always() && inputs.approve_paid_run == true && needs.provider_gate.result == 'success' }}
     needs: [plan, readiness, readiness_binding, image_digest_gate, provider_gate]
     runs-on: ubuntu-latest
-    # The agent may use the full 5x 1,800-second allowance. Reserve another
-    # hour for the pre-spend and final official evaluator invocations, plus
-    # checkout and artifact sealing.
-    timeout-minutes: 240
+    # GitHub-hosted jobs die at 360 minutes. The planner caps each task's
+    # execution budget to HOSTED_JOB_TIMEOUT_MINUTES (this value) minus the
+    # staging and two-evaluator reserve, and records the cap per task, so the
+    # trial and both official grades fit inside this ceiling.
+    timeout-minutes: 355
     strategy:
       fail-fast: false
-      # The Lite smoke cohort is five independent tasks. Run the complete selected
-      # cohort concurrently; provider throttling is recorded as infrastructure
-      # evidence and never reclassified as a task solve/loss.
-      max-parallel: 20
+      # Concurrency is a launch input (max_parallel), bounded by the shard.
+      # Provider throttling is recorded as infrastructure evidence and never
+      # reclassified as a task solve/loss.
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max_parallel) }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       TASK: ${{ matrix.task }}
       ORDINAL: ${{ matrix.ordinal }}
+      MAX_PARALLEL: ${{ needs.plan.outputs.max_parallel }}
       MODEL: ${{ needs.plan.outputs.model }}
+      GT_DELIVERY_MODE: ${{ needs.plan.outputs.gt_delivery_mode }}
+      STEP_LIMIT: ${{ needs.plan.outputs.step_limit }}
       GT_RETRIEVAL_MODE: hybrid_required
       GT_TREATMENT: groundtruth
       GT_JOURNAL_TEE: "1"
@@ -565,6 +846,12 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
+
+      - name: Materialize this task's package from the pinned catalog
+        run: |
+          set -euo pipefail
+          # Refuses a package whose task.toml does not hash to the catalog.
+          python -m scripts.build_swelive_catalog materialize --tasks "$TASK"
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
@@ -951,21 +1238,24 @@ jobs:
           STAGGER_SECONDS: ${{ needs.plan.outputs.dispatch_stagger_seconds }}
         run: |
           set -euo pipefail
-          # Declared cohort pacing from the immutable plan: the ordinal
-          # stagger spreads the initial request burst across legs sharing one
-          # provider account ceiling.
-          delay=$(( (ORDINAL - 1) * STAGGER_SECONDS ))
-          echo "cohort pacing: ordinal=${ORDINAL} stagger=${STAGGER_SECONDS}s delay=${delay}s"
+          # Staggered by concurrency slot, not ordinal: with max-parallel legs
+          # in flight, an ordinal stagger would idle late legs for no benefit
+          # (ordinal 250 would sleep for hours). The slot spreads the initial
+          # request burst across legs sharing one provider account ceiling.
+          slot=$(( (ORDINAL - 1) % MAX_PARALLEL ))
+          delay=$(( ((ORDINAL - 1) % MAX_PARALLEL) * STAGGER_SECONDS ))
+          echo "cohort pacing: ordinal=${ORDINAL} slot=${slot} stagger=${STAGGER_SECONDS}s delay=${delay}s"
           sleep "$delay"
 
       - name: Run SWE-bench-Live through the released gt-harness run boundary
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW }}
+          OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
           OPENAI_BASE_URL: ${{ needs.plan.outputs.provider_base_url }}
           GT_PROVIDER_CONTEXT_WINDOW_TOKENS: ${{ needs.provider_gate.outputs.context_window_tokens }}
           GT_PROVIDER_RESERVED_OUTPUT_TOKENS: ${{ needs.provider_gate.outputs.reserved_output_tokens }}
           GT_PROVIDER_CONTEXT_WINDOW_SOURCE: ${{ needs.provider_gate.outputs.context_window_source }}
           GT_PROVIDER_ROUTING_JSON: ${{ needs.plan.outputs.provider_routing_json }}
+          GT_REASONING_EFFORT: ${{ needs.plan.outputs.reasoning_effort }}
           GT_PROVIDER_RETRY_JITTER_MAX_SECONDS: ${{ needs.plan.outputs.retry_jitter_max_seconds }}
           GT_PROVIDER_RETRY_AFTER_CAP_SECONDS: ${{ needs.plan.outputs.retry_after_cap_seconds }}
           MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT: ${{ needs.plan.outputs.model_retry_attempts }}
@@ -1007,7 +1297,7 @@ jobs:
           MONITOR_PID=$!
           set +e
           python benchmarks/swelive_harness/run_pier.py run \
-            -p swelive-bench/tasks \
+            -p swelive-bench/rendered \
             --include-task-name "$TASK" \
             --agent-import-path eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent \
             -m "$MODEL" \
@@ -1020,8 +1310,10 @@ jobs:
             -y \
             --ak task_id="$TASK" \
             --ak product_source_sha="${{ needs.plan.outputs.source_sha }}" \
-            --ak temperature=1.0 \
-            --ak max_iterations=0 \
+            --ak temperature="${{ needs.plan.outputs.temperature }}" \
+            --ak max_iterations="${{ needs.plan.outputs.step_limit }}" \
+            --ak step_limit="${{ needs.plan.outputs.step_limit }}" \
+            --ak gt_delivery_mode="${{ needs.plan.outputs.gt_delivery_mode }}" \
             --ak time_budget_seconds="${{ matrix.time_budget_seconds }}" \
             2>&1 | tee pier-stdout.log
           pier_status=${PIPESTATUS[0]}
@@ -1213,6 +1505,60 @@ jobs:
           sudo chown -R --no-dereference "$(id -u):$(id -g)" results/swelive
           chmod -R u+rwX results/swelive
 
+      - name: Emit the official-verifier progress receipt with the GT delivery received
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.benchmark_progress emit-official \
+            --root results/swelive \
+            --suite swelive \
+            --task-id "$TASK" \
+            --output benchmark-progress.json
+          # The independent official grade and the launch identity ride on the
+          # same row, so the summary reads one record per task.
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path("benchmark-progress.json")
+          progress = json.loads(path.read_text(encoding="utf-8"))
+          grade_path = Path("results/swelive/official-evaluator/official-grade.json")
+          grade = json.loads(grade_path.read_text(encoding="utf-8")) if grade_path.is_file() else {}
+          progress.update({
+              "model": os.environ["MODEL"],
+              "effective_model": "openai/" + os.environ["MODEL"],
+              "treatment_sha": os.environ["SOURCE_SHA"],
+          })
+          progress["tasks"] = [{
+              **progress["tasks"][0],
+              "official_evaluator": {
+                  "present": bool(grade),
+                  "reward": grade.get("reward"),
+                  "patch_source": grade.get("patch_source"),
+                  "cross_verified": grade.get("cross_verified"),
+              },
+          }]
+          path.write_text(json.dumps(progress, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          # The delivery the agent actually received, read back from the
+          # runner's own report: an attached run whose graph never became
+          # ready is treatment-invalid and must not count as a GT result.
+          python -m scripts.annotate_gt_delivery \
+            --results results/swelive \
+            --progress benchmark-progress.json \
+            --requested-mode "$GT_DELIVERY_MODE" \
+            --requested-step-limit "$STEP_LIMIT"
+        env:
+          SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
+
+      - name: Upload the task progress receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: benchmark-progress-swelive-${{ github.run_id }}-${{ matrix.ordinal }}
+          path: benchmark-progress.json
+          if-no-files-found: error
+
       - name: Upload SWE-bench-Live verifier and GT Harness product evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -1220,6 +1566,94 @@ jobs:
           name: gt-harness-swelive-task-${{ matrix.ordinal }}-${{ github.run_id }}
           path: results/swelive/
           if-no-files-found: error
+
+  summarize:
+    # A skipped matrix (a failed gate) has no receipts to aggregate; reporting
+    # every task as a missing artifact would read as an infrastructure wipe.
+    if: ${{ always() && needs.plan.result == 'success' && needs.task.result != 'skipped' }}
+    needs: [plan, task]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.plan.outputs.source_sha }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: benchmark-progress-swelive-${{ github.run_id }}-*
+          path: receipts
+          merge-multiple: false
+
+      - name: Download the immutable plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: gt-harness-swelive-plan-${{ github.run_id }}
+          path: plan
+
+      - name: Aggregate the official-verifier receipts and count treatment validity
+        env:
+          MODEL: ${{ needs.plan.outputs.model }}
+          GT_DELIVERY_MODE: ${{ needs.plan.outputs.gt_delivery_mode }}
+          STEP_LIMIT: ${{ needs.plan.outputs.step_limit }}
+          SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p receipts
+          python -m scripts.benchmark_progress aggregate \
+            --root receipts \
+            --expected-tasks-json "$(jq -c '.task_ids' plan/swelive-plan.json)" \
+            --finalize-missing \
+            --output swelive-summary.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path("swelive-summary.json")
+          out = json.loads(path.read_text(encoding="utf-8"))
+          delivered = [row.get("gt_delivery") or {} for row in out.get("tasks", [])]
+          out.update({
+              "model": os.environ["MODEL"],
+              "effective_model": "openai/" + os.environ["MODEL"],
+              "gt_delivery_mode": os.environ["GT_DELIVERY_MODE"],
+              "step_limit": int(os.environ["STEP_LIMIT"]),
+              "gt_off_arm": False,
+              "treatment_sha": os.environ["SOURCE_SHA"],
+              "treatment_invalid_count": sum(1 for d in delivered if d.get("treatment_valid") is False),
+              "step_limit_mismatch_count": sum(1 for d in delivered if d.get("step_limit_matches") is False),
+              # Solves that count as GT results: officially graded passes whose
+              # delivered treatment was valid.
+              "passed_treatment_valid": sum(
+                  1 for row in out.get("tasks", [])
+                  if row.get("state") == "passed"
+                  and (row.get("gt_delivery") or {}).get("treatment_valid") is True
+              ),
+          })
+          path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          lines = [
+              f"## SWE-bench-Live Lite GT-on: {out['model']} ({out['gt_delivery_mode']})",
+              "",
+              f"- tasks: {out['total']} | officially graded: {out['officially_graded']} | "
+              f"passed: {out['passed']} | infrastructure failed: {out['infrastructure_failed']}",
+              f"- treatment invalid: {out['treatment_invalid_count']} | "
+              f"step-limit mismatches: {out['step_limit_mismatch_count']} | "
+              f"passed with valid treatment: {out['passed_treatment_valid']}",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          print(json.dumps(out, sort_keys=True))
+          PY
+
+      - name: Upload the cohort summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gt-harness-swelive-summary-${{ github.run_id }}
+          path: swelive-summary.json
+          if-no-files-found: warn
 
   attest:
     if: ${{ always() && inputs.approve_paid_run == true }}
@@ -1249,7 +1683,7 @@ jobs:
           python -c "import subprocess, sys; from eval.miniswe_agent import MiniSweAgent; subprocess.run([sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '--no-deps', str(MiniSweAgent._gt_wheel())], check=True)"
           python -c "import groundtruth.runtime.gateway"
 
-      - name: Download immutable plan
+      - name: Download immutable plan and rendered launch route
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: gt-harness-swelive-plan-${{ github.run_id }}

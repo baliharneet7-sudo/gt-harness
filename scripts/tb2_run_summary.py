@@ -116,6 +116,12 @@ def render_task(
     return "\n".join(lines)
 
 
+def _same_model(a: str, b: str) -> bool:
+    """Model ids compared by their final path segment: `openai/deepseek/x`,
+    `deepseek/x` and `x` name one model."""
+    return a.rsplit("/", 1)[-1].lower() == b.rsplit("/", 1)[-1].lower()
+
+
 def render_run(summary: dict[str, Any], cohort: dict[str, Any] | None = None) -> str:
     baseline_rewards = (cohort or {}).get("baseline_rewards") or {}
     rows = summary.get("tasks") or []
@@ -145,6 +151,20 @@ def render_run(summary: dict[str, Any], cohort: dict[str, Any] | None = None) ->
         f"- regressions **{len(regressions)}**, gains **{len(gains)}**",
         f"- infrastructure failures {summary.get('infrastructure_failed', 0)}",
     ]
+    baseline_model = str(((cohort or {}).get("baseline") or {}).get("model") or "")
+    run_model = str(summary.get("model") or "")
+    if baseline_model and run_model and not _same_model(run_model, baseline_model):
+        lines.insert(2, (
+            f"> **Context only:** the baseline is GT-off `{baseline_model}`; this run is "
+            f"`{run_model}`. Per-task regressions and gains below compare two models, "
+            "not GT against no GT."
+        ))
+    if summary.get("gt_delivery_mode"):
+        lines.append(
+            f"- GT delivery **{summary['gt_delivery_mode']}**; treatment invalid "
+            f"{summary.get('treatment_invalid_count', 0)}, step-limit mismatches "
+            f"{summary.get('step_limit_mismatch_count', 0)}"
+        )
     excluded = summary.get("excluded") or []
     if excluded:
         named = ", ".join(f"{row['task']} ({row['reason']})" for row in excluded)

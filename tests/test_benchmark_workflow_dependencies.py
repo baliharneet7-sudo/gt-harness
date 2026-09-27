@@ -87,8 +87,10 @@ def test_live_gt_smoke_is_miniswe_official_and_bound_to_the_imported_source() ->
     assert re.fullmatch(r"[0-9a-f]{40}", manifest["gt_source_commit"])
     assert "uses: ./.github/workflows/swelive_gt_harness_paid.yaml" in dispatcher
     assert "secrets: inherit" in dispatcher
-    assert "secrets.OPENROUTER_NEW" in workflow
-    assert "max-parallel: 20" in workflow
+    assert "secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY" in workflow
+    assert "max-parallel: ${{ fromJSON(needs.plan.outputs.max_parallel) }}" in workflow or (
+        "max-parallel: ${{" in workflow
+    )
     assert "mini-swe-agent\"))')\" = \"2.4.6\"" in workflow
     assert "openhands" not in workflow.lower()
     assert "python -m swebench.harness.run_evaluation" in workflow
@@ -98,61 +100,47 @@ def test_live_gt_smoke_is_miniswe_official_and_bound_to_the_imported_source() ->
     assert "needs: [plan, readiness, readiness_binding]" in workflow
 
 
-def test_benchmark_model_pin_is_the_single_source_of_truth() -> None:
-    pin = load_model_pin()
-    model = pin["model"]
-    effective = pin["effective_model"]
-    tb2_route = ROOT / pin["tb2_route_manifest"]
-    swelive_route = ROOT / pin["swelive_route_manifest"]
+def test_no_benchmark_workflow_bakes_in_a_model() -> None:
+    """The model is chosen at launch, on every benchmark and every account.
 
-    assert pin["schema"] == "gt.benchmark_model.v1"
-    assert effective == f"openai/{model}"
+    The frozen single model pin (config/benchmark_model.v1.json) made every
+    GT-on run a DeepSeek run whatever the launcher intended; three dispatches
+    bounced from partial repins of it. Now each paid workflow takes the model
+    as a required input, renders its provider route from the launch inputs,
+    and certifies that rendered route - so no model id, route manifest, or
+    provider lock may appear as a literal in any of them.
+    """
+    import yaml
 
-    # Both routing tables.
-    for route_path in (tb2_route, swelive_route):
-        route = json.loads(route_path.read_text(encoding="utf-8"))
-        assert route["model"] == model, route_path.name
-        assert route["provider_routing"]["only"] == pin["provider_only"], route_path.name
-        # The served format is requested on every call, not just checked after.
-        assert route["provider_routing"]["quantizations"] == [
-            route["expected_quantization"]
-        ], route_path.name
-
-    # The route manifest referenced by each paid workflow, so a repin that
-    # leaves one workflow bound to a retired manifest fails here.
-    route_pattern = re.compile(r"config/provider_route_[A-Za-z0-9_.]+\.json")
-    tb2 = WORKFLOWS[0].read_text(encoding="utf-8")
-    dispatcher = WORKFLOWS[1].read_text(encoding="utf-8")
-    swelive = (
-        ROOT / ".github" / "workflows" / "swelive_gt_harness_paid.yaml"
-    ).read_text(encoding="utf-8")
-    attest = (ROOT / "scripts" / "attest_deepswe.py").read_text(encoding="utf-8")
-    assert set(route_pattern.findall(tb2)) == {pin["tb2_route_manifest"]}
-    assert set(route_pattern.findall(swelive)) == {pin["swelive_route_manifest"]}
-    assert Path(pin["swelive_route_manifest"]).name in attest
-
-    # Every model literal in every consumer, including the run-name banners.
-    model_pattern = re.compile(r"deepseek/deepseek-[A-Za-z0-9.\-]+")
-    for name, text in (
-        ("tb2_miniswe_central.yml", tb2),
-        ("swebench_live_lite_full.yml", dispatcher),
-        ("swelive_gt_harness_paid.yaml", swelive),
-        ("attest_deepswe.py", attest),
-    ):
-        found = set(model_pattern.findall(text))
-        assert found <= {model}, f"{name} names a different model: {sorted(found)}"
-    assert f"MODEL: {model}" in tb2
-    assert f'"model": "{model}"' in tb2
-    assert f'"effective_model": "{effective}"' in tb2
-    assert f'--effective-model "{effective}"' in tb2
-    assert f'"only": {json.dumps(pin["provider_only"])}' in tb2
-    assert '"quantizations": ["fp8"]' in tb2
-    assert model in dispatcher
-
-    manifest = json.loads(
-        (ROOT / "config" / "tb2_gt_import_manifest.json").read_text(encoding="utf-8-sig")
-    )
-    assert manifest["model"] == model
+    workflows = ROOT / ".github" / "workflows"
+    paid = {
+        "tb2_miniswe_central.yml": "workflow_dispatch",
+        "deepswe_gt_delivery_ab.yml": "workflow_dispatch",
+        "deepswe_miniswe_central.yml": "workflow_dispatch",
+        "swelive_gt_harness_paid.yaml": "workflow_dispatch",
+        "swebench_live_lite_full.yml": "workflow_dispatch",
+    }
+    retired = [
+        re.compile(r"deepseek/deepseek-[A-Za-z0-9.\-]+"),
+        re.compile(r"config/provider_route_[A-Za-z0-9_.]+\.json"),
+        re.compile(r"921bec20"),
+        re.compile(r'"only":\s*\["streamlake"\]'),
+    ]
+    for name, trigger in paid.items():
+        text = (workflows / name).read_text(encoding="utf-8")
+        for pattern in retired:
+            assert not pattern.search(text), f"{name} still names {pattern.pattern}"
+        inputs = yaml.safe_load(text)[True][trigger]["inputs"]
+        assert inputs["model"]["required"] is True, name
+        assert "default" not in inputs["model"], name
+    # Each workflow that runs the preflight itself certifies the route it
+    # rendered from the launch inputs, never a checked-in manifest.
+    for name in ("tb2_miniswe_central.yml", "deepswe_gt_delivery_ab.yml",
+                 "swelive_gt_harness_paid.yaml"):
+        text = (workflows / name).read_text(encoding="utf-8")
+        assert "python -m scripts.render_provider_route" in text, name
+        assert re.search(r"--manifest \S*plan/provider-route\.json", text), name
+        assert "OPENROUTER_NEW" in text and "OPENROUTER_API_KEY" in text, name
 
 
 def test_tb2_planner_excludes_musl_tasks_it_cannot_install_into() -> None:
@@ -182,12 +170,9 @@ def test_progress_and_summary_jobs_cannot_outlive_a_failed_plan() -> None:
     engine = (
         ROOT / ".github" / "workflows" / "tb2_miniswe_engine.yml"
     ).read_text(encoding="utf-8")
-    deepswe = (
-        ROOT / ".github" / "workflows" / "deepswe_miniswe_central.yml"
-    ).read_text(encoding="utf-8")
     tb2 = WORKFLOWS[0].read_text(encoding="utf-8")
 
-    for name, text in (("engine", engine), ("deepswe", deepswe)):
+    for name, text in (("engine", engine),):
         progress = text.index("\n  task_progress:")
         following = text.index("uses: ./.github/workflows/task_progress.yml", progress)
         block = text[progress:following]
@@ -221,11 +206,8 @@ def test_agent_import_paths_are_resolved_before_any_matrix_fan_out() -> None:
     engine = (
         ROOT / ".github" / "workflows" / "tb2_miniswe_engine.yml"
     ).read_text(encoding="utf-8")
-    deepswe = (
-        ROOT / ".github" / "workflows" / "deepswe_miniswe_central.yml"
-    ).read_text(encoding="utf-8")
 
-    for name, text in (("engine", engine), ("deepswe", deepswe)):
+    for name, text in (("engine", engine),):
         guard = "Resolve the exact agent import path before any matrix fan-out"
         assert guard in text, name
         # The guard runs in `plan`, which is the only job before the fan-out.
@@ -256,45 +238,51 @@ def _declared_agent_import_path(text: str) -> str:
 
 
 def test_dispatched_agent_import_path_resolves_to_a_module_that_exists() -> None:
-    # The deepswe env pinned `eval.pier_gt_adapter:PierMiniSweCentralAgent`,
-    # which exists on no branch of this repository - so the plan-stage guard
-    # that resolves it could only ever fail, and a literal pin in the test kept
-    # the broken string alive.  Import whatever the workflow declares: the
-    # dispatcher's own string, resolved the way the guard resolves it.
-    deepswe = (
-        ROOT / ".github" / "workflows" / "deepswe_miniswe_central.yml"
+    # The deepswe env once pinned `eval.pier_gt_adapter:PierMiniSweCentralAgent`,
+    # which exists on no branch of this repository.  Import whatever the GT-on
+    # pipeline actually hands Pier, resolved the way Pier resolves it.
+    pipeline = (
+        ROOT / ".github" / "workflows" / "deepswe_gt_delivery_ab.yml"
     ).read_text(encoding="utf-8")
-    literal = _declared_agent_import_path(deepswe)
-    # Including the header comment, which described the deleted gt_central_agent.
-    assert "eval.pier_gt_adapter:" not in deepswe
-    assert "gt_central_agent" not in deepswe
+    literals = set(re.findall(r"--agent-import-path\s+(\S+)", pipeline))
+    assert len(literals) == 1, literals
+    literal = literals.pop()
+    assert "eval.pier_gt_adapter:" not in pipeline
+    assert "gt_central_agent" not in pipeline
 
     module, _, symbol = literal.partition(":")
     imported = importlib.import_module(module)
     assert isinstance(getattr(imported, symbol), type), literal
-    # The retired path really is absent; the guard's error message says so.
     assert not (ROOT / "eval" / "pier_gt_adapter.py").exists()
 
 
-def test_deepswe_import_guard_installs_first_and_blames_the_right_module() -> None:
-    # Two defects in one guard: it ran before any install, so a present adapter
-    # whose dependency was missing looked identical to an absent one; and
-    # `except ModuleNotFoundError: spec = None` threw away the one piece of
-    # evidence that tells those apart.
-    deepswe = (
-        ROOT / ".github" / "workflows" / "deepswe_miniswe_central.yml"
-    ).read_text(encoding="utf-8")
-    install = deepswe.index("Install the central runtime the guard resolves against")
-    guard = deepswe.index("Resolve the exact agent import path before any matrix fan-out")
-    assert install < guard
-    assert 'python -m pip install -e . "mini-swe-agent==2.2.8"' in deepswe
-    assert "except ModuleNotFoundError as exc:" in deepswe
-    assert "except ModuleNotFoundError:" not in deepswe
-    # find_spec imports the PARENT package, so only a miss on the target or on
-    # the package that contains it is the trap this guard exists for.
-    body = deepswe[guard:]
-    blame = body.index('missing = getattr(exc, "name", "") or ""')
-    assert body.index('if missing == module or module.startswith(f"{missing}.")') > blame
+def test_deepswe_entry_point_forwards_every_input_to_the_gt_on_pipeline() -> None:
+    """The filename registered on every account is a wrapper, not a lane.
+
+    GitHub dispatches only workflows whose file is on the default branch and
+    runs the version on the dispatched ref, so this stable filename is how any
+    account reaches the certified pipeline. A wrapper that drops an input runs
+    the pipeline with that input's default - silently a different experiment.
+    """
+    import yaml
+
+    workflows = ROOT / ".github" / "workflows"
+    wrapper = yaml.safe_load((workflows / "deepswe_miniswe_central.yml").read_text(encoding="utf-8"))
+    pipeline = yaml.safe_load((workflows / "deepswe_gt_delivery_ab.yml").read_text(encoding="utf-8"))
+    dispatched = wrapper[True]["workflow_dispatch"]["inputs"]
+    called = pipeline[True]["workflow_call"]["inputs"]
+    assert set(dispatched) == set(called) == set(pipeline[True]["workflow_dispatch"]["inputs"])
+    assert list(wrapper["jobs"]) == ["gt_on"]
+    job = wrapper["jobs"]["gt_on"]
+    assert job["uses"] == "./.github/workflows/deepswe_gt_delivery_ab.yml"
+    assert job["secrets"] == "inherit"
+    assert job["with"] == {name: f"${{{{ inputs.{name} }}}}" for name in called}
+    # The model is chosen at launch on both paths; nothing defaults it.
+    for inputs in (dispatched, called):
+        assert inputs["model"]["required"] is True and "default" not in inputs["model"]
+    text = (workflows / "deepswe_gt_delivery_ab.yml").read_text(encoding="utf-8")
+    assert "gt_off" not in text.replace("gt_off_arm", "")
+    assert "secrets.OPENROUTER_API_KEY || secrets.OPENROUTER_NEW" in text
 
 
 def test_engine_import_guard_blames_the_right_module_too() -> None:
@@ -430,7 +418,14 @@ def _run_preflight_gate(
     (tmp_path / _preflight_receipt_name(workflow)).write_text(
         json.dumps(receipt), encoding="utf-8"
     )
+    # The gate binds the receipt to the route rendered from the launch inputs,
+    # wherever the workflow downloads it to.
+    route = {"model": receipt["model"], "provider_routing": receipt["provider_routing"]}
+    for rendered in (tmp_path / "planned" / "plan", tmp_path / "plan"):
+        rendered.mkdir(parents=True, exist_ok=True)
+        (rendered / "provider-route.json").write_text(json.dumps(route), encoding="utf-8")
     environment = dict(os.environ)
+    environment["MODEL"] = receipt["model"]
     environment["PLANNED_TASK_COUNT"] = str(expected_tasks)
     environment["GITHUB_OUTPUT"] = str(tmp_path / "github-output.txt")
     return subprocess.run(

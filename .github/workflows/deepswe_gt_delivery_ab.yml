@@ -34,10 +34,9 @@ on:
         type: string
         default: "3"
       model:
-        description: "OpenRouter model id; empty = config/provider_route.v1.json"
-        required: false
+        description: "OpenRouter model id chosen at launch (bare id, e.g. stealth/space-bunny-alpha)"
+        required: true
         type: string
-        default: ""
       provider_only:
         description: "Comma list of OpenRouter provider tags; empty = template/none"
         required: false
@@ -55,6 +54,79 @@ on:
         default: false
       reasoning_effort:
         description: "minimal|low|medium|high|xhigh|max; empty = not sent (the leaderboard row records its own)"
+        required: false
+        type: string
+        default: ""
+      temperature:
+        description: "Sampling temperature"
+        required: false
+        type: string
+        default: "1.0"
+      step_limit:
+        description: "Agent step limit; 0 = time budget only"
+        required: false
+        type: string
+        default: "300"
+      provider_failure_threshold:
+        description: "Pre-declared: legs with more provider_failed_calls are excluded"
+        required: false
+        type: string
+        default: "10"
+      readiness_run_id:
+        description: "Completed provider-free readiness workflow run ID (reuse; no rerun)"
+        required: false
+        type: string
+        default: ""
+
+  workflow_call:
+    inputs:
+      approve_paid_run:
+        description: "Explicit approval for authenticated paid provider requests"
+        required: false
+        type: boolean
+        default: false
+      tasks:
+        description: "control10 | all | comma-separated task ids (legs must stay <= 256)"
+        required: false
+        type: string
+        default: "control10"
+      arms:
+        description: "Delivery arms"
+        required: false
+        type: string
+        default: "both"
+      n_runs:
+        description: "Runs per task per arm"
+        required: false
+        type: string
+        default: "4"
+      max_parallel:
+        description: "Concurrent legs (rate limiting contaminated earlier runs at 9)"
+        required: false
+        type: string
+        default: "3"
+      model:
+        description: "OpenRouter model id chosen at launch (bare id, e.g. stealth/space-bunny-alpha)"
+        required: true
+        type: string
+      provider_only:
+        description: "Comma list of OpenRouter provider tags; empty = template/none"
+        required: false
+        type: string
+        default: ""
+      quantization:
+        description: "Comma list of required quantizations (e.g. fp8); empty = none"
+        required: false
+        type: string
+        default: ""
+      allow_fallbacks:
+        description: "Allow OpenRouter provider fallbacks when provider_only is set"
+        required: false
+        type: boolean
+        default: false
+      reasoning_effort:
+        description: "minimal|low|medium|high|xhigh|max; empty = not sent (the leaderboard row records\
+  \ its own)"
         required: false
         type: string
         default: ""
@@ -429,7 +501,7 @@ jobs:
       - name: Verify credential, account limit, and exact model before the matrix
         id: preflight
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY || secrets.OPENROUTER_NEW }}
           PLANNED_LEG_COUNT: ${{ needs.plan.outputs.leg_count }}
         run: |
           set -euo pipefail
@@ -830,7 +902,7 @@ jobs:
 
       - name: Run DeepSWE through the released gt-harness run boundary
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENROUTER_API_KEY || secrets.OPENROUTER_NEW }}
           OPENAI_BASE_URL: ${{ needs.plan.outputs.provider_base_url }}
           GT_PROVIDER_CONTEXT_WINDOW_TOKENS: ${{ needs.provider_gate.outputs.context_window_tokens }}
           GT_PROVIDER_RESERVED_OUTPUT_TOKENS: ${{ needs.provider_gate.outputs.reserved_output_tokens }}

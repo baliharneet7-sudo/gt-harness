@@ -51,6 +51,11 @@ SUPERVISOR_GRACE_SECONDS = 240
 # difference being visible. Token and step counts remain directly comparable;
 # wall-clock does not.
 GT_OVERHEAD_EXTENSION_SECONDS = 1500
+# A GitHub-hosted job is killed at 360 minutes whatever timeout-minutes says,
+# and the trial's artifacts die with it. Staging (images, bundle, language
+# servers) and official grading take up to ~35 minutes around the trial, so a
+# trial's execution budget is capped here and the cap recorded per task.
+MAX_HOSTED_EXECUTION_BUDGET_SECONDS = 320 * 60
 
 TASK_CONFIG_IDENTITY = "sha256_canonical_lf_v1"
 

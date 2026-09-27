@@ -1969,6 +1969,19 @@ def _audit_native_miniswe_task(
             f"harness exception_info present: {a.exception_info}"
         )
     a.verdict_reasons.extend(a.attribution_issues)
+    delivery_mode = report_delivery_mode(_read_json_document(report_path) or {})
+    a.feature_attribution = excuse_attached_withheld(
+        a.feature_attribution, delivery_mode
+    )
+    withheld = sorted(
+        feature_id for feature_id, item in a.feature_attribution.items()
+        if ATTACHED_WITHHELD_REASON in (item.get("reasons") or ())
+    )
+    if withheld:
+        a.notes.append(
+            f"attached delivery: {len(withheld)} push-path trigger(s) withheld by "
+            f"design ({ATTACHED_WITHHELD_REASON}): " + ", ".join(withheld)
+        )
     attribution_red = attribution_red_features(a.feature_attribution)
     if attribution_red:
         a.verdict_reasons.append(
@@ -3053,6 +3066,61 @@ def attribution_red_features(feature_attribution: dict) -> list[str]:
             continue
         red.append(feature_id)
     return sorted(red)
+
+
+# The named reason an attached-mode push-path trigger carries instead of RED.
+ATTACHED_WITHHELD_REASON = "attached_delivery_push_withheld"
+
+
+def report_delivery_mode(report: dict) -> str | None:
+    """The GT delivery mode the runner itself recorded (miniswe_report.json).
+
+    Read from the runner's own report, never from a workflow input: the audit
+    excuses withheld pushes only for a run that actually ran attached.
+    """
+    delivery = report.get("gt_delivery") if isinstance(report, dict) else None
+    if not isinstance(delivery, dict):
+        return None
+    mode = delivery.get("gt_delivery_mode")
+    return str(mode) if isinstance(mode, str) else None
+
+
+def excuse_attached_withheld(
+    feature_attribution: dict, delivery_mode: str | None
+) -> dict:
+    """Attached delivery withholds every push by design; name it, do not RED it.
+
+    In ``attached`` mode (gt_engine/attached_delivery.py, HAR-93) the push
+    pipeline runs in SHADOW: every GT computation still runs and its producers
+    still fire, but nothing is pushed into a request - the agent receives GT
+    through the gt-* tools and the grep augmentation instead. gt_engine's
+    attribution records such a fired-but-unpushed trigger as TRIGGERED_DARK,
+    which this audit (and scripts/gt_live_gate.py) would otherwise report as
+    "fired and the model never got it, unexplained" on every attached task.
+
+    Only TRIGGERED_DARK is re-stated, as SUPPRESSED_WITH_REASON carrying
+    ``attached_delivery_push_withheld``, with the original status and reasons
+    preserved under ``withheld_status``/``withheld_reasons``. A delivery that
+    was made and not exposed (DELIVERED_UNEXPOSED), an EXPOSED gap, and every
+    TELEMETRY_FAULT stay RED: attached mode makes no push deliveries, so those
+    are contrary evidence, not the design. Push mode is returned unchanged.
+    Returns a new mapping; the input is not mutated.
+    """
+    if delivery_mode != "attached":
+        return dict(feature_attribution or {})
+    excused: dict = {}
+    for feature_id, item in (feature_attribution or {}).items():
+        if isinstance(item, dict) and item.get("status") == "TRIGGERED_DARK":
+            excused[feature_id] = {
+                **item,
+                "status": "SUPPRESSED_WITH_REASON",
+                "reasons": [ATTACHED_WITHHELD_REASON],
+                "withheld_status": "TRIGGERED_DARK",
+                "withheld_reasons": list(item.get("reasons") or []),
+            }
+        else:
+            excused[feature_id] = item
+    return excused
 
 
 _MEMORY_PRESSURE_KEYS = (

@@ -10,6 +10,8 @@ from gt_engine.attribution import DIRECT_FEATURES
 from gt_engine.feature_matrix import digest_body
 from gt_harness.runtime_receipts import issue_runtime_receipts
 from scripts.attest_deepswe import _task_name, attest_deepswe
+from scripts.build_swelive_catalog import catalog_sha256, load_catalog
+from scripts.render_provider_route import render_route
 from scripts.benchmark_suites import (
     GATE_STAGE,
     load_suite,
@@ -23,15 +25,24 @@ from tests.conftest import write_certifiable_graph
 
 SWELIVE_TASK = "aiogram__aiogram-1594"
 SWELIVE_OTHER = "amoffat__sh-744"
-SWELIVE_TASKS = (
+# The suite binds the full pinned Lite catalog, in dataset-snapshot order; the
+# historical smoke five are its first five rows.
+SWELIVE_TASKS = tuple(row["task_id"] for row in load_catalog()["tasks"])
+SMOKE5 = (
     SWELIVE_TASK,
     SWELIVE_OTHER,
     "arviz-devs__arviz-2413",
     "aws-cloudformation__cfn-lint-3749",
     "aws-cloudformation__cfn-lint-3764",
 )
-REQUESTED = "deepseek/deepseek-v4-flash-0731"
-EFFECTIVE = "openai/deepseek/deepseek-v4-flash-0731"
+# A launch-time model: the route is rendered from it, never read from config.
+REQUESTED = "stealth/space-bunny-alpha"
+EFFECTIVE = "openai/stealth/space-bunny-alpha"
+ROUTE_TEMPLATE = Path(__file__).resolve().parents[1] / "config" / "provider_route.v1.json"
+
+
+def rendered_route(model: str = REQUESTED) -> dict:
+    return render_route(json.loads(ROUTE_TEMPLATE.read_text(encoding="utf-8")), model=model)
 
 
 def _write(path: Path, value: object) -> None:
@@ -46,6 +57,8 @@ def test_swelive_suite_binds_the_in_repo_cohort() -> None:
     )
     assert suite.suite_id == "swelive"
     assert suite.canonical_task_ids == SWELIVE_TASKS
+    assert len(SWELIVE_TASKS) == 300
+    assert SWELIVE_TASKS[:5] == SMOKE5
     assert suite.gate_task_id == SWELIVE_TASK
     assert suite.remainder_stage == "remaining"
     assert suite.all_stage == "all"
@@ -103,9 +116,9 @@ def test_task_name_resolves_suite_ids_containing_double_underscore() -> None:
 def _swelive_fixture(root: Path, source_sha: str = "f" * 40) -> Path:
     suite = load_suite("swelive")
     trusted = suite.trusted_tasks[SWELIVE_TASK]
-    route, route_digest = load_route(
-        Path(__file__).resolve().parents[1] / "config" / "provider_route_deepseek_v4_flash_0731_fp8.v1.json"
-    )
+    route_path = root / "provider-route.json"
+    _write(route_path, rendered_route())
+    route, route_digest = load_route(route_path)
     plan = {
         "schema": suite.plan_schema,
         "source_sha": source_sha,
@@ -117,6 +130,9 @@ def _swelive_fixture(root: Path, source_sha: str = "f" * 40) -> Path:
             (SWELIVE_TASK + "\n").encode()
         ).hexdigest(),
         "cohort_stage": "gate-one",
+        "shard": {"index": 1, "count": 1, "method": "strided"},
+        "stage_task_count": 1,
+        "catalog": {"path": "config/swelive_lite_catalog_v1.json", "sha256": catalog_sha256()},
         "gate_task_id": suite.gate_task_id,
         "full_task_count": len(SWELIVE_TASKS),
         "full_task_order_sha256": hashlib.sha256(
@@ -127,6 +143,12 @@ def _swelive_fixture(root: Path, source_sha: str = "f" * 40) -> Path:
         "language_counts": {"python": 1},
         "attempts_per_task": 1,
         "max_parallel": 1,
+        "max_parallel_requested": 20,
+        "gt_delivery_mode": "attached",
+        "step_limit": 0,
+        "temperature": 1.0,
+        "gt_off_arm": False,
+        "provider_route": route,
         "agent": "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent",
         "agent_scaffold": "mini-swe-agent",
         "agent_scaffold_version": "2.4.6",
@@ -206,7 +228,7 @@ def _swelive_fixture(root: Path, source_sha: str = "f" * 40) -> Path:
             "served_endpoint": {
                 "provider": "deepinfra",
                 "tag": "deepinfra/fp8",
-                "quantization": route["expected_quantization"],
+                "quantization": "fp8",
                 "context_length": 1_048_576,
                 "prompt_price": 6e-8,
                 "completion_price": 1.8e-7,

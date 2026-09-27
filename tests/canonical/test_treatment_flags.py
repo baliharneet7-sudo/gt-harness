@@ -303,7 +303,7 @@ def test_cli_flags_cover_workflow_knobs():
     from pathlib import Path
 
     yaml = Path(
-        ".github/workflows/deepswe_miniswe_central.yml"
+        ".github/workflows/deepswe_gt_delivery_ab.yml"
     ).read_text(encoding="utf-8")
     knob_names = set(re.findall(r"--ak ([a-z_]+)=", yaml))
     tree = ast.parse(

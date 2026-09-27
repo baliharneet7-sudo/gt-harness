@@ -1,5 +1,5 @@
-name: "TB2 GT smoke20: Union Alpha on 921bec20"
-run-name: "TB2-GT ${{ inputs.cohort_stage }} | deepseek/deepseek-v4-flash-0731 | 921bec20 | p20"
+name: "TB2 GT-on: certified product, launch-time model"
+run-name: "TB2-GT ${{ inputs.cohort_stage }} | ${{ inputs.model }} | ${{ inputs.gt_delivery_mode }} | steps ${{ inputs.step_limit }}"
 
 on:
   workflow_dispatch:
@@ -15,6 +15,46 @@ on:
         required: false
         type: string
         default: ""
+      model:
+        description: "OpenRouter model id chosen at launch (bare id, e.g. stealth/space-bunny-alpha)"
+        required: true
+        type: string
+      gt_delivery_mode:
+        description: "GT delivery: attached (gt-* tools + grep augmentation) or push (legacy injection)"
+        required: true
+        type: choice
+        options: [attached, push]
+        default: attached
+      provider_only:
+        description: "Comma list of OpenRouter provider tags; empty = OpenRouter chooses"
+        required: false
+        type: string
+        default: ""
+      quantization:
+        description: "Comma list of required quantizations (e.g. fp8); empty = none"
+        required: false
+        type: string
+        default: ""
+      allow_fallbacks:
+        description: "Allow OpenRouter provider fallbacks when provider_only is set"
+        required: false
+        type: boolean
+        default: false
+      reasoning_effort:
+        description: "minimal|low|medium|high|xhigh|max; empty = not sent"
+        required: false
+        type: string
+        default: ""
+      temperature:
+        description: "Sampling temperature"
+        required: false
+        type: string
+        default: "1.0"
+      step_limit:
+        description: "Agent step limit (the frozen TB2 baseline ran 100)"
+        required: false
+        type: string
+        default: "100"
 
 permissions:
   contents: read
@@ -23,12 +63,12 @@ permissions:
 
 env:
   TREATMENT_SHA: ${{ github.sha }}
-  GT_SOURCE_SHA: 921bec20d3dbabd12e4b442936d9259c24cdcc74
-  MODEL: deepseek/deepseek-v4-flash-0731
+  MODEL: ${{ inputs.model }}
+  GT_DELIVERY_MODE: ${{ inputs.gt_delivery_mode }}
+  STEP_LIMIT: ${{ inputs.step_limit }}
   DATASET: terminal-bench@2.0
   IMAGE_TAG: "20251031"
   TIMEOUT_MULTIPLIER: "5.0"
-  STEP_LIMIT: "100"
   PYTHONUTF8: "1"
   PYTHONIOENCODING: utf-8
 
@@ -47,6 +87,9 @@ jobs:
       # The funds preflight prices a run whose matrix it cannot see, so
       # the runnable count is an output rather than an assumption.
       task_count: ${{ steps.plan.outputs.task_count }}
+      gt_source_sha: ${{ steps.identity.outputs.gt_source_sha }}
+      reasoning_effort: ${{ steps.identity.outputs.reasoning_effort }}
+      temperature: ${{ steps.identity.outputs.temperature }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,6 +102,60 @@ jobs:
 
       - name: Install the official Harbor planner
         run: python -m pip install --disable-pip-version-check "harbor==0.20.0"
+
+      - name: Resolve the launch-time route and the declared product source
+        id: identity
+        env:
+          PROVIDER_ONLY: ${{ inputs.provider_only }}
+          QUANTIZATION: ${{ inputs.quantization }}
+          ALLOW_FALLBACKS: ${{ inputs.allow_fallbacks }}
+          REASONING_EFFORT: ${{ inputs.reasoning_effort }}
+          TEMPERATURE: ${{ inputs.temperature }}
+        run: |
+          set -euo pipefail
+          # The model is a launch choice; the route the preflight certifies and
+          # every task uses is rendered from it and attested by sha256.
+          mkdir -p plan
+          python -m scripts.render_provider_route \
+            --model "$MODEL" \
+            --provider-only "$PROVIDER_ONLY" \
+            --quantization "$QUANTIZATION" \
+            --allow-fallbacks "$ALLOW_FALLBACKS" \
+            --reasoning-effort "$REASONING_EFFORT" \
+            --output plan/provider-route.json
+          python - <<'PY'
+          import hashlib, json, os, re
+          from pathlib import Path
+          route = json.loads(Path("plan/provider-route.json").read_text(encoding="utf-8"))
+          if route["model"] != os.environ["MODEL"] or os.environ["MODEL"].startswith("openai/"):
+              raise SystemExit("model must be the bare OpenRouter id the route was rendered for")
+          if os.environ["GT_DELIVERY_MODE"] not in {"attached", "push"}:
+              raise SystemExit("gt_delivery_mode must be attached or push")
+          if not re.fullmatch(r"[1-9][0-9]*", os.environ["STEP_LIMIT"]):
+              raise SystemExit("step_limit must be a positive integer")
+          temperature = float(os.environ["TEMPERATURE"])
+          if temperature < 0:
+              raise SystemExit("temperature must be >= 0")
+          # The product source is the one the import manifest declares and the
+          # provider_free gate verifies tree-for-tree against HEAD.
+          manifest = json.loads(
+              Path("config/tb2_gt_import_manifest.json").read_text(encoding="utf-8-sig")
+          )
+          source = manifest["gt_source_commit"]
+          if not re.fullmatch(r"[0-9a-f]{40}", source):
+              raise SystemExit("import manifest gt_source_commit is not a commit id")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"gt_source_sha={source}\n")
+              out.write(f"reasoning_effort={route.get('reasoning_effort', '')}\n")
+              out.write(f"temperature={temperature}\n")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"GT_SOURCE_SHA={source}\n")
+              out.write(
+                  "PROVIDER_ROUTE_SHA256="
+                  + hashlib.sha256(Path("plan/provider-route.json").read_bytes()).hexdigest()
+                  + "\n"
+              )
+          PY
 
       - name: Freeze the canonical repair20 matrix and task budgets
         id: plan
@@ -75,6 +172,7 @@ jobs:
           from pathlib import Path
           from scripts.resolve_harbor_budget import (
               GT_OVERHEAD_EXTENSION_SECONDS,
+              MAX_HOSTED_EXECUTION_BUDGET_SECONDS,
               SUPERVISOR_GRACE_SECONDS,
               resolve_budget,
           )
@@ -574,17 +672,21 @@ jobs:
               # the execution budget, so GT's own limit - one SUPERVISOR_GRACE
               # earlier, which is what that reserve is for - fires first and
               # closes the session, leaving Pier's as the outer backstop.
-              agent_timeout_multiplier = (
-                  float(budget["execution_budget_sec"]) / float(budget["base_timeout_sec"])
-              )
+              # A GitHub-hosted job dies at 360 minutes whatever timeout-minutes
+              # says, taking the trial's artifacts with it.  Cap the execution
+              # budget so setup + trial + grading fit inside the job; the cap is
+              # recorded per row so a capped task is never silently shortened.
+              execution_budget = min(float(budget["execution_budget_sec"]), float(MAX_HOSTED_EXECUTION_BUDGET_SECONDS))
+              agent_timeout_multiplier = execution_budget / float(budget["base_timeout_sec"])
               rows.append({
                   "ordinal": ordinal,
                   "task": task,
                   "agent_timeout_multiplier": agent_timeout_multiplier,
                   "time_budget_seconds": max(
                       30,
-                      int(float(budget["execution_budget_sec"]) - float(SUPERVISOR_GRACE_SECONDS)),
+                      int(execution_budget - float(SUPERVISOR_GRACE_SECONDS)),
                   ),
+                  "execution_budget_capped": execution_budget < float(budget["execution_budget_sec"]),
                   "benchmark_budget_seconds": float(budget["benchmark_budget_sec"]),
                   "gt_overhead_extension_seconds": float(budget["gt_overhead_extension_sec"]),
                   "deviates_from_benchmark_budget": bool(budget["deviates_from_benchmark_budget"]),
@@ -595,7 +697,9 @@ jobs:
               "treatment_sha": os.environ["TREATMENT_SHA"],
               "gt_source_sha": os.environ["GT_SOURCE_SHA"],
               "model": os.environ["MODEL"],
-              "effective_model": "openai/deepseek/deepseek-v4-flash-0731",
+              "effective_model": "openai/" + os.environ["MODEL"],
+              "gt_delivery_mode": os.environ["GT_DELIVERY_MODE"],
+              "provider_route_sha256": os.environ["PROVIDER_ROUTE_SHA256"],
               "dataset": os.environ["DATASET"],
               "cohort_stage": stage,
               "task_count": len(selected),
@@ -614,7 +718,7 @@ jobs:
               "gt_overhead_extension_reason": (
                   "graph build and one planning call precede the agent's first step"
               ),
-              "step_limit": 100,
+              "step_limit": int(os.environ["STEP_LIMIT"]),
               "validation_run": True,
               "excluded": excluded,
               "unresolved": unresolved,
@@ -637,7 +741,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: tb2-gt-smoke20-plan-${{ github.run_id }}
-          path: tb2-gt-smoke20-plan.json
+          path: |
+            tb2-gt-smoke20-plan.json
+            plan/provider-route.json
           if-no-files-found: error
 
   pre_spend:
@@ -652,7 +758,8 @@ jobs:
     env:
       TASK: extract-elf
       PYTHONPATH: ${{ github.workspace }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW }}
+      GT_SOURCE_SHA: ${{ needs.plan.outputs.gt_source_sha }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -773,7 +880,13 @@ jobs:
               out.write(f"OPENROUTER_API_KEY={clean}\n")
           PY
 
-      - name: Prove the locked Union Alpha route with a live canary
+      - name: Download the rendered launch route
+        uses: actions/download-artifact@v4
+        with:
+          name: tb2-gt-smoke20-plan-${{ github.run_id }}
+          path: planned
+
+      - name: Prove the launch-time route with a live canary
         id: provider
         shell: bash
         env:
@@ -783,7 +896,7 @@ jobs:
           # Without --expected-tasks the funds gate prices a single task
           # and clears a key that cannot pay for the other nineteen.
           python -m scripts.provider_preflight \
-            --manifest config/provider_route_deepseek_v4_flash_0731_fp8.v1.json \
+            --manifest planned/plan/provider-route.json \
             --output provider-preflight.json \
             --source-sha "$TREATMENT_SHA" \
             --expected-tasks "${{ needs.plan.outputs.task_count }}" \
@@ -824,13 +937,9 @@ jobs:
               )
               raise SystemExit(1)
           assert receipt["provider_ready"] is True
-          assert receipt["model"] == "deepseek/deepseek-v4-flash-0731"
-          assert receipt["provider_routing"] == {
-              "only": ["streamlake"],
-              "quantizations": ["fp8"],
-              "allow_fallbacks": False,
-              "require_parameters": True,
-          }
+          route = json.loads(Path("planned/plan/provider-route.json").read_text(encoding="utf-8"))
+          assert receipt["model"] == route["model"] == os.environ["MODEL"]
+          assert receipt["provider_routing"] == route["provider_routing"]
           values = {
               "context_window_tokens": receipt["context_window_tokens"],
               "reserved_output_tokens": receipt["reserved_output_tokens"],
@@ -893,7 +1002,7 @@ jobs:
   run:
     needs: [plan, pre_spend]
     runs-on: ubuntu-latest
-    timeout-minutes: 600
+    timeout-minutes: 355
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -901,9 +1010,11 @@ jobs:
     env:
       TASK: ${{ matrix.task }}
       PYTHONPATH: ${{ github.workspace }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW }}
-      OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
       OPENAI_BASE_URL: https://openrouter.ai/api/v1
+      GT_SOURCE_SHA: ${{ needs.plan.outputs.gt_source_sha }}
+      GT_REASONING_EFFORT: ${{ needs.plan.outputs.reasoning_effort }}
       GT_PROVIDER_CONTEXT_WINDOW_TOKENS: ${{ needs.pre_spend.outputs.context_window_tokens }}
       GT_PROVIDER_RESERVED_OUTPUT_TOKENS: ${{ needs.pre_spend.outputs.reserved_output_tokens }}
       GT_PROVIDER_CONTEXT_WINDOW_SOURCE: ${{ needs.pre_spend.outputs.context_window_source }}
@@ -1113,7 +1224,7 @@ jobs:
           # Pier writes results/terminal-bench/<job-name>/<task>__<hash>/,
           # so the cross-read step below has to be pointed at that job
           # directory.  Publish the name rather than spelling it twice.
-          JOB_NAME="tb2-gt-smoke20-921bec20-${GITHUB_RUN_ID}-${TASK}"
+          JOB_NAME="tb2-gt-${GITHUB_RUN_ID}-${TASK}"
           echo "job_name=$JOB_NAME" >> "$GITHUB_OUTPUT"
           pier run \
             -p "$RUNNER_TEMP/tb2-task/terminal-bench" \
@@ -1127,6 +1238,9 @@ jobs:
             --ak task_id="$TASK" \
             --ak product_source_sha="$TREATMENT_SHA" \
             --ak max_iterations="$STEP_LIMIT" \
+            --ak step_limit="$STEP_LIMIT" \
+            --ak temperature="${{ needs.plan.outputs.temperature }}" \
+            --ak gt_delivery_mode="$GT_DELIVERY_MODE" \
             --ak time_budget_seconds="${{ matrix.time_budget_seconds }}" \
             -i "$TASK"
           rc=$?
@@ -1146,10 +1260,18 @@ jobs:
             --root results/terminal-bench \
             --task-id "$TASK" \
             --model "$MODEL" \
-            --effective-model "openai/deepseek/deepseek-v4-flash-0731" \
+            --effective-model "openai/$MODEL" \
             --treatment-sha "$TREATMENT_SHA" \
             --gt-source-sha "$GT_SOURCE_SHA" \
             --output benchmark-progress.json
+          # The delivery the agent actually received, read back from the
+          # runner's own report: an attached run whose graph never became
+          # ready is treatment-invalid and must not count as a GT result.
+          python -m scripts.annotate_gt_delivery \
+            --results results/terminal-bench \
+            --progress benchmark-progress.json \
+            --requested-mode "$GT_DELIVERY_MODE" \
+            --requested-step-limit "$STEP_LIMIT"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -1243,7 +1365,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: tb2-gt-smoke20-921bec20-${{ github.run_id }}-task-${{ matrix.task }}
+          name: tb2-gt-${{ github.run_id }}-task-${{ matrix.task }}
           path: |
             results/terminal-bench/
             harbor-exit-code.txt
@@ -1255,11 +1377,15 @@ jobs:
     # plan leaves nothing to download and nothing to aggregate.  The TB2 engine
     # zombies (runs 35256152140, 35257234010, 35257606223, 35257941589,
     # 35258327432) came from exactly this always()-on-a-failed-plan shape.
-    if: ${{ always() && needs.plan.result == 'success' }}
+    # A skipped matrix (a failed gate) has no receipts to aggregate; reporting
+    # every task as a missing artifact would read as an infrastructure wipe.
+    if: ${{ always() && needs.plan.result == 'success' && needs.run.result != 'skipped' }}
     needs: [plan, run]
     runs-on: ubuntu-latest
     # Artifact download plus a JSON aggregation; nothing here is model work.
     timeout-minutes: 30
+    env:
+      GT_SOURCE_SHA: ${{ needs.plan.outputs.gt_source_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1298,9 +1424,13 @@ jobs:
           leaked = sorted(row["task"] for row in excluded if row["task"] in reported)
           if leaked:
               raise SystemExit(f"excluded tasks produced verifier receipts: {leaked}")
+          delivered = [row.get("gt_delivery") or {} for row in out.get("tasks", [])]
           out.update({
-              "model": "deepseek/deepseek-v4-flash-0731",
-              "effective_model": "openai/deepseek/deepseek-v4-flash-0731",
+              "model": os.environ["MODEL"],
+              "effective_model": "openai/" + os.environ["MODEL"],
+              "gt_delivery_mode": os.environ["GT_DELIVERY_MODE"],
+              "treatment_invalid_count": sum(1 for d in delivered if d.get("treatment_valid") is False),
+              "step_limit_mismatch_count": sum(1 for d in delivered if d.get("step_limit_matches") is False),
               "treatment_sha": os.environ["TREATMENT_SHA"],
               "gt_source_sha": os.environ["GT_SOURCE_SHA"],
               "excluded": excluded,
@@ -1324,6 +1454,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tb2-gt-smoke20-921bec20-${{ github.run_id }}-SUMMARY
+          name: tb2-gt-${{ github.run_id }}-SUMMARY
           path: tb2-gt-smoke20-summary.json
           if-no-files-found: error

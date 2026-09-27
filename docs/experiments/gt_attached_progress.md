@@ -43,6 +43,21 @@ Legend: [ ] todo · [~] in progress · [x] done · [!] blocked / needs the user
 - [ ] provider-free acceptance on a clean checkout
 - [ ] canary 1 task/arm → 10×2×4 → 113×4
 
+## Cross-account GT-on (3 accounts x 3 benchmarks) - 2026-09-27
+Accounts: harneet2512, hbali-stack, baliharneet7-sudo (each `<acct>/gt-harness`). GitHub dispatches only filenames registered on the default branch and runs the version on `--ref`, so each benchmark uses a filename already registered everywhere:
+
+| benchmark | entry point (dispatch with `--ref integ/gt-attached`) |
+|---|---|
+| TB2 | `tb2_miniswe_central.yml` (all three) |
+| DeepSWE | `deepswe_miniswe_central.yml` -> wrapper forwarding to `deepswe_gt_delivery_ab.yml` (all three) |
+| SWE-Live Lite | `swelive_gt_harness_paid.yaml` (harneet2512); `swebench_live_lite_full.yml` wrapper (hbali-stack, baliharneet7-sudo) |
+
+- [x] TB2: model/route/effort/temperature/step_limit/gt_delivery_mode are launch inputs; route rendered + certified per run; source SHA from the import manifest (no 921bec20); `OPENROUTER_NEW || OPENROUTER_API_KEY`; trial budget capped under the 360-min hosted ceiling; per-task `gt_delivery` (treatment_valid, step-limit match) via `scripts/annotate_gt_delivery.py`; failed gate no longer summarizes as 89 missing; summary labels a non-baseline model "context only"
+- [x] DeepSWE: A/B gains `workflow_call`; model required; secret fallback; aggregator marks `treatment_invalid` legs (not scored) and fails on a leg run in the wrong arm
+- [x] readiness blockers: stale hammer-test amend fake (missing `source_revision` kwarg) made 5 freshness tests fail on Linux and Windows since canonical b005a74e - fixed; A/B admitted to the closed workflow set
+- [~] SWE-Live Lite: launch inputs, secret fallback, route attestation, 300-task catalog + sharding (<=256 legs), slot stagger, hosted-ceiling timeout
+- [ ] push `integ/gt-attached` to hbali-stack and baliharneet7-sudo
+
 ## Findings recorded during implementation
 - Certified wheel defect: `ON CAST(native_id AS INTEGER)` joins defeat indexes (processes.py:218, mcp/_graph_db.py:145, resolve.py:498/597) — `symbol_context` cost 50-72 s on a 489-file repo. Likely contributor to past push-arm timeouts; worth auditing old journals.
 - Canonical bundle closure omitted two shipped modules (`taint_dataflow.py`, `shape_check_guard.py`) — fixed.

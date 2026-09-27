@@ -102,12 +102,21 @@ def test_only_closed_supported_workflow_set_is_active() -> None:
     # central lane, called by `deepswe_miniswe_central.yml`. No secret, no
     # provider call.
     #
-    # `deepswe_miniswe_central.yml` and `tb2_miniswe_engine.yml` -- admitted
-    # because campaign 1 hardened them (adapter import guard, monitor timeout
-    # ownership, ruff target guard) and the dependency tests in
-    # `tests/test_benchmark_workflow_dependencies.py` assert on their text.
-    # Archiving them would delete the subject of a passing regression test
-    # rather than the risk the test describes.
+    # `deepswe_gt_delivery_ab.yml` -- the DeepSWE GT-on pipeline (push vs
+    # attached delivery, both arms GT-on; no GT-off arm). Dispatch- or
+    # call-only, approval-gated, readiness-bound; the model is a launch input.
+    #
+    # `deepswe_miniswe_central.yml` -- the DeepSWE entry point registered on
+    # every account's repository: a thin wrapper that forwards to
+    # deepswe_gt_delivery_ab.yml (GitHub dispatches only filenames present on
+    # the default branch). The host-owned central lane it used to carry is
+    # retired.
+    #
+    # `tb2_miniswe_engine.yml` -- admitted because campaign 1 hardened it
+    # (adapter import guard, monitor timeout ownership, ruff target guard) and
+    # the dependency tests in `tests/test_benchmark_workflow_dependencies.py`
+    # assert on its text. Archiving it would delete the subject of a passing
+    # regression test rather than the risk the test describes.
     # `producer_build.yml` -- the certified producer build. workflow_dispatch-
     # only, pinned to an exact upstream `source_commit`, and its only output is
     # an artifact: the sanctioned path that re-issues producer identity when
@@ -116,6 +125,7 @@ def test_only_closed_supported_workflow_set_is_active() -> None:
     assert active == [
         "central_provider_free.yml",
         "deepswe_cache_images.yml",
+        "deepswe_gt_delivery_ab.yml",
         "deepswe_gt_harness_product.yml",
         "deepswe_gt_harness_product_p0731.yaml",
         "deepswe_miniswe_central.yml",

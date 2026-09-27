@@ -3286,6 +3286,7 @@ _GUARDED_MODULES = (
     ("scripts/gt_task_visibility.py", 0),
     ("scripts/tb2_report.py", 0),
     ("scripts/model_identity_probe.py", 0),
+    ("scripts/annotate_gt_delivery.py", 0),
 )
 
 # Where discovery looks. Tests are excluded on purpose: a test that pins an

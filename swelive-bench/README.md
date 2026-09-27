@@ -1,39 +1,64 @@
-# SWE-bench-Live Lite smoke package
+# SWE-bench-Live Lite (GT-on)
 
-This directory freezes the five-task preflight cohort used by
-`.github/workflows/swelive_gt_harness_paid.yaml`. The workflow runs the
-Mini-SWE 2.4.6 Pier adapter with `stealth/union-alpha` and the GT product
-imported from `921bec20d3dbabd12e4b442936d9259c24cdcc74`.
+This directory holds the suite manifest and the reviewed task packages for
+`.github/workflows/swelive_gt_harness_paid.yaml` (registered directly on one
+account, and through the thin wrapper `swebench_live_lite_full.yml` on the
+others). The workflow runs the Mini-SWE 2.4.6 Pier adapter with GroundTruth
+on, using the model, OpenRouter routing and GT delivery mode (`attached` by
+default, or `push`) chosen at launch. No GT-off arm exists or may be run;
+outcomes are reported absolute.
 
-The cohort is the first five rows, in source order, of
-`benchmarks/data/swebench_live_lite.jsonl`:
+## Catalog
 
-1. `aiogram__aiogram-1594`
-2. `amoffat__sh-744`
-3. `arviz-devs__arviz-2413`
-4. `aws-cloudformation__cfn-lint-3749`
-5. `aws-cloudformation__cfn-lint-3764`
+The cohort is the full Lite split of the Hugging Face dataset
+`SWE-bench-Live/SWE-bench-Live` (split `lite`, 300 instances), pinned in
+`config/swelive_lite_catalog_v1.json`:
 
-`manifest.json` binds each task to its base commit, canonical task-config
-hash, Docker Hub image name, and immutable image digest. Each task package
-contains the source problem statement, hidden test patch, official test lists,
-and a Pier-compatible verifier. `scripts/build_swelive_smoke_tasks.py`
-reconstructs the package from the checked-in dataset snapshot.
+- every instance, in the row order of the checked-in snapshot
+  `benchmarks/data/swebench_live_lite.jsonl` (verified field-for-field
+  against the Hugging Face split at the recorded revision);
+- its evaluation image `starryzhang/sweb.eval.x86_64.<id>` (the official
+  evaluator's naming: id lower-cased, `__` -> `_1776_`), pinned by registry
+  digest, resolved with anonymous registry HEAD requests (nothing pulled);
+- the sha256 of the Pier `task.toml` rendered for it;
+- `excluded`: any instance whose image could not be resolved, with the reason.
 
-The paid workflow performs all gates before a model request: imported GT object
-verification, workflow and integration tests, task/config hashes, all five
-image manifests, the OpenRouter route and exact model, and an official
-SWE-bench evaluator canary. It pulls each task image once in its task job and
-reuses that image for Mini-SWE and final grading.
+`manifest.json` is derived from the catalog (the runnable rows) and binds its
+digest; `scripts/benchmark_suites.py` binds the manifest. The planner pins the
+catalog digest literally, so a rebuilt catalog must be reviewed into the
+workflow before it can run.
 
-Every completed task is graded twice: first through Pier's task verifier, then
+`scripts/build_swelive_catalog.py`:
+
+- `resolve --hf-revision <sha> [--hf-parquet lite.parquet]` rebuilds the
+  catalog and manifest (network; token-cached, 429-backoff);
+- `verify` re-renders every task offline and checks catalog, snapshot digest
+  and manifest binding;
+- `materialize --tasks all|<ids>` writes task packages, refusing any whose
+  `task.toml` digest differs from the catalog (the plan materializes all, each
+  task job its own);
+- `confirm-images --plan <plan>` HEADs every planned manifest by digest.
+
+Runs never read the committed `tasks/` directory: every package a run uses is
+rendered from the snapshot into the git-ignored `rendered/` tree by the one
+renderer and must hash to the catalog. `tasks/` keeps the five reviewed
+`smoke5` packages (which the renderer reproduces byte-for-byte, checked by
+tests) and `cyclotruc__gitingest-94`, a hand-curated package predating the
+renderer that backs `tests/test_swelive_corpus.py`.
+
+## Cohorts and shards
+
+`cohort_stage`: `gate-one` (the first catalog task), `remaining` (all but the
+gate, bound to a passed gate-one attestation), `all`, `smoke5`, `single`,
+`subset`. The selected cohort is split into `shard_count` strided shards and
+`shard_index` picks one; a dispatch may not exceed GitHub's 256-job matrix
+limit, so `all` and `remaining` need `shard_count >= 2`.
+
+## Grading
+
+Every completed task is graded twice: through Pier's task verifier, then
 independently with Microsoft's official SWE-bench-Live `python-only` evaluator
-pinned at `ad79b850f15e33992e96f03f6e97f05ddf9aa0be`. The job fails if the two
-rewards disagree.
-The saved artifacts include the plan, trajectory, patch, Pier verifier receipt,
-official evaluator report, per-task metrics, diagnostics, and final attestation.
-
-Run `gate-one` first. Run `remaining` with the successful gate run ID only after
-the gate task has an official grade. The remaining four tasks may execute in
-parallel; the workflow supports up to 20 parallel task jobs for the later full
-cohort.
+pinned at `ad79b850f15e33992e96f03f6e97f05ddf9aa0be`; the job fails if two real
+rewards disagree. Each task's progress receipt records the GT delivery the
+agent actually received (`scripts/annotate_gt_delivery.py`), and the run
+summary counts treatment-invalid tasks separately.

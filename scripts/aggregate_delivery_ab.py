@@ -74,6 +74,11 @@ def read_leg(legs_root: Path, leg: dict[str, Any]) -> dict[str, Any]:
     row["effective_step_limit"] = (report or {}).get("effective_step_limit")
     delivery = (report or {}).get("gt_delivery") or {}
     row["gt_delivery_mode"] = delivery.get("gt_delivery_mode")
+    # An attached leg whose graph never became ready runs as plain mini-swe
+    # and says so here; the push arm aborts on the same failure. Scoring the
+    # one and dropping the other would bias the comparison toward attached.
+    row["treatment_valid"] = delivery.get("treatment_valid", True) is not False
+    row["treatment_invalid_reason"] = str(delivery.get("treatment_invalid_reason") or "")
     for field in _MECHANISM_FIELDS:
         row[field] = delivery.get(field)
     for field in _USAGE_FIELDS:
@@ -106,12 +111,21 @@ def aggregate(
 ) -> tuple[dict[str, Any], int]:
     legs = [read_leg(legs_root, leg) for leg in plan["legs"]]
     step_violations = []
+    arm_violations = []
     for leg in legs:
+        if leg["report_present"] and leg["gt_delivery_mode"] != leg["arm"]:
+            arm_violations.append({
+                "leg_id": leg["leg_id"],
+                "planned": leg["arm"],
+                "reported": leg["gt_delivery_mode"],
+            })
         if leg["graded"] is not True:
             leg["status"] = "never_graded"
             continue
         failed = leg.get("provider_failed_calls")
-        if isinstance(failed, int) and failed > provider_failure_threshold:
+        if not leg["treatment_valid"]:
+            leg["status"] = "treatment_invalid"
+        elif isinstance(failed, int) and failed > provider_failure_threshold:
             leg["status"] = "excluded"
         else:
             leg["status"] = "included"
@@ -142,6 +156,7 @@ def aggregate(
             "included": len(included),
             "excluded": sum(leg["status"] == "excluded" for leg in arm_legs),
             "never_graded": sum(leg["status"] == "never_graded" for leg in arm_legs),
+            "treatment_invalid": sum(leg["status"] == "treatment_invalid" for leg in arm_legs),
             "tasks_scored": len(task_rates),
             "pass_at_1": _mean(task_rates),
             "solves": sum(leg["reward"] for leg in included),
@@ -169,11 +184,13 @@ def aggregate(
         "per_task_solve_rate": rates,
         "never_graded": [leg["leg_id"] for leg in legs if leg["status"] == "never_graded"],
         "excluded": [leg["leg_id"] for leg in legs if leg["status"] == "excluded"],
+        "treatment_invalid": [leg["leg_id"] for leg in legs if leg["status"] == "treatment_invalid"],
         "step_limit_violations": step_violations,
+        "arm_violations": arm_violations,
         "comparator": comparator,
         "legs": legs,
     }
-    return result, (2 if step_violations else 0)
+    return result, (2 if step_violations or arm_violations else 0)
 
 
 def render_markdown(result: dict[str, Any]) -> str:

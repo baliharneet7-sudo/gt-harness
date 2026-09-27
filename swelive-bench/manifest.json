@@ -7,8 +7,13 @@
   "dataset": {
     "name": "SWE-bench-Live/SWE-bench-Live",
     "split": "lite",
-    "source_snapshot": "benchmarks/data/swebench_live_lite.jsonl first five rows",
-    "image_name_rule": "starryzhang/sweb.eval.x86_64.<owner>_1776_<repo-pr>"
+    "source_snapshot": "benchmarks/data/swebench_live_lite.jsonl, every row with a resolved image, in source order",
+    "image_name_rule": "starryzhang/sweb.eval.x86_64.<instance_id lower-cased, '__' -> '_1776_'>:latest"
+  },
+  "catalog": {
+    "path": "config/swelive_lite_catalog_v1.json",
+    "sha256": "0013f6b7acbd434be1e25ab64e45a0c12b59d7fdae6420483d57e56393438eb0",
+    "excluded_count": 0
   },
   "tasks": [
     {
@@ -55,6 +60,2661 @@
       "task_config_sha256": "114d912c780d50e764abf16936bfe2f3e459894674582b731ad2ea8b22c0a760",
       "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3764",
       "container_digest": "sha256:3a1787a94d8589771a6306984fb0826498eb1a63e14ca87c4826e6382f092cc4"
+    },
+    {
+      "ordinal": 6,
+      "task_id": "aws-cloudformation__cfn-lint-3767",
+      "language": "python",
+      "base_commit": "7e514f46eb078a46051a2f0f9139a8340beb16b5",
+      "task_config_sha256": "a7157e5e117493dc7eb76affe9324bd15b01986418cb486c51d2e53cf76a22f1",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3767",
+      "container_digest": "sha256:d05f79ab3d900cacdca27cbc7c109241bd3869846e864012002b35e5a521ff13"
+    },
+    {
+      "ordinal": 7,
+      "task_id": "aws-cloudformation__cfn-lint-3768",
+      "language": "python",
+      "base_commit": "8e463fb9af11adc21906049c369a023a30e67d1f",
+      "task_config_sha256": "fbc46b6c84025911c962d18ee0075a2e6d2a01e88a498ec146fcfd6c2aced38d",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3768",
+      "container_digest": "sha256:3dfaa06af3f09f26d0a82520fefd91506d807b22d848e768eb01d13702b8c9a6"
+    },
+    {
+      "ordinal": 8,
+      "task_id": "aws-cloudformation__cfn-lint-3770",
+      "language": "python",
+      "base_commit": "a5672f0746161e808e2ea187f17322433bd0baab",
+      "task_config_sha256": "c96761b4cd20570514864a609db596d091917e31ed8b844a3e440d44220922b7",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3770",
+      "container_digest": "sha256:d7a9460ed0628baaefab4ef21bf86f1cba4daf16f8fdf3133d612f4d1db505a3"
+    },
+    {
+      "ordinal": 9,
+      "task_id": "aws-cloudformation__cfn-lint-3779",
+      "language": "python",
+      "base_commit": "de28d1e43777e3782a06b74d9091c3471636eb70",
+      "task_config_sha256": "21bd5a449f5e7de1bbe0785406b7a6d84aeed5b951e6cc9c43f3867905cbfef3",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3779",
+      "container_digest": "sha256:c80570593e94960fb82b4cc32339326cd53527b4f6572ea49571c265a7ea50db"
+    },
+    {
+      "ordinal": 10,
+      "task_id": "aws-cloudformation__cfn-lint-3789",
+      "language": "python",
+      "base_commit": "74847b145d63e7038752db93efd5ef5d4f9bd75e",
+      "task_config_sha256": "28312c81fe70343d3edb84a3dc96bd199ff1dbf20a64351c27993ca13712c37c",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3789",
+      "container_digest": "sha256:179d12645c074e0e8844554e98eb2b98d62c94ad21e6cfdc82fd631db7b32bc3"
+    },
+    {
+      "ordinal": 11,
+      "task_id": "aws-cloudformation__cfn-lint-3798",
+      "language": "python",
+      "base_commit": "d5c3da9efaa4bbd1d24fa768752df3da343b1d33",
+      "task_config_sha256": "0220a66f1893c420b6109f9ed79097005761cd5f9804b04c40b87200cfecb762",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3798",
+      "container_digest": "sha256:156f57af2f40fd10e82178f26a7cd9ee22f1da3101884ffca59d840249b95f41"
+    },
+    {
+      "ordinal": 12,
+      "task_id": "aws-cloudformation__cfn-lint-3805",
+      "language": "python",
+      "base_commit": "88efb088fba2669db30df083285c826ded400cae",
+      "task_config_sha256": "4eb1f007ed2d204af546e331784531ab35fe5dce042afe54bd500c387d6f62a8",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3805",
+      "container_digest": "sha256:f3ee12da6b5ead9da01f417781286f0f15af096d021f9fd76d933ac95b625511"
+    },
+    {
+      "ordinal": 13,
+      "task_id": "aws-cloudformation__cfn-lint-3817",
+      "language": "python",
+      "base_commit": "76c134c5a20c443b01fb023c514487e713c784ab",
+      "task_config_sha256": "ff17388c2f9de84b4f7c49c7e84fcb3a23aaaf4715fcb5cd87fd27c4859af2a9",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3817",
+      "container_digest": "sha256:92f5c991e808b1d9672892485621ce19213520684d02be5e973e6d12c16ab3d8"
+    },
+    {
+      "ordinal": 14,
+      "task_id": "aws-cloudformation__cfn-lint-3821",
+      "language": "python",
+      "base_commit": "9d83f3fb144cf8034fb5d1e9de4cc26d89814686",
+      "task_config_sha256": "99f5734f9295545180a1ab14a2052db4f267be865d5ab6454d24308ca514a5df",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3821",
+      "container_digest": "sha256:4153be91aa638d3091228a3369279571717819b7f85307af458bd469133d8eda"
+    },
+    {
+      "ordinal": 15,
+      "task_id": "aws-cloudformation__cfn-lint-3854",
+      "language": "python",
+      "base_commit": "6d083eb39b802592c5faba5a91c4782f7d831f8c",
+      "task_config_sha256": "69fc1f64bfc059e1032fcd0918430f14ac3fee895ede1c0bc2fe1a2dec2e204e",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3854",
+      "container_digest": "sha256:b891c3651d10edd7b268ec7425e62734171a39230e48c2669856662bff0c31b2"
+    },
+    {
+      "ordinal": 16,
+      "task_id": "aws-cloudformation__cfn-lint-3855",
+      "language": "python",
+      "base_commit": "58dc21c83ff28a683cbbf5cede11a916a2ff77e6",
+      "task_config_sha256": "889b42c8c132023bf9ade1c8276c1eb40377d2653d51f044930a7882da23fc9d",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3855",
+      "container_digest": "sha256:fd29f775404a8017eea52d083f6b09654fd5373a0c22e1a49e3c82f0c64628fa"
+    },
+    {
+      "ordinal": 17,
+      "task_id": "aws-cloudformation__cfn-lint-3856",
+      "language": "python",
+      "base_commit": "19192ef6a075bab14d6af4a73c295711a7db9b0e",
+      "task_config_sha256": "dc4fca172e491828281125e12628597f9ee224588523a899962db2e36da48c62",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3856",
+      "container_digest": "sha256:2b42dd2bc85658bfbc874560c3978d22349e038e174c5501b7998e56e3e627e5"
+    },
+    {
+      "ordinal": 18,
+      "task_id": "aws-cloudformation__cfn-lint-3862",
+      "language": "python",
+      "base_commit": "30ecbc1fe4ffe2dd3690071f891352e15419b874",
+      "task_config_sha256": "c4fcee443e31aed374ca35bfbd81025a5bf6481ce268d25490413b4f0002a279",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3862",
+      "container_digest": "sha256:dc804a63820e55579e30c9bd02b4ead7019ee61a3c7ed37402de36715cfd3c63"
+    },
+    {
+      "ordinal": 19,
+      "task_id": "aws-cloudformation__cfn-lint-3866",
+      "language": "python",
+      "base_commit": "30ecbc1fe4ffe2dd3690071f891352e15419b874",
+      "task_config_sha256": "8e83db8c12fd58c27d166f7ffd19b0e40edb91072ab80eb1971178f59d3183a1",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3866",
+      "container_digest": "sha256:0b2d80b5d6da2ef3bdf1e9175139bd8be03a35d328ce8569c3830becf36b7f05"
+    },
+    {
+      "ordinal": 20,
+      "task_id": "aws-cloudformation__cfn-lint-3875",
+      "language": "python",
+      "base_commit": "8454bc9a7146e2b648090e866d09054589070599",
+      "task_config_sha256": "90931b817eee29a374318b38861b010475fedce878bf8f8fd47b94f0eaba1da2",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3875",
+      "container_digest": "sha256:82da7e20b3290e56604ddb0120cf8ed664e78345dbdffc3ef44d31e4737d8799"
+    },
+    {
+      "ordinal": 21,
+      "task_id": "aws-cloudformation__cfn-lint-3890",
+      "language": "python",
+      "base_commit": "700563cda182416a6c99af4bcaa96077c2412465",
+      "task_config_sha256": "8a1f13f2c79ca3ce274a21d9c1183b1589bcc4d091f58af9633dadf029d9cf91",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3890",
+      "container_digest": "sha256:e28e04cf82040f7c22eb2503aa1987b813ec6213a610a7d2f3203de9b021b296"
+    },
+    {
+      "ordinal": 22,
+      "task_id": "aws-cloudformation__cfn-lint-3947",
+      "language": "python",
+      "base_commit": "5c274fa0c3a5f5e85c7e71a0e53b9ea5b3428bf8",
+      "task_config_sha256": "deeef546ed18cd729217264b8c7bc190756e7d2b1d344c410937eccb30e00c39",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3947",
+      "container_digest": "sha256:9b4e44fcbdcfcd47a15087f8978eba7c67b93974a7e732b0e7fe5551b524d8af"
+    },
+    {
+      "ordinal": 23,
+      "task_id": "aws-cloudformation__cfn-lint-3982",
+      "language": "python",
+      "base_commit": "0e490157fd1423eb1b1034ba048c3b15a1ec3026",
+      "task_config_sha256": "6a5f68b2e6319c9ea257932809edfdc2c3349c874925ce2bfd3f8a8e6bf35b04",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3982",
+      "container_digest": "sha256:65cbb74eb3257f22d2123a7b40f48d1d5909934be1beb835c6a9bb5e37a790c2"
+    },
+    {
+      "ordinal": 24,
+      "task_id": "aws-cloudformation__cfn-lint-4002",
+      "language": "python",
+      "base_commit": "e6278b452a0d2b4080068ee61d99d613d5273f37",
+      "task_config_sha256": "e9033f8205dc70dae3c7528a1d68cb651978186ef6b8e05449f0717efe71c452",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4002",
+      "container_digest": "sha256:9f0a5d8a4227321db3173954d374aa04df0d127705e192a15742ce0dc74bb47e"
+    },
+    {
+      "ordinal": 25,
+      "task_id": "aws-cloudformation__cfn-lint-4009",
+      "language": "python",
+      "base_commit": "03f148d7e3c80a9354b5ccf30423a321b85979a9",
+      "task_config_sha256": "889cc911a7081c4baae4363495be9ae09207248741ede7fa7eb521af3da54b12",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4009",
+      "container_digest": "sha256:880b7bf3de044be24521ff994d2bc3c671e4a8127bdc12ff668f00c391f22ef4"
+    },
+    {
+      "ordinal": 26,
+      "task_id": "aws-cloudformation__cfn-lint-4016",
+      "language": "python",
+      "base_commit": "651367020b0ad6243677e8c280758208889b74db",
+      "task_config_sha256": "30f6a7bb2aedebcef3eccf1179897d54216cb74646ba97885e0dda90ce39c9b4",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4016",
+      "container_digest": "sha256:3263aab03ea032aab446f86c7c345215aae057435fe0e2f088f8ffe45ea3e625"
+    },
+    {
+      "ordinal": 27,
+      "task_id": "aws-cloudformation__cfn-lint-4023",
+      "language": "python",
+      "base_commit": "0bf508f3474e5f4b4a5ace8a1412bc450fb0bae0",
+      "task_config_sha256": "d149dc8d6b1cf0214fa44e72338fd669655d19018105352c67a86492c1436628",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023",
+      "container_digest": "sha256:7a85611ccb3a428179424b06808fcccfc2a7815b9447b0aaa7e0cd967742d590"
+    },
+    {
+      "ordinal": 28,
+      "task_id": "aws-cloudformation__cfn-lint-4032",
+      "language": "python",
+      "base_commit": "7351d0cf7087d759dd24b06190cb759ec3381da6",
+      "task_config_sha256": "0c5f64e990283ff75a87bf681608248796ee87469079365c1af6dcacc4860dff",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4032",
+      "container_digest": "sha256:97d68ed0dc3bb40f6829f864a13288a1666c40f570e1b09c797b631eb1f52fee"
+    },
+    {
+      "ordinal": 29,
+      "task_id": "aws-cloudformation__cfn-lint-4051",
+      "language": "python",
+      "base_commit": "1863011580c054a6bffa6b94bd0d876df393da35",
+      "task_config_sha256": "f6877d7b6003a9aa40babb19a848fe9bf7f961ffb69ef5d0f80403bf38fde7a1",
+      "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4051",
+      "container_digest": "sha256:2c809ab85aa894ad8f3e75688a65bc3624940a9b18ced7114f78b092914f834f"
+    },
+    {
+      "ordinal": 30,
+      "task_id": "beancount__beancount-931",
+      "language": "python",
+      "base_commit": "a0e6f445fbf0d101602a4b6d886d6320971587b6",
+      "task_config_sha256": "ea5d547b832ed1489b918b4e30f80e76f78faf04971ef37069b1ee269db94d4a",
+      "container_image": "starryzhang/sweb.eval.x86_64.beancount_1776_beancount-931",
+      "container_digest": "sha256:b63a2b9b88ebce809b46113e66b1f5eee2e9593a5eadfc2141c7bb0bf09f031d"
+    },
+    {
+      "ordinal": 31,
+      "task_id": "beetbox__beets-5457",
+      "language": "python",
+      "base_commit": "03f1205629ad17f123a190040361babc41c18afc",
+      "task_config_sha256": "fbb7fb93e1ae5975fdcac0cd456312e3af4a7519c0152634c75a3c046a2070ee",
+      "container_image": "starryzhang/sweb.eval.x86_64.beetbox_1776_beets-5457",
+      "container_digest": "sha256:891a484e1e1de70076e1b0ad7ffb0255226974eac22ec0633ef23d304ebe4464"
+    },
+    {
+      "ordinal": 32,
+      "task_id": "beetbox__beets-5495",
+      "language": "python",
+      "base_commit": "fa10dcf11add0afd3b4b22af29f8d504e7ef8a0a",
+      "task_config_sha256": "029d88e424f892f0a3a8aabf9241c49245acf26b73dc3e9b4d043df469fb235f",
+      "container_image": "starryzhang/sweb.eval.x86_64.beetbox_1776_beets-5495",
+      "container_digest": "sha256:9f4435251f6813a6a7d7288d235eda69b609b218cf8c9fdbdc5673b7c1a1b4bf"
+    },
+    {
+      "ordinal": 33,
+      "task_id": "beetbox__beets-5682",
+      "language": "python",
+      "base_commit": "1cec93e695a09ddcff3dcb69192e72746a079cd4",
+      "task_config_sha256": "273eb67bee236969b3f0b59a0ac509ae7aa35484ed5d84f11264844f1edcf690",
+      "container_image": "starryzhang/sweb.eval.x86_64.beetbox_1776_beets-5682",
+      "container_digest": "sha256:64eec6c5ef26b738fb3cd15a589060314c442ba98914b3210c5384a4c1553b24"
+    },
+    {
+      "ordinal": 34,
+      "task_id": "beeware__briefcase-2075",
+      "language": "python",
+      "base_commit": "98b3cb01f6865550eb083646d3f9e4e5dfcfda82",
+      "task_config_sha256": "bf2b2697fe6e4f82f4a9feea58beaccd6aed5ceb73fe20abe97ab2966f5f5c18",
+      "container_image": "starryzhang/sweb.eval.x86_64.beeware_1776_briefcase-2075",
+      "container_digest": "sha256:89e92dcd9e1b5200145ecda6d86e47882612bf48f5b5a212472a628127c494be"
+    },
+    {
+      "ordinal": 35,
+      "task_id": "beeware__briefcase-2085",
+      "language": "python",
+      "base_commit": "4005202304fdef04a5e87de2e8b09c9de506dcae",
+      "task_config_sha256": "b752ce92fd9ca01ac4a0e14caa766f3b31e74679d16c2447539634096865dc9b",
+      "container_image": "starryzhang/sweb.eval.x86_64.beeware_1776_briefcase-2085",
+      "container_digest": "sha256:ecd3f935ae33fca74568ad26bd4d68c60443806f23db5f267809ff4f3b032789"
+    },
+    {
+      "ordinal": 36,
+      "task_id": "beeware__briefcase-2088",
+      "language": "python",
+      "base_commit": "d7befc67ad35d4aca37e6b36ba62950e71068efb",
+      "task_config_sha256": "3ec1917eee254a7ad2bcfb4b0db7b9563aba91368a993bce519f75911b710be0",
+      "container_image": "starryzhang/sweb.eval.x86_64.beeware_1776_briefcase-2088",
+      "container_digest": "sha256:98081ebfab5ff644bfc75a319d0d259b7211670d6c8a010a00df6dd4204c4aee"
+    },
+    {
+      "ordinal": 37,
+      "task_id": "beeware__briefcase-2214",
+      "language": "python",
+      "base_commit": "bfe5f893f4f2bd7e8256fd229cbfefb27c2dddc1",
+      "task_config_sha256": "1d937fde6a1f356bdbb56ac7b302601cb1bab75ba35c1b30c4cef5b9faf0e6ed",
+      "container_image": "starryzhang/sweb.eval.x86_64.beeware_1776_briefcase-2214",
+      "container_digest": "sha256:2fefda2123fd4bacfad3c4c36b3cfee0c1972824f6aa0426b46211a69b488766"
+    },
+    {
+      "ordinal": 38,
+      "task_id": "bridgecrewio__checkov-6893",
+      "language": "python",
+      "base_commit": "7741985fd08414d35f7aa75ec9e6ce65eee3b522",
+      "task_config_sha256": "c5506c5e89ba8ab982d7204379b9e458b1d1f34a6833aa73e9f11b65180fced8",
+      "container_image": "starryzhang/sweb.eval.x86_64.bridgecrewio_1776_checkov-6893",
+      "container_digest": "sha256:c2a90c5fc7e2bb77180c9a3f4a3fd723b5c75eb41cc20ecdc519d440fe1782ca"
+    },
+    {
+      "ordinal": 39,
+      "task_id": "bridgecrewio__checkov-6895",
+      "language": "python",
+      "base_commit": "a94c1682b275bbf755342c0164d2ac0c379c0c16",
+      "task_config_sha256": "0de1bb62b94511364c656214047f125731ba30af2276a1e61cedf09de226e005",
+      "container_image": "starryzhang/sweb.eval.x86_64.bridgecrewio_1776_checkov-6895",
+      "container_digest": "sha256:b9fec79b6365eb2c25b01bfd63955c7679c364d56b659c03415c46c6719b21fb"
+    },
+    {
+      "ordinal": 40,
+      "task_id": "bridgecrewio__checkov-7002",
+      "language": "python",
+      "base_commit": "8b0f288ae10065b5f40673d904f2204c5a3ec770",
+      "task_config_sha256": "82b621ef4d62e45789792446decc5951aa1e97d895db20d3a3a691148b5eccaa",
+      "container_image": "starryzhang/sweb.eval.x86_64.bridgecrewio_1776_checkov-7002",
+      "container_digest": "sha256:fa7b5b16e4f01644a35fcf4765bb854ff6c63c8165628c903497df37c2beef4e"
+    },
+    {
+      "ordinal": 41,
+      "task_id": "conan-io__conan-17092",
+      "language": "python",
+      "base_commit": "f31647f3ef2feaabc91b2875d540ae48d2a4a4c8",
+      "task_config_sha256": "1dcbbcf827b377f29562c062a2a36cd980a3f2b1a7f07950327d3f2886507b6c",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17092",
+      "container_digest": "sha256:5b7c6db3b318d810c611df4b161d372b64cf69902ddc23c2d3bb41e932a504d1"
+    },
+    {
+      "ordinal": 42,
+      "task_id": "conan-io__conan-17102",
+      "language": "python",
+      "base_commit": "2e3f51782056b6665560f9af6166e30d7c2801ab",
+      "task_config_sha256": "d3c1c523cfdce68683c8b784c376ed6fd194788f1ecde3d6fbce004d39f727fc",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17102",
+      "container_digest": "sha256:dfc561866530dc9c18e80592b71276acfac37e63786d4afb79822fd79b274eac"
+    },
+    {
+      "ordinal": 43,
+      "task_id": "conan-io__conan-17117",
+      "language": "python",
+      "base_commit": "384eb0faf82bfc514b644469ba042da341fefaf7",
+      "task_config_sha256": "000793bc7e8d127e7c875fb727426d9d07a225a1a9e06d30ce7f097595694c8f",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17117",
+      "container_digest": "sha256:3a40983c8457b0590bd243c6c5f95922b829fd2494a47e7b8e707dc76cad7721"
+    },
+    {
+      "ordinal": 44,
+      "task_id": "conan-io__conan-17123",
+      "language": "python",
+      "base_commit": "1e42a99a1d6225f320a4938fcd7a778a88a8b410",
+      "task_config_sha256": "e21a632084182394f5902da6e52e9e2401053247484102ec72e603780ff7e884",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17123",
+      "container_digest": "sha256:62d1f525dbc67aae399232200d881e95b76256dc9e5a0b02e5495435560615cd"
+    },
+    {
+      "ordinal": 45,
+      "task_id": "conan-io__conan-17129",
+      "language": "python",
+      "base_commit": "e25b357d6eab29fcb64ee04340f2d0d479ea09bf",
+      "task_config_sha256": "6b69539cbfc9af26e0486ae1bf478d6a16dbca441435711093214c615108c74c",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17129",
+      "container_digest": "sha256:1efe6d9922e11a69207320561e38539bebc67f00848b722aa9984e08c83b6609"
+    },
+    {
+      "ordinal": 46,
+      "task_id": "conan-io__conan-17132",
+      "language": "python",
+      "base_commit": "d8db468afbac9410d0ba5209ac9c4a58224c3864",
+      "task_config_sha256": "51abde2592186edc9913beeee7c8f6719c57fc5fc266813c9dea737be3573bfd",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17132",
+      "container_digest": "sha256:aef9ef2481d34720ac178cd770c048e80979c954403823ce5e6ae1e947d84180"
+    },
+    {
+      "ordinal": 47,
+      "task_id": "conan-io__conan-17183",
+      "language": "python",
+      "base_commit": "dfcb68114157b49eb4bbbf56190a7518237ea2ed",
+      "task_config_sha256": "f806564a0791062287ff3f9e88ad5228d4f04dc7293c0d666813bd0bd43740eb",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17183",
+      "container_digest": "sha256:c9f50e81b00000470e4eff816f6e698d8717daa51ac53a98663080c2d4d278eb"
+    },
+    {
+      "ordinal": 48,
+      "task_id": "conan-io__conan-17266",
+      "language": "python",
+      "base_commit": "dba212f7e335b931561d0a71152703226af85d8d",
+      "task_config_sha256": "8e95731ded154248b5af79b381d09dd49c0e8162f2486bf32f97f1f223b9f640",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17266",
+      "container_digest": "sha256:d1ba39813a17c17aa6ab933df16c6db82fa5ae815892e1f61ac15a74da462555"
+    },
+    {
+      "ordinal": 49,
+      "task_id": "conan-io__conan-17292",
+      "language": "python",
+      "base_commit": "7ea2b7bcee377f4ae7baccc8126730d25e5fbc83",
+      "task_config_sha256": "8ebcd5b7349c176c95bb4163388216852b636aafec9500143de1678380685570",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17292",
+      "container_digest": "sha256:05490428b2b6c497e47ebbefca30da4543c7034b6ab7c5269fba975345be483f"
+    },
+    {
+      "ordinal": 50,
+      "task_id": "conan-io__conan-17300",
+      "language": "python",
+      "base_commit": "7728bc9722a12c758b4cc2f39cf656a0497e5583",
+      "task_config_sha256": "c196a6aa6cef7248ccc9e03f63b64d25b634e2eb7a3140376d43b331487c1c54",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17300",
+      "container_digest": "sha256:54b97d1e5b90e16e7726d648310cb6d9a6bce6cc374c8cc059c37cfcd1d6ff95"
+    },
+    {
+      "ordinal": 51,
+      "task_id": "conan-io__conan-17301",
+      "language": "python",
+      "base_commit": "7728bc9722a12c758b4cc2f39cf656a0497e5583",
+      "task_config_sha256": "35a649c402991fb817f9aa2aa07a9d04d34d78a8b3d5184f91e8f228d7343369",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17301",
+      "container_digest": "sha256:d4017d33121d30ac46d9428ec807026e115cc34415bdd79ae6158ac2f2279cd6"
+    },
+    {
+      "ordinal": 52,
+      "task_id": "conan-io__conan-17302",
+      "language": "python",
+      "base_commit": "6c620e8ef8e2222f2e3c2d9cadb90b1527d4045a",
+      "task_config_sha256": "6e334f461d9f61c680e5a9e1716418f76a0e40f19f509d0ee4c1bcef1677b6b9",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17302",
+      "container_digest": "sha256:3d71b280c0fdc69c349e2bb39272ca3d9f16103327ae10deafd3726544fd84c7"
+    },
+    {
+      "ordinal": 53,
+      "task_id": "conan-io__conan-17326",
+      "language": "python",
+      "base_commit": "b325a4bb87ffaa994a289826621941e9673db284",
+      "task_config_sha256": "77db4509441b3c175882922908776b4f4a11b11a209e3cc8fdaf975e125aac4b",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17326",
+      "container_digest": "sha256:340e719cca3e8974a8e67ae2633991ed17fbbdf7f11f8abd86086218eff2aa51"
+    },
+    {
+      "ordinal": 54,
+      "task_id": "conan-io__conan-17366",
+      "language": "python",
+      "base_commit": "a6bd8fbefb205ebdb67a76729b1d2324eb540271",
+      "task_config_sha256": "f27e9a8c481153be12722357d2c9d7cbf50c94ec39fedd5e0e663728093768cf",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17366",
+      "container_digest": "sha256:a08383e3172d1bb0fb38fbbc7fbef86db6f9903e817a7385b75bc773c99b624a"
+    },
+    {
+      "ordinal": 55,
+      "task_id": "conan-io__conan-17382",
+      "language": "python",
+      "base_commit": "aa4920ec0935511b0f3d8f57040b70c00996e0c4",
+      "task_config_sha256": "65c737eea162ed2c244926e074a17b8c6d5408484d437792ae707c1c4060c70f",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17382",
+      "container_digest": "sha256:d0ee968807849928e030ecb66c18a10eb856d9c888de263d9459fcd49e23c8ba"
+    },
+    {
+      "ordinal": 56,
+      "task_id": "conan-io__conan-17408",
+      "language": "python",
+      "base_commit": "6765af055555c60f2170352e3f2d809a101d351a",
+      "task_config_sha256": "f74dd9f73e84ac433c51d9457448eccd6a77456c6653f322856da40a43e14a1e",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17408",
+      "container_digest": "sha256:48a4166890224c113a32dfa06662b6ed07887e64dcae52571e36af3ed3192243"
+    },
+    {
+      "ordinal": 57,
+      "task_id": "conan-io__conan-17514",
+      "language": "python",
+      "base_commit": "13d4c3d91bf1ec7c1ebe36cf2b1f6874a319ef25",
+      "task_config_sha256": "1b8a2b91535de6c5874293348b98bec31713e6d75e527f91c770db76e9335838",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17514",
+      "container_digest": "sha256:54b568a2819cd4e6eacab099a149d43bcefc8ae0c6380954d411db5779f2b796"
+    },
+    {
+      "ordinal": 58,
+      "task_id": "conan-io__conan-17517",
+      "language": "python",
+      "base_commit": "003e2cfb746dbc83370758c192edacebd761472b",
+      "task_config_sha256": "5a1bbd695daad9a4761018f92fc4354d253441273648542f99c98daa9756d9df",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17517",
+      "container_digest": "sha256:80b25ca30446e68a2575612f73a1f04e8ae745450be7982f905b68d473ec4463"
+    },
+    {
+      "ordinal": 59,
+      "task_id": "conan-io__conan-17520",
+      "language": "python",
+      "base_commit": "13d4c3d91bf1ec7c1ebe36cf2b1f6874a319ef25",
+      "task_config_sha256": "5a9c89b544836beb965e359aeb0b54273403974362767f23287e5e153c07c8b8",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17520",
+      "container_digest": "sha256:9f4c803cd4882a6fdea3a7024c5f6b81ebce2b620940010357548d678d34026c"
+    },
+    {
+      "ordinal": 60,
+      "task_id": "conan-io__conan-17532",
+      "language": "python",
+      "base_commit": "e9e4bb13e821470f28411742f1de179a796bc005",
+      "task_config_sha256": "6c23536eb6ae62a6fc82a9725fa2fe996b37546641bfa6fa3d489a8a2b17403d",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17532",
+      "container_digest": "sha256:0d4da86b0a3a429c44bd35651540f35e42af4624ca4bec6712aa37b8fe2c9423"
+    },
+    {
+      "ordinal": 61,
+      "task_id": "conan-io__conan-17538",
+      "language": "python",
+      "base_commit": "5aedd8e94beafaf95df5379b5035dca60e3faff7",
+      "task_config_sha256": "48734daec5a99b481b3f4952b7b178055a83565139eba62fa90b0e697fb6209a",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17538",
+      "container_digest": "sha256:e6ec04cf779d78ebdc8987b02bc451298e3936b67b6ed34084f0d7ff47652117"
+    },
+    {
+      "ordinal": 62,
+      "task_id": "conan-io__conan-17708",
+      "language": "python",
+      "base_commit": "85cf3434d5f016b26d9f1b26a02c8c6d8ee8282b",
+      "task_config_sha256": "7d5c3ed0bf004c6d94908e5b99132a7d1f9a7f89e08bf64596f286da56986fc7",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17708",
+      "container_digest": "sha256:822f52b32fc851fc878dfa80cb50ea5b964077d8fdc686653d84df18995c425e"
+    },
+    {
+      "ordinal": 63,
+      "task_id": "conan-io__conan-17725",
+      "language": "python",
+      "base_commit": "328b8dcaa5a5d69827a62c1062fdcaec91b3125e",
+      "task_config_sha256": "c6b8f0079f958c477918a7a990fcc85e680a97614de5efb1ac026971313c0c83",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17725",
+      "container_digest": "sha256:5c8582e5e1d2c4580ec9b09f1a4cb60e970dd830477067f8ed1cfc5c037f8f82"
+    },
+    {
+      "ordinal": 64,
+      "task_id": "conan-io__conan-17781",
+      "language": "python",
+      "base_commit": "0017c296b27770cbf8dfbfc6422bb37f13970b62",
+      "task_config_sha256": "5b8346eb12d4b8524f792859251a8f5c4a4965f59a18db3b7e906accebab124a",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17781",
+      "container_digest": "sha256:0e0e7a1fda2bd088c4390857467ee74ad7abd158a1f02985f406ee9b774a1da0"
+    },
+    {
+      "ordinal": 65,
+      "task_id": "conan-io__conan-17819",
+      "language": "python",
+      "base_commit": "c1ff7590f233ba7a2338c705028eae98c7234dde",
+      "task_config_sha256": "97e67aded7b61d4d8ed489a164e885da84527becb9091e6f3f4b30a989c9c3e3",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17819",
+      "container_digest": "sha256:c33865fb1dc03e04f82ca08f2ad52ca1eca43155592f3c8a4c200c846555e572"
+    },
+    {
+      "ordinal": 66,
+      "task_id": "conan-io__conan-17917",
+      "language": "python",
+      "base_commit": "3678ee1976d6a33af17462ddd0be2a8921077c8e",
+      "task_config_sha256": "07c12ba107c4ce1b8eac6a214cfae18644efd438e4911e946db67b6fe93c9f34",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17917",
+      "container_digest": "sha256:4607656106ffb63dd32cfa2a5cede2992aa3a7fefc42c45ca4ff9028ba114d7d"
+    },
+    {
+      "ordinal": 67,
+      "task_id": "conan-io__conan-17923",
+      "language": "python",
+      "base_commit": "ad8ff14bdd6b80ed9fd1c619b479f8a5c0838bab",
+      "task_config_sha256": "ffc55dfc7cb4d494b1d0181f60fe3a0ce9761a777c71f480129c4f5599487c46",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17923",
+      "container_digest": "sha256:5e05d6152356948e22f1c937427b4d4a443b01811494abd56d5e7c78cc3fb479"
+    },
+    {
+      "ordinal": 68,
+      "task_id": "conan-io__conan-17967",
+      "language": "python",
+      "base_commit": "f31a78f057c05c20482965cbdf21a79a9db04c45",
+      "task_config_sha256": "7bcd1a5755fd9998bfd6fbce3dc32b3d002d03251d260f071bc9d546f93d5b05",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-17967",
+      "container_digest": "sha256:ed2fcaafc21f3ea2aae235686f7a7330e10b19ef48a66076b2af05af7fc9af50"
+    },
+    {
+      "ordinal": 69,
+      "task_id": "conan-io__conan-18028",
+      "language": "python",
+      "base_commit": "d8b5ebca42a32be615b938627a0601c2cb59e68f",
+      "task_config_sha256": "23b179ab25222e386b7dd0aef8d2ec74e68b95fa0a4cedcb2c5287f2f954fc4b",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-18028",
+      "container_digest": "sha256:4bec284fe03ea8c25a8099332ddb4bb760d3d3243ae59987d47fed3e8bc0dc94"
+    },
+    {
+      "ordinal": 70,
+      "task_id": "conan-io__conan-18037",
+      "language": "python",
+      "base_commit": "1f112d48a2829dd8f274275bb1a5cc0a11379f62",
+      "task_config_sha256": "16a80a9d80d9c37a1094a7b4fbecb7ba07230ece68cb336a577e088ab61a4af3",
+      "container_image": "starryzhang/sweb.eval.x86_64.conan-io_1776_conan-18037",
+      "container_digest": "sha256:3d4ec37b1bb352f6934cac3a5681d6180b53a85d1a7799458330581434ad5212"
+    },
+    {
+      "ordinal": 71,
+      "task_id": "cyclotruc__gitingest-115",
+      "language": "python",
+      "base_commit": "96bc3958a3b3409e009c80d7ac89a97c4c9520fa",
+      "task_config_sha256": "aaae373c3c110bc4585210da9dd339c5e405e56f467bbd03cb34dd274dfab0df",
+      "container_image": "starryzhang/sweb.eval.x86_64.cyclotruc_1776_gitingest-115",
+      "container_digest": "sha256:f2c460c296a20a51aa8685eb1277aace8280f5400984fecc82897ca0bf94b794"
+    },
+    {
+      "ordinal": 72,
+      "task_id": "cyclotruc__gitingest-134",
+      "language": "python",
+      "base_commit": "8137ce10649526820efe752ff81eefabbea8ee23",
+      "task_config_sha256": "53dd2299de289dfdb3da780bd989ff695e13895097beaf586ef7fe8ab6f8d578",
+      "container_image": "starryzhang/sweb.eval.x86_64.cyclotruc_1776_gitingest-134",
+      "container_digest": "sha256:461cef54f3e611f92f769a9934b9227466136139b3c542c31c3fc174f93ffc29"
+    },
+    {
+      "ordinal": 73,
+      "task_id": "cyclotruc__gitingest-94",
+      "language": "python",
+      "base_commit": "2125765025c65fdd2aec89856bdc095dfb0fc826",
+      "task_config_sha256": "6a995ee7e6219fee29201a6c9e6b1db226519b555544ed5f717afb13ac252b05",
+      "container_image": "starryzhang/sweb.eval.x86_64.cyclotruc_1776_gitingest-94",
+      "container_digest": "sha256:0698979e10aee6ee1b46607d7c86e857218d03df3e62524abb00ea8bffeba394"
+    },
+    {
+      "ordinal": 74,
+      "task_id": "deepset-ai__haystack-8489",
+      "language": "python",
+      "base_commit": "906177329bcc54f6946af361fcd3d0e334e6ce5f",
+      "task_config_sha256": "0ac95a1af3f3b8fdb7eca9836b8d0366613d734699e6c9555c8921e89aeab891",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8489",
+      "container_digest": "sha256:0e2892edbfd877d6e38c2884ac7adc0efdc9ddfe06d1d775ecb0c57bba4bfb81"
+    },
+    {
+      "ordinal": 75,
+      "task_id": "deepset-ai__haystack-8525",
+      "language": "python",
+      "base_commit": "911f3523ab94472bd9a1f8ecbd2493437058daee",
+      "task_config_sha256": "fbee703905ced5d098e3856c0741b8c61a237578c60c0eb42320d9e1aa8cc9a7",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8525",
+      "container_digest": "sha256:ba142caef7c61bdf16da7d910b028385e600740f10e1d8e5ddefa31c73c2a697"
+    },
+    {
+      "ordinal": 76,
+      "task_id": "deepset-ai__haystack-8609",
+      "language": "python",
+      "base_commit": "3da5bac8c4743c59940e857d5d7a0552604d3fa9",
+      "task_config_sha256": "edd760fe60c3f284e4a0e33af146115a41938437497160d1da39d0307db75f49",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8609",
+      "container_digest": "sha256:08dc745310487e1641d74b46c5571a723997ab562cf33dcdbd92e932a36ffbcd"
+    },
+    {
+      "ordinal": 77,
+      "task_id": "deepset-ai__haystack-8619",
+      "language": "python",
+      "base_commit": "248dccbdd341941b988b622c51c26d1b9af66876",
+      "task_config_sha256": "ee50676bdef7b9fd66c928693577f7ba871f72bd9a30671493867e2ab4ddf5fa",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8619",
+      "container_digest": "sha256:542238a9d643bf56a4fc4d1294605fe4ea986abf618c5297aa0327b3ca010397"
+    },
+    {
+      "ordinal": 78,
+      "task_id": "deepset-ai__haystack-8725",
+      "language": "python",
+      "base_commit": "26b80778f52246214efe72b777d548f85d810198",
+      "task_config_sha256": "8466f92ec337b1ec3ac16f4ec22c81c26f2ef529a3c83856489c04c21a71e21b",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8725",
+      "container_digest": "sha256:a425e8e9cd4430a462b3657bd4dc6b7bb8864a9f5cc623e15e8fcbc50d1e89d4"
+    },
+    {
+      "ordinal": 79,
+      "task_id": "deepset-ai__haystack-8799",
+      "language": "python",
+      "base_commit": "503d275ade85e04efed787ec421bdc55a5a77abf",
+      "task_config_sha256": "53c8e20a637f159f15edcbed09a61afec0a1c6e116cc44e9ccc7953a286bc3ef",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8799",
+      "container_digest": "sha256:0c601f00fe1ef50a3e5c20e2625db9504a886cbc94e20afe707435edde8e642c"
+    },
+    {
+      "ordinal": 80,
+      "task_id": "deepset-ai__haystack-8879",
+      "language": "python",
+      "base_commit": "de3d0a23e816d54717a7542a9a1a1f2eb7a7eaec",
+      "task_config_sha256": "640fb6e7b1acb0553bebcbe95f9ac5d5e941d1e56c949a9f7f61abb4aa13e10a",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8879",
+      "container_digest": "sha256:c7976addfb045c39e3f80ce1fa8f68dc69e96c586303ab9217c3698823672768"
+    },
+    {
+      "ordinal": 81,
+      "task_id": "deepset-ai__haystack-8940",
+      "language": "python",
+      "base_commit": "db4f23771abb41e598ad65041c997d72d6268dd9",
+      "task_config_sha256": "d52d362d35fe9a845fb377dcd65fe8d9623c855edb65bfedbcbdd90c379d2827",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8940",
+      "container_digest": "sha256:2f2bb280a72ff17dbaae7d2875587f1eac6596a8b6c2d6268d32eaeffc46d51d"
+    },
+    {
+      "ordinal": 82,
+      "task_id": "deepset-ai__haystack-8969",
+      "language": "python",
+      "base_commit": "830e7497c3a23cfd3354665ec6c77cec0e8105b3",
+      "task_config_sha256": "ada797f190ad2b51e22bfb7114dd9e26f78654816162f9a1edd77412dd39510c",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8969",
+      "container_digest": "sha256:5149fb83aa1182caeaed12b89468ccfbcfcb33c583e652194706ad66572b3331"
+    },
+    {
+      "ordinal": 83,
+      "task_id": "deepset-ai__haystack-8973",
+      "language": "python",
+      "base_commit": "9da6696a45c0141715cd95030c861c3e9f3f40cf",
+      "task_config_sha256": "750dab17e282924c7e9e7a57ef6f819912e62ff56fabe5887d36f47cb8c42543",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8973",
+      "container_digest": "sha256:fdb17687cd1d42e711753a41bc3ddf94530ea5d70119551afcd530a40ed6d1b9"
+    },
+    {
+      "ordinal": 84,
+      "task_id": "deepset-ai__haystack-8981",
+      "language": "python",
+      "base_commit": "c4fafd9b04a6d0988a23ecda626c2473891ef7e5",
+      "task_config_sha256": "bee258bfff34a895e214070c5014e56b91434f3295ef569e9241142798676d3c",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8981",
+      "container_digest": "sha256:9da2d5bbfd3230762316ce38f598717cf4d39367d85c76d49b0d1141f21d44e0"
+    },
+    {
+      "ordinal": 85,
+      "task_id": "deepset-ai__haystack-8992",
+      "language": "python",
+      "base_commit": "c4fafd9b04a6d0988a23ecda626c2473891ef7e5",
+      "task_config_sha256": "6c287c5b20ca5da2d07ee88bdb2c93136e49d1ae6c3b8ec98651a4370f590166",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8992",
+      "container_digest": "sha256:0cdeae4dc43ebc2f33f821085e2b139541d39093939b0e48a43b6ba79fafe605"
+    },
+    {
+      "ordinal": 86,
+      "task_id": "deepset-ai__haystack-8993",
+      "language": "python",
+      "base_commit": "c4fafd9b04a6d0988a23ecda626c2473891ef7e5",
+      "task_config_sha256": "886dd4b40f71a8975001bb19c39cf8f8b8e77483edfdb2251aa36ddf3e695f3e",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8993",
+      "container_digest": "sha256:96e9f1b682109b23e74bb31998e0a3dc66c4e39541c816302c979e04d9b91f35"
+    },
+    {
+      "ordinal": 87,
+      "task_id": "deepset-ai__haystack-8997",
+      "language": "python",
+      "base_commit": "c037052581a1caef3287332635ca73bcd3bb07ea",
+      "task_config_sha256": "6ddd4a9b225ee9ec573681cd59e59d198db26d4b95cca6c8b97e8359de2e6042",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-8997",
+      "container_digest": "sha256:9e412ed1205fafae2ab564a6e88da2188f59185260da9d999409fa40fea23a8f"
+    },
+    {
+      "ordinal": 88,
+      "task_id": "deepset-ai__haystack-9027",
+      "language": "python",
+      "base_commit": "4edefe3e56d1656298c3f9a767da2e5292551432",
+      "task_config_sha256": "2309918f277c58d0c6d3a4a8c38ca3d3dd029efdadc6a887e6be27453bb4b1e3",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-9027",
+      "container_digest": "sha256:93b4237a333b95bbfdf0d7e1774a33d0751cd625418ba6dd57da3352d7b89f29"
+    },
+    {
+      "ordinal": 89,
+      "task_id": "deepset-ai__haystack-9066",
+      "language": "python",
+      "base_commit": "db50579bbfdd89aeaf17b73d0dcd50b5ea93f1dc",
+      "task_config_sha256": "7433c884dda67ce9d6a51707d1fc30d3093694c663f4c26778c004c4ac2021fb",
+      "container_image": "starryzhang/sweb.eval.x86_64.deepset-ai_1776_haystack-9066",
+      "container_digest": "sha256:52ec95312240019cb456d16e526ce4a58fc285ee14afa7ac379f0090fd45d2a2"
+    },
+    {
+      "ordinal": 90,
+      "task_id": "delgan__loguru-1297",
+      "language": "python",
+      "base_commit": "e310e2029102b5d63a679a2b64501c045aa86336",
+      "task_config_sha256": "caacc469614a102a5bc45a0cb7a01510dac4f1767b10ae48ad2937845e07424b",
+      "container_image": "starryzhang/sweb.eval.x86_64.delgan_1776_loguru-1297",
+      "container_digest": "sha256:1bf107cd955697cfd6a5f67ad6408a3af87a5521ba22379217cc8808c91666f7"
+    },
+    {
+      "ordinal": 91,
+      "task_id": "delgan__loguru-1306",
+      "language": "python",
+      "base_commit": "3cfd03fb6fd2176b90ad14223408f3c4ec803cb6",
+      "task_config_sha256": "10518ed28dc817e2ac90ac4d58416c0243b63dbfcb358cb94421d9bffce306ee",
+      "container_image": "starryzhang/sweb.eval.x86_64.delgan_1776_loguru-1306",
+      "container_digest": "sha256:8f0ce0b701bf836f6743e86758c28c0ae30bde25645cd9347de4ce3f2904b423"
+    },
+    {
+      "ordinal": 92,
+      "task_id": "dynaconf__dynaconf-1225",
+      "language": "python",
+      "base_commit": "39acdeef6424bf7e336ff71cf3a04540b92e2fcd",
+      "task_config_sha256": "d22fab2538ad261591d61f03690e85be3a2a84fdf3c89c2df0efbab2c8b0ae68",
+      "container_image": "starryzhang/sweb.eval.x86_64.dynaconf_1776_dynaconf-1225",
+      "container_digest": "sha256:9df52265e4c39194505c421335b116158caaa2caeecd40e95c15318f925897c9"
+    },
+    {
+      "ordinal": 93,
+      "task_id": "dynaconf__dynaconf-1238",
+      "language": "python",
+      "base_commit": "9a834e069fd04cffadbb2d2e3ccc70342a872252",
+      "task_config_sha256": "f1ccb3ad74005a5dbfb6be14db4c3c14ceceb1e0467877506f7f5306f2a54bf7",
+      "container_image": "starryzhang/sweb.eval.x86_64.dynaconf_1776_dynaconf-1238",
+      "container_digest": "sha256:425b314db6c34f4b3eef16ae484857fdfed1f1e97bc74a7e4c3307eb5172c0d9"
+    },
+    {
+      "ordinal": 94,
+      "task_id": "dynaconf__dynaconf-1241",
+      "language": "python",
+      "base_commit": "105e6312f8ce3414ba0bebf88ad6e35b3953df38",
+      "task_config_sha256": "ccf6d3d9fa5eb25a6f00ea2f09123737274f44e3165944584baff1f561e5877e",
+      "container_image": "starryzhang/sweb.eval.x86_64.dynaconf_1776_dynaconf-1241",
+      "container_digest": "sha256:c5930010f69611e20ec838903de6d76a8bd61284ffdfb6237fbbc36d881bfed8"
+    },
+    {
+      "ordinal": 95,
+      "task_id": "dynaconf__dynaconf-1249",
+      "language": "python",
+      "base_commit": "71ea887ade58f57cbc5b37f311188bfb7cda8ca5",
+      "task_config_sha256": "b7a9f7242c9d474281f1ea1f79207f1a3fc0b4af39be60865acebd6690c6aa83",
+      "container_image": "starryzhang/sweb.eval.x86_64.dynaconf_1776_dynaconf-1249",
+      "container_digest": "sha256:0d360cf489eb690491a6b5d83bad5486dbdc66c043cb3e16cbd8a1cbcd6fa4b4"
+    },
+    {
+      "ordinal": 96,
+      "task_id": "encode__starlette-2812",
+      "language": "python",
+      "base_commit": "f13d354e18141cea9041ffad603d98197d880a73",
+      "task_config_sha256": "9c024c8be1d43a1e99f3835b32299ff13711a098c6c327593f4b515a4244e325",
+      "container_image": "starryzhang/sweb.eval.x86_64.encode_1776_starlette-2812",
+      "container_digest": "sha256:1e3f51550e6da9d1a4a754da762010285700cff69475a6b6256986da9cead406"
+    },
+    {
+      "ordinal": 97,
+      "task_id": "facebookresearch__hydra-3005",
+      "language": "python",
+      "base_commit": "0ede84058e57a40260a93ae4f9abe08a572b23e0",
+      "task_config_sha256": "5fbf56831cae5b54cd9b591f491b0ac5574963507d306c454efe7034af6082ae",
+      "container_image": "starryzhang/sweb.eval.x86_64.facebookresearch_1776_hydra-3005",
+      "container_digest": "sha256:59bcfa268ece5b09701f7284d5a19378e571b13a84e83751f1a6d3300fbb2c67"
+    },
+    {
+      "ordinal": 98,
+      "task_id": "falconry__falcon-2366",
+      "language": "python",
+      "base_commit": "06fdf2885d70149803dbc47324ae8c951b7e58b3",
+      "task_config_sha256": "32914f90f37f0a3fa9a8c6b509dff2473cca35652515c18237e20f81f6357d89",
+      "container_image": "starryzhang/sweb.eval.x86_64.falconry_1776_falcon-2366",
+      "container_digest": "sha256:7d43b88afeddc14314dbc783731c869db4ab2f8285b956ce4d5085b18017be17"
+    },
+    {
+      "ordinal": 99,
+      "task_id": "falconry__falcon-2419",
+      "language": "python",
+      "base_commit": "77d5e6394a88ead151c9469494749f95f06b24bf",
+      "task_config_sha256": "89ea6e35f45c9aa3ded5ed78a466ff1f5569237a4369535c7b462b96d3ab4767",
+      "container_image": "starryzhang/sweb.eval.x86_64.falconry_1776_falcon-2419",
+      "container_digest": "sha256:87b14d55f8ffaa14a8f2372b7c11e80da41985490d346071a1291e6fcb22576b"
+    },
+    {
+      "ordinal": 100,
+      "task_id": "feast-dev__feast-5036",
+      "language": "python",
+      "base_commit": "48a4285b3a91bd6e490d6562591de612b96a5e02",
+      "task_config_sha256": "7d40303a258f48cb645ee13f3afa5fe66309e68f0e422f981a14a9d7d128a6aa",
+      "container_image": "starryzhang/sweb.eval.x86_64.feast-dev_1776_feast-5036",
+      "container_digest": "sha256:d343f81925e9ced9ceb66b6b1144ca308798287a76e1e0484387543eb046100d"
+    },
+    {
+      "ordinal": 101,
+      "task_id": "flexget__flexget-4244",
+      "language": "python",
+      "base_commit": "be3c243f9968122cd23543b22d597352922c6bfa",
+      "task_config_sha256": "80086c0e4ba294cd88af757d5649af017a5b93833245b99f23d0f7603c9d8a79",
+      "container_image": "starryzhang/sweb.eval.x86_64.flexget_1776_flexget-4244",
+      "container_digest": "sha256:bc092a1a5defcba454fdaeba669802ef5be4b933f8b02d6258344e8230c26583"
+    },
+    {
+      "ordinal": 102,
+      "task_id": "flexget__flexget-4306",
+      "language": "python",
+      "base_commit": "05c34fe1d7028d6a81e94e4dce99bfc62efd1e91",
+      "task_config_sha256": "369acc5a9fd58b4cbdc94939486f6ebe8faca1fd061559a590d566860b76e6b5",
+      "container_image": "starryzhang/sweb.eval.x86_64.flexget_1776_flexget-4306",
+      "container_digest": "sha256:270574dbf68780dbef37c8c89fb43ef536d8d065d91b6a59c3d5f15a24cf346b"
+    },
+    {
+      "ordinal": 103,
+      "task_id": "fonttools__fonttools-3682",
+      "language": "python",
+      "base_commit": "e04dfaab53c54b83096222993b914dc62e483156",
+      "task_config_sha256": "3cf8bcc91ee5d4efbb29df74a571fd8e3ef147a694b80774a28fba3171acb0a2",
+      "container_image": "starryzhang/sweb.eval.x86_64.fonttools_1776_fonttools-3682",
+      "container_digest": "sha256:f021a239cb05a28d75a5ae604b0e1ecbe7b4e6a8d1a2608a9effca0e6e9c07cc"
+    },
+    {
+      "ordinal": 104,
+      "task_id": "fonttools__fonttools-3726",
+      "language": "python",
+      "base_commit": "7ad7cfd0588e6ee67bdfc0f1bc2e43dd4503e44d",
+      "task_config_sha256": "d1c1f4e4e4e4d7779b19fc89cf4e0fe36340fd6c13a7beb3bdd51ca3f80699ad",
+      "container_image": "starryzhang/sweb.eval.x86_64.fonttools_1776_fonttools-3726",
+      "container_digest": "sha256:5fce60cfb3b457b7c1ce753c0119736619120c818ee683f2d96acd6aecd1af69"
+    },
+    {
+      "ordinal": 105,
+      "task_id": "geopandas__geopandas-3471",
+      "language": "python",
+      "base_commit": "b96d3e05238c615d87bd9042b057e4b08d030313",
+      "task_config_sha256": "50f6d79e63e3ccc1bfa3e0b5cb0c0c49adb5829efc831528aeab62c92447903d",
+      "container_image": "starryzhang/sweb.eval.x86_64.geopandas_1776_geopandas-3471",
+      "container_digest": "sha256:30cdb1e6b8ef0b0eb5979a027edf52f145e7235bb06319d814bd05ec227edeb0"
+    },
+    {
+      "ordinal": 106,
+      "task_id": "hiyouga__llama-factory-7505",
+      "language": "python",
+      "base_commit": "f54733460427cf2b126b8b8737fdd732c0e19d9c",
+      "task_config_sha256": "4f04d5c1ed259db4355b65c0eedb208a44ce88d6607e60c7ac70c52f6c93a36f",
+      "container_image": "starryzhang/sweb.eval.x86_64.hiyouga_1776_llama-factory-7505",
+      "container_digest": "sha256:b1a7c33ec266a11cdd9d2e13dfaf88e1002cee4709cdbf1dc8f124363e60eed4"
+    },
+    {
+      "ordinal": 107,
+      "task_id": "huggingface__smolagents-285",
+      "language": "python",
+      "base_commit": "bd08d6485daad3a8eba8d22ca0c185c6653acf2c",
+      "task_config_sha256": "d7008f091d4c882f4e2c892349c7a023285373cc5157c5b4e7c01254bcc212d1",
+      "container_image": "starryzhang/sweb.eval.x86_64.huggingface_1776_smolagents-285",
+      "container_digest": "sha256:6ea5de75644fcb825d6307da31f937a58a9600f7a27be95e1709370861fa82fb"
+    },
+    {
+      "ordinal": 108,
+      "task_id": "huggingface__smolagents-405",
+      "language": "python",
+      "base_commit": "022947a2a587483ac897f403f52a1e0a50f53667",
+      "task_config_sha256": "bda6954126be3eed3883ffcce0c458a1ac6fbcd2ac288a6f255345bff91d5a26",
+      "container_image": "starryzhang/sweb.eval.x86_64.huggingface_1776_smolagents-405",
+      "container_digest": "sha256:811d74f130263cf5b861ca3d75322d67e6f0c927031a8a380c470f21cf3a7090"
+    },
+    {
+      "ordinal": 109,
+      "task_id": "huggingface__smolagents-731",
+      "language": "python",
+      "base_commit": "84089bcc57adb3ab0937e91ae8ec7f53f2131b25",
+      "task_config_sha256": "120e38ab339bd6f0cf3124349aa1ca420b26e2263331f46a87ace1a9a4ce4b2e",
+      "container_image": "starryzhang/sweb.eval.x86_64.huggingface_1776_smolagents-731",
+      "container_digest": "sha256:a1744e3555440209a1bef3039779e4debff7b442bd33c143a0a11cac4d4f27f6"
+    },
+    {
+      "ordinal": 110,
+      "task_id": "huggingface__smolagents-843",
+      "language": "python",
+      "base_commit": "bf3686e59347320c95503573979a4fc3ad6be9ab",
+      "task_config_sha256": "bb610e7ff9d2aede55a6c2b478a8bf4670441ac736c845f54d129e650828e1b1",
+      "container_image": "starryzhang/sweb.eval.x86_64.huggingface_1776_smolagents-843",
+      "container_digest": "sha256:b6cc0ad474b5d91085f4e63ce08a7963a642ac3164cd30c02467ba94f572679f"
+    },
+    {
+      "ordinal": 111,
+      "task_id": "icloud-photos-downloader__icloud_photos_downloader-1060",
+      "language": "python",
+      "base_commit": "337ea77aefb5c1189681a2971c037caeeec43f51",
+      "task_config_sha256": "96422d722bf73b394ecafa1f767ab335737bd3dea84711a11322535ae6bf6ada",
+      "container_image": "starryzhang/sweb.eval.x86_64.icloud-photos-downloader_1776_icloud_photos_downloader-1060",
+      "container_digest": "sha256:2fe4a7e90552bf9780c26d0fba8d2265abb7d44719ec4d2b2d87ec25f3e379f9"
+    },
+    {
+      "ordinal": 112,
+      "task_id": "instructlab__instructlab-2526",
+      "language": "python",
+      "base_commit": "22b88e7d3866ca5410bb2ecfd3081486d0566dc5",
+      "task_config_sha256": "8e15695abdffff1261db65f5697e19fc654699a8f15aaf794476a4bbf87d875c",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-2526",
+      "container_digest": "sha256:501410d092ab6d54dd38aa870eafd95dbfb58b496459777dfaad8d8b54357f6b"
+    },
+    {
+      "ordinal": 113,
+      "task_id": "instructlab__instructlab-2540",
+      "language": "python",
+      "base_commit": "bcf450d0eb712309fa22fd23073ddfba51d575e8",
+      "task_config_sha256": "35fb3e5fe8405b8cd40e8221009db5b23ddd1c85fb11e935ec00e2e03261642a",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-2540",
+      "container_digest": "sha256:59d292675c3671c8d864ae9a6bd7c9fe7b7a8afe1656f0b4cfaa4f22ef142516"
+    },
+    {
+      "ordinal": 114,
+      "task_id": "instructlab__instructlab-2548",
+      "language": "python",
+      "base_commit": "cbd5be02c6694252263fc627a3078db8693a4f38",
+      "task_config_sha256": "32cbf18a47594cac90c420365265eba1f618033c2503cd33f9e25b54477faa96",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-2548",
+      "container_digest": "sha256:8f967d2c003fb8ab5bcd5834e9354769ad81226f538b4d91f62cd71a5e0894a3"
+    },
+    {
+      "ordinal": 115,
+      "task_id": "instructlab__instructlab-2572",
+      "language": "python",
+      "base_commit": "cd72f110dd6bff4a6b85e26637106d8b90746ccd",
+      "task_config_sha256": "7ae99d3becf920d55f7e5b03e7d0a6042e4d6382e02726f711a9610061712726",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-2572",
+      "container_digest": "sha256:a30d53b8f326171385c032d09dfe51f3e23d208f43ea4af0cdff025d932de146"
+    },
+    {
+      "ordinal": 116,
+      "task_id": "instructlab__instructlab-2585",
+      "language": "python",
+      "base_commit": "b56e1ae626617a1e5982126302e0e4c2abd7e649",
+      "task_config_sha256": "4b43caedf5987d2a4236e0da902e83984cd5bba614393185ea0be4db20e0714c",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-2585",
+      "container_digest": "sha256:8e2706a6eeeff07b9734ddc3eddecbcb8285fa397a15850de1c1356ea9120526"
+    },
+    {
+      "ordinal": 117,
+      "task_id": "instructlab__instructlab-2592",
+      "language": "python",
+      "base_commit": "11237883edfd33e9c41abdb869b449160bc1dbbf",
+      "task_config_sha256": "9f61d69225274f3be5fb315a54f0f1c274e2d2f00ed3644d6e83e2de9698742c",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-2592",
+      "container_digest": "sha256:dd118bb6db9a7125977d8b0e55e6ed7a46906fe90a139d93c67bd69ed6b24b68"
+    },
+    {
+      "ordinal": 118,
+      "task_id": "instructlab__instructlab-2825",
+      "language": "python",
+      "base_commit": "e0a1e8ce2fa10b9730dc9f6b3d4036f4e63947d9",
+      "task_config_sha256": "033b083f93f9e9b1b20fef78afc0bbf25be2b6a1334d928581a0b22518a4f2cc",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-2825",
+      "container_digest": "sha256:17fbebd52daae8bebfead069b12a60102597f9871115ec877b3f4854f88f36bc"
+    },
+    {
+      "ordinal": 119,
+      "task_id": "instructlab__instructlab-2886",
+      "language": "python",
+      "base_commit": "2fd5adb8fec09c51cbd607e4e852f2c1d4293348",
+      "task_config_sha256": "adf2219b75718bd1465d0a4e300c2f3066516076a5607914cdb32bf17a2168fd",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-2886",
+      "container_digest": "sha256:0554e8fb75628ac0c926a097186ec5bd64a0e296820e71ef2b7851d4f5827e36"
+    },
+    {
+      "ordinal": 120,
+      "task_id": "instructlab__instructlab-2927",
+      "language": "python",
+      "base_commit": "5e7c7b4d53ce320a4de201c31c4fdd153ab207bc",
+      "task_config_sha256": "aa4f466a5aece147a93790487404d816e70cde0007d78db27e0dfe9feeeb3696",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-2927",
+      "container_digest": "sha256:526c1cb1ee7282b4a0b815c9f7e3b1f0c8fb1bca943b10a9042e6724c56de2fb"
+    },
+    {
+      "ordinal": 121,
+      "task_id": "instructlab__instructlab-3060",
+      "language": "python",
+      "base_commit": "ac7cc07f8f6c7ffb8860d9b799c4b85aaacf11ae",
+      "task_config_sha256": "4a579f4131041364623e27d0145004980d129d9118c03fc0f35688c848772de9",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-3060",
+      "container_digest": "sha256:3cbe7ae57b731c1231027c34c179ff3a46f88cc75fe1e970590ece16f3fc2a34"
+    },
+    {
+      "ordinal": 122,
+      "task_id": "instructlab__instructlab-3118",
+      "language": "python",
+      "base_commit": "a060edf190c8820adb8428678fb923f184aa42a4",
+      "task_config_sha256": "41ace975aa0bc9db74e872b0949fbdb06974d07f8522a4bf77dd8aec84565b59",
+      "container_image": "starryzhang/sweb.eval.x86_64.instructlab_1776_instructlab-3118",
+      "container_digest": "sha256:4abf32407f8724bfa1d2a5cfc349b7a37d2037ef200d592a161d636761c6669e"
+    },
+    {
+      "ordinal": 123,
+      "task_id": "ipython__ipython-14695",
+      "language": "python",
+      "base_commit": "b8220b5b975e3f4e19d078033aa1e68da28e2c9b",
+      "task_config_sha256": "94108f0317c1c068e2d6cfcfc865f38dbedaeb417b07ad2c5fdcbff82c2302ec",
+      "container_image": "starryzhang/sweb.eval.x86_64.ipython_1776_ipython-14695",
+      "container_digest": "sha256:12e03012923068e4e1853aeed8f12850e049d7031562bbfe6d0b98829af53548"
+    },
+    {
+      "ordinal": 124,
+      "task_id": "ipython__ipython-14798",
+      "language": "python",
+      "base_commit": "801c9adb94b213fc5e8cacb0d9920a0ff7727c2e",
+      "task_config_sha256": "eeb6308ba1eae577cad67538b84637e34442901a6722d34f857fcc6c379fb53a",
+      "container_image": "starryzhang/sweb.eval.x86_64.ipython_1776_ipython-14798",
+      "container_digest": "sha256:f4d06bda3d7795e7fb05a06e23c7f3c2bd8d6590537a6988814a4abb893c5747"
+    },
+    {
+      "ordinal": 125,
+      "task_id": "ipython__ipython-14822",
+      "language": "python",
+      "base_commit": "a6a4b0a85d70677937f7fd83c23185384d4f7827",
+      "task_config_sha256": "dbbd536db396ae427525e02704c89a4e24f0803012a0acb28c93e97388968a8a",
+      "container_image": "starryzhang/sweb.eval.x86_64.ipython_1776_ipython-14822",
+      "container_digest": "sha256:33b215e165c050e8a4b91a8b180cf57f8e88378d122f24077c5340a3662761a7"
+    },
+    {
+      "ordinal": 126,
+      "task_id": "ipython__ipython-14838",
+      "language": "python",
+      "base_commit": "978324813ce6a4a39156c549436b89eb22944038",
+      "task_config_sha256": "7b3d2840889825cd484dd2d6b4654ef69aead253cbc5351cdcae7ae55dfef211",
+      "container_image": "starryzhang/sweb.eval.x86_64.ipython_1776_ipython-14838",
+      "container_digest": "sha256:10aa4cfa3d25836e97ac83ecbbef07e1b2fcbfd173a98d8d9ced31386f6ce50a"
+    },
+    {
+      "ordinal": 127,
+      "task_id": "iterative__dvc-10711",
+      "language": "python",
+      "base_commit": "31270c14e30901ae5b178f72c67a83efe070768c",
+      "task_config_sha256": "a30aa3624d4b37619b1765251e611175b8b08ede1a5873da5d61006f9f1cb841",
+      "container_image": "starryzhang/sweb.eval.x86_64.iterative_1776_dvc-10711",
+      "container_digest": "sha256:0584b83411928b720f52813b52a63fe9229fca2917b569c743c7beb25019bda8"
+    },
+    {
+      "ordinal": 128,
+      "task_id": "jazzband__tablib-613",
+      "language": "python",
+      "base_commit": "70775bc922602ae535e0b2e525f6926030334ab8",
+      "task_config_sha256": "e4f3c3269a50a090bf47d2df3206aa7e307f9c420e321ebacb5da61f4ae155da",
+      "container_image": "starryzhang/sweb.eval.x86_64.jazzband_1776_tablib-613",
+      "container_digest": "sha256:b79693f36e1876a87aa343ea47e7a143e6f5097ef1413725c405908ebea44b7b"
+    },
+    {
+      "ordinal": 129,
+      "task_id": "joke2k__faker-2142",
+      "language": "python",
+      "base_commit": "6edfdbf6ae90b0153309e3bf066aa3b2d16494a7",
+      "task_config_sha256": "06cf7be2687bca387a131000cbc14ab6daf156fbf6d15ef7ddb6b70c99013c01",
+      "container_image": "starryzhang/sweb.eval.x86_64.joke2k_1776_faker-2142",
+      "container_digest": "sha256:1d8d01f46597c9c1e66fb7f38879b8fa5e73063ec96d08834f6f3e8cff2ecfa6"
+    },
+    {
+      "ordinal": 130,
+      "task_id": "joke2k__faker-2155",
+      "language": "python",
+      "base_commit": "da39d8262b1b4a3d88c3bf934c047deca354b01e",
+      "task_config_sha256": "2e2d28fe8f0879af4a2cb0c4a9892054ea3e0c3520b33569e4462c459c02eed2",
+      "container_image": "starryzhang/sweb.eval.x86_64.joke2k_1776_faker-2155",
+      "container_digest": "sha256:9120bba201c9b120f75f2f44eb844cd835fd14b2c162350ab930272a2919c18c"
+    },
+    {
+      "ordinal": 131,
+      "task_id": "joke2k__faker-2162",
+      "language": "python",
+      "base_commit": "adae52da073f306f94183aec3b92b4333fead930",
+      "task_config_sha256": "35269250f66b5fbfc5a8da613e5d8e7dfbcba4e3fc274fe9ca51d0b962f2059a",
+      "container_image": "starryzhang/sweb.eval.x86_64.joke2k_1776_faker-2162",
+      "container_digest": "sha256:6dad8a096c235497efbed8d8b39e316382e690ee6e13df976f2ec1b93a303c6e"
+    },
+    {
+      "ordinal": 132,
+      "task_id": "joke2k__faker-2173",
+      "language": "python",
+      "base_commit": "7186962a1607332682dc1dad4e2b0d7c97825b84",
+      "task_config_sha256": "ae9d51da6dbc51e754baecc3612691d144f9182e610918fcfd57a067e4c7025f",
+      "container_image": "starryzhang/sweb.eval.x86_64.joke2k_1776_faker-2173",
+      "container_digest": "sha256:095410221a09af09250883b8afd37bfb9846ae1f09994d9c8b7a7e1a7d7fd69c"
+    },
+    {
+      "ordinal": 133,
+      "task_id": "joke2k__faker-2190",
+      "language": "python",
+      "base_commit": "2a1053c5ca995c30d52f60ae575f8bb2ef92b0d2",
+      "task_config_sha256": "fa60be4d21b2527a45a61d09204d25475d6274946d37656dbc589808880ed717",
+      "container_image": "starryzhang/sweb.eval.x86_64.joke2k_1776_faker-2190",
+      "container_digest": "sha256:a92de4a23d2ae854456e7da2adafdacb780bfbef51fb53c16619eeb89becd2f1"
+    },
+    {
+      "ordinal": 134,
+      "task_id": "jupyterlab__jupyter-ai-1022",
+      "language": "python",
+      "base_commit": "bf52423a81254009e9be6ca1b89a3f4c6e49ed49",
+      "task_config_sha256": "af227f778227c9863da21689bbef46a4de09a4cee08835d8b71c8f91fc0f0249",
+      "container_image": "starryzhang/sweb.eval.x86_64.jupyterlab_1776_jupyter-ai-1022",
+      "container_digest": "sha256:c8d278149d748009f6ccdf67077819e37b5359db1b31fd589f77394af53564dd"
+    },
+    {
+      "ordinal": 135,
+      "task_id": "jupyterlab__jupyter-ai-1125",
+      "language": "python",
+      "base_commit": "922712c2f7136fba9b6e7c077bc8d19053230ec3",
+      "task_config_sha256": "756d20a873d8d70da82414c1641ef39cee73b7d0d3a38da1557b15bd582ba2b4",
+      "container_image": "starryzhang/sweb.eval.x86_64.jupyterlab_1776_jupyter-ai-1125",
+      "container_digest": "sha256:81991658fb8462670cee54f6f6eff9a46db33869839e80b6bd24ef3ab227a671"
+    },
+    {
+      "ordinal": 136,
+      "task_id": "jupyterlab__jupyter-ai-1294",
+      "language": "python",
+      "base_commit": "0e2c4e41ffdc4c35132840d97135664843c9fe2a",
+      "task_config_sha256": "bc77f39f39076963f363c6d9d273121451f5f6d78f7c0cb2031da7a7350812be",
+      "container_image": "starryzhang/sweb.eval.x86_64.jupyterlab_1776_jupyter-ai-1294",
+      "container_digest": "sha256:9fae49f245cad7d4ab640c2ceae9550eb2a65143a091cb78ca934f09d105f2ad"
+    },
+    {
+      "ordinal": 137,
+      "task_id": "kedro-org__kedro-4387",
+      "language": "python",
+      "base_commit": "46259b9f5b89a226d47e2119afb40ad7b4fa5e63",
+      "task_config_sha256": "8e6cdcefd1e11507f4fe2271911a896c8acf358a456a9ad35570e62440eb1fe2",
+      "container_image": "starryzhang/sweb.eval.x86_64.kedro-org_1776_kedro-4387",
+      "container_digest": "sha256:e2c78af9a337c5337d3a5c385faf8c11016ec9640a073239945f5eeb7a9d43b7"
+    },
+    {
+      "ordinal": 138,
+      "task_id": "kedro-org__kedro-4406",
+      "language": "python",
+      "base_commit": "a565d6607d1d16933dbb1ea42cfb9de39ef80980",
+      "task_config_sha256": "c07185fc76f1035c19da3f260ca49d1736784c0c0b566ddcec43b9a7a6079d6f",
+      "container_image": "starryzhang/sweb.eval.x86_64.kedro-org_1776_kedro-4406",
+      "container_digest": "sha256:59e8ce0d99d2290c49593acb27639d1349e220b6aea2a69bc21ed34d00bdcade"
+    },
+    {
+      "ordinal": 139,
+      "task_id": "kedro-org__kedro-4408",
+      "language": "python",
+      "base_commit": "1536a2aa652b50fe4447a96dadadec8312698a4c",
+      "task_config_sha256": "efb85e889c03c7b7e03bc12ef7c325c94b71eb8d611f4f2116f800ad6eda2f22",
+      "container_image": "starryzhang/sweb.eval.x86_64.kedro-org_1776_kedro-4408",
+      "container_digest": "sha256:205790db99f84f09d18a87d71c811b3cbc75181fa30181dd31e19f529b03cf06"
+    },
+    {
+      "ordinal": 140,
+      "task_id": "kedro-org__kedro-4427",
+      "language": "python",
+      "base_commit": "c68072270c5cd888f945d6812b0fffdd823a698c",
+      "task_config_sha256": "b97301ab751ef8d45430b50ddfd58fadbbb1e82b1a95916edc24dc1312550ada",
+      "container_image": "starryzhang/sweb.eval.x86_64.kedro-org_1776_kedro-4427",
+      "container_digest": "sha256:b82e3fc608c8386f1b405e26cea1557c68fc4fadfdb8bedbf9464dea7f50f35e"
+    },
+    {
+      "ordinal": 141,
+      "task_id": "kedro-org__kedro-4580",
+      "language": "python",
+      "base_commit": "769629fb23c19a7629ee8b1ae97940665d6d57bf",
+      "task_config_sha256": "e190ac53962734065dae517b338942addea9da769b6acf926db9a9be2c7e5074",
+      "container_image": "starryzhang/sweb.eval.x86_64.kedro-org_1776_kedro-4580",
+      "container_digest": "sha256:04e52eb08a14b1ca52b01bc9f18d8c0eecbcee9cbb9cfb5b17e21564d91cd3ce"
+    },
+    {
+      "ordinal": 142,
+      "task_id": "keras-team__keras-20389",
+      "language": "python",
+      "base_commit": "c31fad7b695faad63108c39bd008da9681bd8183",
+      "task_config_sha256": "7a353aa6357aee38982ed2ff1f0b1e3b84b30f5f1f84c1b39e85202e7feec85d",
+      "container_image": "starryzhang/sweb.eval.x86_64.keras-team_1776_keras-20389",
+      "container_digest": "sha256:3ff168d5605c290941b09f46feee320d99d8598895823ac84bbddca0bd9bdf3d"
+    },
+    {
+      "ordinal": 143,
+      "task_id": "keras-team__keras-20396",
+      "language": "python",
+      "base_commit": "1cc1eb5856cb05675e242a617dba8c047eb77dbb",
+      "task_config_sha256": "898c9bee744acd24f9a887c436143e5ef42b0e19fcc84727750b1b5c368e9f2f",
+      "container_image": "starryzhang/sweb.eval.x86_64.keras-team_1776_keras-20396",
+      "container_digest": "sha256:c5aef310583ee131298d900a0e28c2fa841af93ddebd4d4f4e6481c2c18f6c4c"
+    },
+    {
+      "ordinal": 144,
+      "task_id": "keras-team__keras-20443",
+      "language": "python",
+      "base_commit": "f9ea1a013c29e24001dc6cb7b10d9f740545fe58",
+      "task_config_sha256": "c72fed1e4f6f9b8b5e9d68f622febf06964580fedd89475f2f268e1c5b35d474",
+      "container_image": "starryzhang/sweb.eval.x86_64.keras-team_1776_keras-20443",
+      "container_digest": "sha256:8813e8a7aa1b2fcfc2b622a8db22f54504e92d3cf789b52d8b9c95ec26633ffa"
+    },
+    {
+      "ordinal": 145,
+      "task_id": "keras-team__keras-20534",
+      "language": "python",
+      "base_commit": "a93828a94f105909f9398c00d2cddf4ac43197ac",
+      "task_config_sha256": "48879b096460fa0f3baa8a158d117994af1944651bbd9ac31322083575204782",
+      "container_image": "starryzhang/sweb.eval.x86_64.keras-team_1776_keras-20534",
+      "container_digest": "sha256:2712b35a57377acb9f48899da6cd292c98156afd2316aea32114be93df40f221"
+    },
+    {
+      "ordinal": 146,
+      "task_id": "keras-team__keras-20609",
+      "language": "python",
+      "base_commit": "1597013645bfcd31207d31b969193b458ce85626",
+      "task_config_sha256": "a15ec6c7101b7a1148e7e75cb439bc6465d128505f0132aba162db57404bac2c",
+      "container_image": "starryzhang/sweb.eval.x86_64.keras-team_1776_keras-20609",
+      "container_digest": "sha256:2927349f2f9a243a32fba567851197ebc04ed27fef422915017b550fbe93da36"
+    },
+    {
+      "ordinal": 147,
+      "task_id": "keras-team__keras-20880",
+      "language": "python",
+      "base_commit": "465a3d2247f6f4deaa702989688de9caeae5c585",
+      "task_config_sha256": "93e9f664671922b1b30f944cbcbee5cb342ca069db8b7a18d45fb26e3e5fed4c",
+      "container_image": "starryzhang/sweb.eval.x86_64.keras-team_1776_keras-20880",
+      "container_digest": "sha256:4de029f06702fa2a7f0ef1133a66ca7a6dd9252c3ba903ef0c28d0e3383600f2"
+    },
+    {
+      "ordinal": 148,
+      "task_id": "keras-team__keras-21072",
+      "language": "python",
+      "base_commit": "d865f5f0f2b7862afb96a4bf3dabdd0d464e5da9",
+      "task_config_sha256": "f238e811f8702b4e471971276fca83c0ad29b686a3ee2c2d8fad9e5bd8f4d207",
+      "container_image": "starryzhang/sweb.eval.x86_64.keras-team_1776_keras-21072",
+      "container_digest": "sha256:f0abf0c3374a161d0b5ae9cc414db0f198988c40785a6a13cc3a76f5fe7ad60d"
+    },
+    {
+      "ordinal": 149,
+      "task_id": "koxudaxi__datamodel-code-generator-2259",
+      "language": "python",
+      "base_commit": "0def44efc13ac98ecef691daf217a31f6c459812",
+      "task_config_sha256": "15191d89edf69760f00541173ed276b6d33771d0d481408fd33c9b1209b83236",
+      "container_image": "starryzhang/sweb.eval.x86_64.koxudaxi_1776_datamodel-code-generator-2259",
+      "container_digest": "sha256:26236454107dd4e453db1eaccddaecb4bb9a28f92118d687b25e10b897e60dae"
+    },
+    {
+      "ordinal": 150,
+      "task_id": "koxudaxi__datamodel-code-generator-2327",
+      "language": "python",
+      "base_commit": "2edac1defc9ba641a91cd96dd2d06ab5419faf62",
+      "task_config_sha256": "2b031cae22a6454909147e428b24591b1ec8af240d44042a264b808c88172f22",
+      "container_image": "starryzhang/sweb.eval.x86_64.koxudaxi_1776_datamodel-code-generator-2327",
+      "container_digest": "sha256:f3c28450872ef6e49a1c3a30c14c482ada521d2189836456007399898ce8c851"
+    },
+    {
+      "ordinal": 151,
+      "task_id": "koxudaxi__datamodel-code-generator-2349",
+      "language": "python",
+      "base_commit": "9585ee54932bc135a05a6617d039d4f994daa7a3",
+      "task_config_sha256": "a8469cad8118342bb1d301156a479dbf1c1713ab5397341b1c869afe9ba78d4d",
+      "container_image": "starryzhang/sweb.eval.x86_64.koxudaxi_1776_datamodel-code-generator-2349",
+      "container_digest": "sha256:ecc60890a27c8aad9680ecdc934ca00a225ed3029899dcead9506f44efd309b4"
+    },
+    {
+      "ordinal": 152,
+      "task_id": "kozea__weasyprint-2300",
+      "language": "python",
+      "base_commit": "ca74c8e81ce48b0f7b838492cab8634b9f1d33b7",
+      "task_config_sha256": "f18f71be848749156418a009636df47c5a7ef3c5f7e2176873827f211cee3a5d",
+      "container_image": "starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2300",
+      "container_digest": "sha256:4276a99ea192182eb07ca908a34be6c7dd3ace649240dbeec6a9f48bae53bbf3"
+    },
+    {
+      "ordinal": 153,
+      "task_id": "kozea__weasyprint-2303",
+      "language": "python",
+      "base_commit": "d0fcb3c49700a43fd04f9030becbb59640f0ebdf",
+      "task_config_sha256": "a52bd5879e86877adf1abd4b0f225e83b3ca553ef7af08840e780e85dd7179cb",
+      "container_image": "starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2303",
+      "container_digest": "sha256:99d981bcfea6ca240f646ed36e1eea78d78238531aa8c6a325496c4cab644013"
+    },
+    {
+      "ordinal": 154,
+      "task_id": "kozea__weasyprint-2387",
+      "language": "python",
+      "base_commit": "9dc5ac4337b09df8c28b6d678485a4894d354970",
+      "task_config_sha256": "0d30bfe958005ea2bb5a49f2b01b5e340be7ae6a55dfea5a63bca9637287d0c3",
+      "container_image": "starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2387",
+      "container_digest": "sha256:cbcded300ce9e74fb6cd905cc9bbcdaf84ae5c876f859d022b178eb64736d7ae"
+    },
+    {
+      "ordinal": 155,
+      "task_id": "kozea__weasyprint-2398",
+      "language": "python",
+      "base_commit": "20197135f56dcd886248e671058933c14cdf5f78",
+      "task_config_sha256": "f8cf47abc2c6f93c77ae9537dce7d320b6fe2a111838a73c935ab5cadf760242",
+      "container_image": "starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2398",
+      "container_digest": "sha256:92a26cd60ef5038bcbf63434afff218308215a2ebf5bf3e06df2929fd06777d1"
+    },
+    {
+      "ordinal": 156,
+      "task_id": "kozea__weasyprint-2405",
+      "language": "python",
+      "base_commit": "fb462618190e87b4f0dec0bb677bcdea40b448a7",
+      "task_config_sha256": "593f4e9ce8f736989bce4fbcb28e1365efc3c692b3a2ed192eb9df68c3d2ee18",
+      "container_image": "starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2405",
+      "container_digest": "sha256:7d8fd2190dc84ca3e5becc2f1cc61047d6ae8cbfbafdecb7a1f078eec277bcf3"
+    },
+    {
+      "ordinal": 157,
+      "task_id": "kubernetes-client__python-2303",
+      "language": "python",
+      "base_commit": "4da83df8f0c0b97554e2f8a130218ca3b1396062",
+      "task_config_sha256": "9704eaac11eb510d3a4f2a1e79c51b2d9fe125c86486a87a9c19672c7615e9b7",
+      "container_image": "starryzhang/sweb.eval.x86_64.kubernetes-client_1776_python-2303",
+      "container_digest": "sha256:712420aa4b9eb90224e98d56fb9a2dc6d1a71bb95bc346f54ac42841cc647faf"
+    },
+    {
+      "ordinal": 158,
+      "task_id": "matplotlib__matplotlib-28933",
+      "language": "python",
+      "base_commit": "cf84d9a6410dec07f57916905c9f54bf00d22b2e",
+      "task_config_sha256": "ca42cf6306f24511d4c5964b014addd0e6de8c05a6545a226057f48856ba9b19",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-28933",
+      "container_digest": "sha256:4158a63b503b92f16ac92ebe7251915ec5c9474075d19f537cdf9be28d0dd37e"
+    },
+    {
+      "ordinal": 159,
+      "task_id": "matplotlib__matplotlib-29007",
+      "language": "python",
+      "base_commit": "235bf97906db7bb3dca3fcc646b3895982c95810",
+      "task_config_sha256": "686c193fc29619309964d24a9444aa147c08766eccb8dfab98fb5be02a2995c4",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29007",
+      "container_digest": "sha256:e6b19836c458cc71989bf043afca8cb178b9318453af12959292715a73c6efad"
+    },
+    {
+      "ordinal": 160,
+      "task_id": "matplotlib__matplotlib-29249",
+      "language": "python",
+      "base_commit": "eec68e40db9e2de2a592cdd6956443b2534bb37f",
+      "task_config_sha256": "a0f8ec5206f6ca1dbfc5c3ca9364781892c90fdf3dbbed8a0ed34c20797959e4",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29249",
+      "container_digest": "sha256:bcb41b6892dc5c5926c105c10714c0c4744c60664282e750dba408dd5bf4d36e"
+    },
+    {
+      "ordinal": 161,
+      "task_id": "matplotlib__matplotlib-29258",
+      "language": "python",
+      "base_commit": "6a84a5d408ee2fff112223e8ead94ef6ebfe9c2d",
+      "task_config_sha256": "2a2d813fb43a5c2a52332719ea71eabde2e25a6b0b34869df8c8d3fbc4bbee28",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29258",
+      "container_digest": "sha256:1029692859f71598b806e6ace7c49e2d4711818fb6d5634fb5b565047f41afb5"
+    },
+    {
+      "ordinal": 162,
+      "task_id": "matplotlib__matplotlib-29285",
+      "language": "python",
+      "base_commit": "7405482fdf3eba989ceb27e6ea71968e356d0b33",
+      "task_config_sha256": "fb415c6c828380ac2510088b7c29071d55c288b3d286ae6436d44e60e5230e3f",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29285",
+      "container_digest": "sha256:6bf6364a624cf9d82bbd7a4309cc974ff392b0a0c4cfcd9a2d975b2a097a86e0"
+    },
+    {
+      "ordinal": 163,
+      "task_id": "matplotlib__matplotlib-29388",
+      "language": "python",
+      "base_commit": "ba32c7e8e263675431b49d6eae71e7fa3945d286",
+      "task_config_sha256": "f2b72fab834be444fc632af8a2ec3d7873798ae91bdd67bafde7c63bb72b8e56",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29388",
+      "container_digest": "sha256:5bd74b365abfb026b87474fd52294179bf99c2b7bd29837966563fd5cc594916"
+    },
+    {
+      "ordinal": 164,
+      "task_id": "matplotlib__matplotlib-29431",
+      "language": "python",
+      "base_commit": "419b66158881af9da5b9b4d8f84b77f7a9c46105",
+      "task_config_sha256": "c7016c1f0d88e0c65824ac32254d9215efac16d027e8ba91aa6a34730d35ecad",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29431",
+      "container_digest": "sha256:47cfbeb74e640a7deab17e3a698bb3231d821ed0a799fb35fc423cccdf6a6a00"
+    },
+    {
+      "ordinal": 165,
+      "task_id": "matplotlib__matplotlib-29486",
+      "language": "python",
+      "base_commit": "ae2115c1456956fbc7073736b0999bf2d7342b2d",
+      "task_config_sha256": "abf32b0c8778e8d0a63c3c319e8eb8f16475be581b244751239470aa41c4fe64",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29486",
+      "container_digest": "sha256:5d488f70886bdc8bdea86f4c187778ec8ae5c63c104f36870be2a8f82286ec2d"
+    },
+    {
+      "ordinal": 166,
+      "task_id": "matplotlib__matplotlib-29537",
+      "language": "python",
+      "base_commit": "29f3a5ca0bd366d5bffebfcfba6181af322041b3",
+      "task_config_sha256": "397802e0e9a61eef798c4fd9fba3db583589555acd20bc70f18d6ff52f99c370",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29537",
+      "container_digest": "sha256:4f5a010178fe6d49631100b9f07d1de514c0509f1a0f74be7b1b6e3f2f70dbae"
+    },
+    {
+      "ordinal": 167,
+      "task_id": "matplotlib__matplotlib-29689",
+      "language": "python",
+      "base_commit": "0b7a88a967ce8d02284dd4c7e47889ccc0bbcbf0",
+      "task_config_sha256": "e646216237b7ee8d0ebd57b4d4e2c67e491d35397bed8a69cd56916a1d11af37",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29689",
+      "container_digest": "sha256:12ae68fa0bdb105f4fd1ca8e0c4f3953c9bb48c7cda02b5f865040dab60f2f9c"
+    },
+    {
+      "ordinal": 168,
+      "task_id": "matplotlib__matplotlib-29721",
+      "language": "python",
+      "base_commit": "92935966250922b21f688947593da7d1d15b4efc",
+      "task_config_sha256": "d884f29dc3c06b484df01535389206efb7876a05f51f889126c23871705043ba",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29721",
+      "container_digest": "sha256:ec745258e3ee601c32a6f7c8ee736d846b9f0c50057131f4e4af20876fd50484"
+    },
+    {
+      "ordinal": 169,
+      "task_id": "matplotlib__matplotlib-29781",
+      "language": "python",
+      "base_commit": "c887ecbc753763ff4232041cc84c9c6a44d20fd4",
+      "task_config_sha256": "28b70a63bd86d3f668cce7f6fe531b080620288b3fc195fc06a3595d50295a51",
+      "container_image": "starryzhang/sweb.eval.x86_64.matplotlib_1776_matplotlib-29781",
+      "container_digest": "sha256:1f1223d2d5aca77254dd8ab120a7a7e8a8a6cc86147bd69e6d2ce933d9fcd072"
+    },
+    {
+      "ordinal": 170,
+      "task_id": "mikedh__trimesh-2354",
+      "language": "python",
+      "base_commit": "1493543559f9a56366052b74003cccf06900fe27",
+      "task_config_sha256": "fc9bb3fb7b910ca7fd1fcfb2becd254e21a0f3e7352a6f0e6ca422fce4b8b211",
+      "container_image": "starryzhang/sweb.eval.x86_64.mikedh_1776_trimesh-2354",
+      "container_digest": "sha256:716c30b945c0abc6fcb011877a72250c87a94049562e9c4d2f269cdf3de8f56f"
+    },
+    {
+      "ordinal": 171,
+      "task_id": "mikedh__trimesh-2363",
+      "language": "python",
+      "base_commit": "a7a68157aefdeaa2e58b99980e3f3b6abdae2884",
+      "task_config_sha256": "09cf5e8b8ab482578f7c955006f7242430439c06105524a4d09426276b2ecdf3",
+      "container_image": "starryzhang/sweb.eval.x86_64.mikedh_1776_trimesh-2363",
+      "container_digest": "sha256:ae11eec2305ae2af11c1ccca569bb6bba17d409ab19ba787766763b388053b9a"
+    },
+    {
+      "ordinal": 172,
+      "task_id": "modelcontextprotocol__python-sdk-167",
+      "language": "python",
+      "base_commit": "08042c3307bdd0d4a66b0dd3200f38222f447b1e",
+      "task_config_sha256": "bc73736a6661010aebe1f1655b169c29a5eb1dade0448d1146ca676581c2868a",
+      "container_image": "starryzhang/sweb.eval.x86_64.modelcontextprotocol_1776_python-sdk-167",
+      "container_digest": "sha256:e930bb7752afa28895e18cecc114520f3c7ffb5b3f7f256c96194fc736245bea"
+    },
+    {
+      "ordinal": 173,
+      "task_id": "modelcontextprotocol__python-sdk-222",
+      "language": "python",
+      "base_commit": "2628e01f4b892b9c59f3bdd2abbad718c121c87a",
+      "task_config_sha256": "9e7dfc86cc02d32a55d44e6554137a092cf2e861f5b714449e6fff2f7ae8d6df",
+      "container_image": "starryzhang/sweb.eval.x86_64.modelcontextprotocol_1776_python-sdk-222",
+      "container_digest": "sha256:61a253f94c65138072585f05bceba04ce67c1b11c90fe673ad568fde4ff1b31b"
+    },
+    {
+      "ordinal": 174,
+      "task_id": "pallets__flask-5626",
+      "language": "python",
+      "base_commit": "62c56e08c43f5eb174d15dd050591cfba9aed548",
+      "task_config_sha256": "4a820d4fca22acd1da3955ba9e0f43dec885ab4d5bc1a6b41c3f1b58e4e8414f",
+      "container_image": "starryzhang/sweb.eval.x86_64.pallets_1776_flask-5626",
+      "container_digest": "sha256:f186a95ba6b073ec2660c6598b887a8f2bc4bbc46224447ba1922da54e28e991"
+    },
+    {
+      "ordinal": 175,
+      "task_id": "pallets__flask-5637",
+      "language": "python",
+      "base_commit": "10bdf61a0f751f3cb000f8f8ac5ac5b4bb535677",
+      "task_config_sha256": "d95c4d54f92c684ddca51da51ebf4be9b4f810eb163c4f0d3765104b63d1f40c",
+      "container_image": "starryzhang/sweb.eval.x86_64.pallets_1776_flask-5637",
+      "container_digest": "sha256:fcf2bada642123a3ca224b1f326212871654047a5b84eb9aadcb2ecf3b90e956"
+    },
+    {
+      "ordinal": 176,
+      "task_id": "patroni__patroni-3198",
+      "language": "python",
+      "base_commit": "e8a8bfe42f8f96747b0d9f432aaed907ebcf1c10",
+      "task_config_sha256": "af50a8d8e10f702ae0c39ffe8e3ecebdeb964e0bc7079cc4512b64a55c15e514",
+      "container_image": "starryzhang/sweb.eval.x86_64.patroni_1776_patroni-3198",
+      "container_digest": "sha256:52abb18aac814f279fbcd84de02e678f4b89ac9926fc9168b8b348b5b321ab3f"
+    },
+    {
+      "ordinal": 177,
+      "task_id": "pdm-project__pdm-3237",
+      "language": "python",
+      "base_commit": "fba5a6a65c37c2b9307c4d6c8ce3aacf7abb7c92",
+      "task_config_sha256": "982d6acd4361044e5f1deb7d5eced127a21ac2383919cbd10a32af2d4b9eb3db",
+      "container_image": "starryzhang/sweb.eval.x86_64.pdm-project_1776_pdm-3237",
+      "container_digest": "sha256:aa2522546b214b49ae26c41a2d1d0868398ecdae04d2b5448f5c5b0e8f287b2e"
+    },
+    {
+      "ordinal": 178,
+      "task_id": "pdm-project__pdm-3250",
+      "language": "python",
+      "base_commit": "5d3779ffe2709fbdb5bff1b4f0d33ef2c8c617d9",
+      "task_config_sha256": "f6b07d097479c0dafc948812fd72d961b183f45803e1b140b8b9ece02201dcde",
+      "container_image": "starryzhang/sweb.eval.x86_64.pdm-project_1776_pdm-3250",
+      "container_digest": "sha256:d11a31157045ecd2db9f66f7e0431bf85ae76cf590e940cd83a3add27901427c"
+    },
+    {
+      "ordinal": 179,
+      "task_id": "pdm-project__pdm-3255",
+      "language": "python",
+      "base_commit": "acb40b0713c30466dcbab73e6b98d1add8e5dd98",
+      "task_config_sha256": "c3ee548d49bffb6ddf25fd8ba3b130a4e51e8a3a77f23cf5e1d1782d979df4a0",
+      "container_image": "starryzhang/sweb.eval.x86_64.pdm-project_1776_pdm-3255",
+      "container_digest": "sha256:df0fcad6acbd2e25abccc7cfa877222daa06b969bc18fdfbc2b73f901daae713"
+    },
+    {
+      "ordinal": 180,
+      "task_id": "pdm-project__pdm-3314",
+      "language": "python",
+      "base_commit": "8573f951eb782596f91148753305c5bf0ade3ae6",
+      "task_config_sha256": "875be4b218f64769bdbc3895e950d13ac4333d79397ded869e63b12b0e1e1de8",
+      "container_image": "starryzhang/sweb.eval.x86_64.pdm-project_1776_pdm-3314",
+      "container_digest": "sha256:8bc0ebfe2d26297708ecc856152a00f38f9f7d3232b1a644b7903e6cdcdc1fbf"
+    },
+    {
+      "ordinal": 181,
+      "task_id": "pdm-project__pdm-3374",
+      "language": "python",
+      "base_commit": "f37fb16c2459807e0b392dc3306c373e5f68cc4f",
+      "task_config_sha256": "bd703095f3f176df4643efb8aad3e74e4c4154df6f3ec31a82982237323161c2",
+      "container_image": "starryzhang/sweb.eval.x86_64.pdm-project_1776_pdm-3374",
+      "container_digest": "sha256:a287650488bd683d247808cbb005fa229d105f16c654acf9222e9ffdee195a36"
+    },
+    {
+      "ordinal": 182,
+      "task_id": "pdm-project__pdm-3419",
+      "language": "python",
+      "base_commit": "564d09acbf2c8ef6500a3864f1fa1d38b3c5cdd5",
+      "task_config_sha256": "4f416c093f84f61720244f063857aec59230190890377faf397a64ebdd8b2d45",
+      "container_image": "starryzhang/sweb.eval.x86_64.pdm-project_1776_pdm-3419",
+      "container_digest": "sha256:32afe0ba088b0174d28a92f572c6fdf0f552829f2c02a356dafc430e7621d284"
+    },
+    {
+      "ordinal": 183,
+      "task_id": "pdm-project__pdm-3420",
+      "language": "python",
+      "base_commit": "ee9427a5d0f8618082592ed0e967e7c60747293c",
+      "task_config_sha256": "c609c084caab511837b99b0e3f96cda84d4823670317baf939fbf2a4c9bc71f5",
+      "container_image": "starryzhang/sweb.eval.x86_64.pdm-project_1776_pdm-3420",
+      "container_digest": "sha256:2cc0b3ffecc9defd3e7bf55b052ab04710eaf432691e184bd9e53ba48ceab96c"
+    },
+    {
+      "ordinal": 184,
+      "task_id": "privacyidea__privacyidea-4206",
+      "language": "python",
+      "base_commit": "80b817e9d563d48a4a29c00e8c361b8b5000a60d",
+      "task_config_sha256": "a1af55e46e162a95c318a74fe8f69896301c5efed15e4125180e52d545876ee5",
+      "container_image": "starryzhang/sweb.eval.x86_64.privacyidea_1776_privacyidea-4206",
+      "container_digest": "sha256:729c2451f5c99a142dbb74481dd478a4c4a3f32087ce74bc2122bfc292057467"
+    },
+    {
+      "ordinal": 185,
+      "task_id": "privacyidea__privacyidea-4223",
+      "language": "python",
+      "base_commit": "a70bfc26c0ff90f8feb2001fc6cadf53658aba3f",
+      "task_config_sha256": "31d701d5e33f0a6ea73b99877bb172e9ba554fb26ec1cb53ec8728b56cb1c263",
+      "container_image": "starryzhang/sweb.eval.x86_64.privacyidea_1776_privacyidea-4223",
+      "container_digest": "sha256:42b5ed218fa2154880cf014d1a555d597446b8c68cfc8c2eed864f7d222c62a2"
+    },
+    {
+      "ordinal": 186,
+      "task_id": "privacyidea__privacyidea-4226",
+      "language": "python",
+      "base_commit": "80b817e9d563d48a4a29c00e8c361b8b5000a60d",
+      "task_config_sha256": "6b7071d78c03134c43a4c05e08f68f8fc56d55ee5a4449666b47e33c5972063d",
+      "container_image": "starryzhang/sweb.eval.x86_64.privacyidea_1776_privacyidea-4226",
+      "container_digest": "sha256:fe24ea67f6f1d90504403921c62ac65f5d83963bbe9dfaff64a684f8b3644cff"
+    },
+    {
+      "ordinal": 187,
+      "task_id": "privacyidea__privacyidea-4233",
+      "language": "python",
+      "base_commit": "328e4197df16fbcfe2ac4a779c687a2ff7e1557e",
+      "task_config_sha256": "95fc1c4871e5be3b8a0685b1e6869f05109f00e4f27453cb5ae7e0f23002791d",
+      "container_image": "starryzhang/sweb.eval.x86_64.privacyidea_1776_privacyidea-4233",
+      "container_digest": "sha256:1a491bc8608f7fb6f188a18973456be6146f9bd66627abb10c47fd901de3534b"
+    },
+    {
+      "ordinal": 188,
+      "task_id": "privacyidea__privacyidea-4251",
+      "language": "python",
+      "base_commit": "a44f38b40a61c5b91e6de68d20d27ed01d3ccb56",
+      "task_config_sha256": "a8de893100cf8bd690a2434ee967990d715437c9bb63a4948eaed55398d3dac3",
+      "container_image": "starryzhang/sweb.eval.x86_64.privacyidea_1776_privacyidea-4251",
+      "container_digest": "sha256:714cf8e877b958ff0a94af124951c50f5ea8767689e3dae2f5e1d73cc1392ae9"
+    },
+    {
+      "ordinal": 189,
+      "task_id": "projectmesa__mesa-2394",
+      "language": "python",
+      "base_commit": "2dedca4a8fa7d9bd27e0b2942584009443524aee",
+      "task_config_sha256": "83b7e9af2869d523fe5735ee7c9b215eed7c9c4ca2aae10b65493ca01ecadc5c",
+      "container_image": "starryzhang/sweb.eval.x86_64.projectmesa_1776_mesa-2394",
+      "container_digest": "sha256:dde2624bdba6be282761e0376c8e8726f76dd50b951f5dc1d6444db225fe1c4b"
+    },
+    {
+      "ordinal": 190,
+      "task_id": "projectmesa__mesa-2418",
+      "language": "python",
+      "base_commit": "4dc65a32312a3e37168a2f65c419046e4fea341e",
+      "task_config_sha256": "5422973288f2a1f230658c71269923712448a28ae3c0eb71f9c795e359983a28",
+      "container_image": "starryzhang/sweb.eval.x86_64.projectmesa_1776_mesa-2418",
+      "container_digest": "sha256:b667513a90dc30775f54edfd38d5267e62c56af63d33118b32e5a3f29636f370"
+    },
+    {
+      "ordinal": 191,
+      "task_id": "projectmesa__mesa-2523",
+      "language": "python",
+      "base_commit": "dbb926408d96258e30f8139aeed7e1ce3ec20167",
+      "task_config_sha256": "d0982f89e2e4956dc8d8e50594aabf9333ebc575074e8f8c39b5ec387825ab70",
+      "container_image": "starryzhang/sweb.eval.x86_64.projectmesa_1776_mesa-2523",
+      "container_digest": "sha256:920389fd8e1b78fb631602739f181abf29ec825705a81beb235edd286a68ddb0"
+    },
+    {
+      "ordinal": 192,
+      "task_id": "projectmesa__mesa-2605",
+      "language": "python",
+      "base_commit": "af3e6670efd11b3eef6a47aef68eb644213db056",
+      "task_config_sha256": "67fbfecdd2c4e954a668bc6656f2783af79bb577d8bb81365cc0ee50915443d0",
+      "container_image": "starryzhang/sweb.eval.x86_64.projectmesa_1776_mesa-2605",
+      "container_digest": "sha256:004c86f105816f5165b5e5081b44e26e7ef8e65a462b4dc0e902313f3288145b"
+    },
+    {
+      "ordinal": 193,
+      "task_id": "projectmesa__mesa-2632",
+      "language": "python",
+      "base_commit": "d680bf4719933756a41cced3a4f17620e0be9381",
+      "task_config_sha256": "2173487a986c0c979c1ec4aa38823a45dc6465b14e654c2954be303c18aef8ae",
+      "container_image": "starryzhang/sweb.eval.x86_64.projectmesa_1776_mesa-2632",
+      "container_digest": "sha256:0f316b769e94c906ecad31a7ad7bac322c97d3c808a4f5acdf7048fa3f60a09a"
+    },
+    {
+      "ordinal": 194,
+      "task_id": "pvlib__pvlib-python-2249",
+      "language": "python",
+      "base_commit": "38eb89e5a9ac3b61ca71834a3e92af7dd51e03f5",
+      "task_config_sha256": "6462d6cafb0617e9d633969779c5ec7970ea1819b9c6ffdc79f5b659f78f1bb5",
+      "container_image": "starryzhang/sweb.eval.x86_64.pvlib_1776_pvlib-python-2249",
+      "container_digest": "sha256:1c5544b0a4bcd109e6b40ec443dae5030ffeac4d8f6570415e35a6ddc5743d50"
+    },
+    {
+      "ordinal": 195,
+      "task_id": "pvlib__pvlib-python-2286",
+      "language": "python",
+      "base_commit": "6af80da35a7c96059c534ee38be9123bcfc7f50f",
+      "task_config_sha256": "ba7b4aadaf405b796c326b11ef07a30a12585c09b8813e4616e3b621dec11787",
+      "container_image": "starryzhang/sweb.eval.x86_64.pvlib_1776_pvlib-python-2286",
+      "container_digest": "sha256:4c525f81a3461b515f8c9a4f17c57534d867b9e9a3d60374b33473508de62189"
+    },
+    {
+      "ordinal": 196,
+      "task_id": "pvlib__pvlib-python-2291",
+      "language": "python",
+      "base_commit": "afdcdd4acc3fd00420a656b1c106d9a8bb85ad29",
+      "task_config_sha256": "6adbe8b4112b299ec2dfc5b856fee8e44c650184cb5ce0b41d323e9b2f3680f5",
+      "container_image": "starryzhang/sweb.eval.x86_64.pvlib_1776_pvlib-python-2291",
+      "container_digest": "sha256:80890e6de81bedef0197262d26b4db363af46f42ec7d6c7229999b7969fc8c23"
+    },
+    {
+      "ordinal": 197,
+      "task_id": "pvlib__pvlib-python-2292",
+      "language": "python",
+      "base_commit": "4b113ab852b31df67db5f830833111e1159f4a51",
+      "task_config_sha256": "2558322dd765dd26ae0f1acb0c12aa639429e2d742cf8316a34f16680f3476c3",
+      "container_image": "starryzhang/sweb.eval.x86_64.pvlib_1776_pvlib-python-2292",
+      "container_digest": "sha256:e54959a97e4181518266fa3c6e2cae3b9d97ff4331a47696e34c1b1b61fb254e"
+    },
+    {
+      "ordinal": 198,
+      "task_id": "pvlib__pvlib-python-2341",
+      "language": "python",
+      "base_commit": "afc90f67ddb66508c43cfe474acfaa3ab427eb0a",
+      "task_config_sha256": "c92acf6aed1520190740d5573d33c5abcebb5714a3a8c4b6009871af9b5e89fb",
+      "container_image": "starryzhang/sweb.eval.x86_64.pvlib_1776_pvlib-python-2341",
+      "container_digest": "sha256:d4213a16defd0506c955574bd1e6574f02a8edf4065deebab99400a845fe2bdd"
+    },
+    {
+      "ordinal": 199,
+      "task_id": "pvlib__pvlib-python-2393",
+      "language": "python",
+      "base_commit": "1eafae0edb78a16b0ed8e531c85ca70498a76a20",
+      "task_config_sha256": "5073682b3f22e85a48d9ed3dd9215382a4b393992ab94216db3b973a3571b8a3",
+      "container_image": "starryzhang/sweb.eval.x86_64.pvlib_1776_pvlib-python-2393",
+      "container_digest": "sha256:d08490f8674765c6f509cc07b80c121bb2e80df1e59b53182bebadd9a44229af"
+    },
+    {
+      "ordinal": 200,
+      "task_id": "pvlib__pvlib-python-2400",
+      "language": "python",
+      "base_commit": "171f10ca1c2a73ea41a06e4c6ecf4de1f53523e7",
+      "task_config_sha256": "5502282866169a014547b621d8bf0370d7c8af3d5edafd480a299521d88fd6e9",
+      "container_image": "starryzhang/sweb.eval.x86_64.pvlib_1776_pvlib-python-2400",
+      "container_digest": "sha256:9a0f4bfe6ecf8914ee7e003bdce2191112b1f722901819fd33e87c18b4b41638"
+    },
+    {
+      "ordinal": 201,
+      "task_id": "pybamm-team__pybamm-4644",
+      "language": "python",
+      "base_commit": "3bf74038405bd9f489395eb3c3ae2cbd4911a1c5",
+      "task_config_sha256": "e79d39925ed08adb94fe23b770a89289d17e884e6fb5f4324c8947b59ece6df8",
+      "container_image": "starryzhang/sweb.eval.x86_64.pybamm-team_1776_pybamm-4644",
+      "container_digest": "sha256:511c92226f493a3493e7628b8dfd756907eae45236ba1391faaffcf3a6b4ea12"
+    },
+    {
+      "ordinal": 202,
+      "task_id": "pybamm-team__pybamm-4816",
+      "language": "python",
+      "base_commit": "f4d45290e9feb0b80e27909275f028ff9b2470ce",
+      "task_config_sha256": "22be41f93cdaf1439716073c4c0c2b2d894fd72ba602092995461a8eaa954990",
+      "container_image": "starryzhang/sweb.eval.x86_64.pybamm-team_1776_pybamm-4816",
+      "container_digest": "sha256:4fef1b2ff4dd8d77580aaf8dc2cc4ee8a05b03c1a906c5cacece3bcfa61acb7f"
+    },
+    {
+      "ordinal": 203,
+      "task_id": "pybamm-team__pybamm-4865",
+      "language": "python",
+      "base_commit": "0d5af5c3f258ccc41715ae8fb9650908a95a06fc",
+      "task_config_sha256": "0715cebedfa8f4d37c89ac5e58b1e0dce2ca9ce8d89597ba45f2e35bc1a6e558",
+      "container_image": "starryzhang/sweb.eval.x86_64.pybamm-team_1776_pybamm-4865",
+      "container_digest": "sha256:ec276a18f96a8d20063494bb229725190fe39f719bbe6b4bb37f9f097479ef90"
+    },
+    {
+      "ordinal": 204,
+      "task_id": "pydata__xarray-10076",
+      "language": "python",
+      "base_commit": "969d991ef41dd2be55d7d98609a447733fac1bac",
+      "task_config_sha256": "e67d5f8a1db13f2b8da3376883533c42ef0c63abe40cc5cc796f5cfff33fe5eb",
+      "container_image": "starryzhang/sweb.eval.x86_64.pydata_1776_xarray-10076",
+      "container_digest": "sha256:ec5336e8c7f376c10195bbabc723d0289e5960a8c0cb0998a365211bcd37a351"
+    },
+    {
+      "ordinal": 205,
+      "task_id": "pydata__xarray-9586",
+      "language": "python",
+      "base_commit": "f24cae348e5fb32a5de7d3b383e0adea13131d24",
+      "task_config_sha256": "d0beda27eae89aaa0751e8485eb23e7f2e5edf8578a7f2d9eb695b504f6a387b",
+      "container_image": "starryzhang/sweb.eval.x86_64.pydata_1776_xarray-9586",
+      "container_digest": "sha256:9d87116ee776d2fc8abe98f75259b7adc985a25e8bc1798716c4f25c22ea24c3"
+    },
+    {
+      "ordinal": 206,
+      "task_id": "pydata__xarray-9636",
+      "language": "python",
+      "base_commit": "8f6e45ba63941316b630e4c94ee2063395aa2b63",
+      "task_config_sha256": "06842dcf1108b0244f3e78e875bd6775b8fa785f5c004082ec81187cd968a3f2",
+      "container_image": "starryzhang/sweb.eval.x86_64.pydata_1776_xarray-9636",
+      "container_digest": "sha256:30b862d40ca9cf998c4a33f0dd72ccb5dfd2cb32bf3d6a80cbdc5b182dd3060b"
+    },
+    {
+      "ordinal": 207,
+      "task_id": "pydata__xarray-9760",
+      "language": "python",
+      "base_commit": "5a9ff0beb17090a64bc886bed6265c583ba8e32d",
+      "task_config_sha256": "180850b1eef0c1d144430587edef4547c655946eeacf18f0e91d4043049ccbe7",
+      "container_image": "starryzhang/sweb.eval.x86_64.pydata_1776_xarray-9760",
+      "container_digest": "sha256:b50d42a960ea086a1aaf280a1e581ecf135bf2b0229d2183b93c887b98ea5c04"
+    },
+    {
+      "ordinal": 208,
+      "task_id": "pydata__xarray-9765",
+      "language": "python",
+      "base_commit": "0f8ff5c2e890d3fe03cfc86e9024024a1f3cfce8",
+      "task_config_sha256": "a59a3e2801a4e8b069792a1218cf76a6841d4fca0c1cc0faa92682ea21093601",
+      "container_image": "starryzhang/sweb.eval.x86_64.pydata_1776_xarray-9765",
+      "container_digest": "sha256:44881a32b0e7bc5b6959cd2c0cc96095f08f12da7d9af6d372f66f2ba7793605"
+    },
+    {
+      "ordinal": 209,
+      "task_id": "pydata__xarray-9971",
+      "language": "python",
+      "base_commit": "4ccb048d10390bafbefc23215322c803c71438be",
+      "task_config_sha256": "8cc2f78c8de78bd95846481ee518e0beba69e47145079fd1d641b30a4ca5fa13",
+      "container_image": "starryzhang/sweb.eval.x86_64.pydata_1776_xarray-9971",
+      "container_digest": "sha256:ad2370cd0e6ef85090bfe012635bd9c72988b4ba91edcbd271c7361c87b5fab9"
+    },
+    {
+      "ordinal": 210,
+      "task_id": "pydata__xarray-9974",
+      "language": "python",
+      "base_commit": "609412d8544217247ddf2f72f988da1b38ef01bc",
+      "task_config_sha256": "7d8c6a062908ae157bd1d5f7ec13a775d01b74d45995cca01636937b944cfafb",
+      "container_image": "starryzhang/sweb.eval.x86_64.pydata_1776_xarray-9974",
+      "container_digest": "sha256:006806b491bfbe3d32313d11e688d102ec7f6e53d4f43b23579772f943d1e4c2"
+    },
+    {
+      "ordinal": 211,
+      "task_id": "pylint-dev__pylint-10044",
+      "language": "python",
+      "base_commit": "2e0c41f66ee7a9fddbc517a3ca75a2ce0cf2efd1",
+      "task_config_sha256": "e62247bf799202206a7a580be857b6ea2c7ce1dee6ddc7e73fa162ac965c3071",
+      "container_image": "starryzhang/sweb.eval.x86_64.pylint-dev_1776_pylint-10044",
+      "container_digest": "sha256:47076f37432dcbf237a2a1f8c9f38c91405ce17b9562865e91721bb373612de2"
+    },
+    {
+      "ordinal": 212,
+      "task_id": "pylint-dev__pylint-10062",
+      "language": "python",
+      "base_commit": "15a5ac03c45f6888a5a3b6acc72a72da27495567",
+      "task_config_sha256": "35485cf58de4d66f79dc12b0cc9e311f5e1c2fd649c19101e129874e22e918cc",
+      "container_image": "starryzhang/sweb.eval.x86_64.pylint-dev_1776_pylint-10062",
+      "container_digest": "sha256:68ba9dd2f9521fc19041385480ff3ad84ffd8b11c78def12cab45bbd92be2a4c"
+    },
+    {
+      "ordinal": 213,
+      "task_id": "pylint-dev__pylint-10089",
+      "language": "python",
+      "base_commit": "054f23363fd50efedaf54ee7fb0333824b0de41f",
+      "task_config_sha256": "3819a39295e7e0c2b8942411d973aa2a0284bd55554d9b4c2bd6f915a502574b",
+      "container_image": "starryzhang/sweb.eval.x86_64.pylint-dev_1776_pylint-10089",
+      "container_digest": "sha256:5e8930d3873d55f4f7dc98ff4c326418924532d6cfd29a24fe63933da1b0c9da"
+    },
+    {
+      "ordinal": 214,
+      "task_id": "pylint-dev__pylint-10097",
+      "language": "python",
+      "base_commit": "68cb5b320653ad64c68ff48a4bb4ba449a01d3a6",
+      "task_config_sha256": "4f4d13ef09165e8b37d86a3d8b2f80fb95d83a224f7256cbbc0a35290a58ee00",
+      "container_image": "starryzhang/sweb.eval.x86_64.pylint-dev_1776_pylint-10097",
+      "container_digest": "sha256:80227cd39738dfcd7b98df5564879bd2bb5214d9ecec9710af52f742856ca45c"
+    },
+    {
+      "ordinal": 215,
+      "task_id": "pylint-dev__pylint-10240",
+      "language": "python",
+      "base_commit": "abb81878fd114f309297b35e1d392bee0d196fbf",
+      "task_config_sha256": "46ab2535d0a34383697e32345ea92e94193f03ff3ab1adcf60867074be17f74e",
+      "container_image": "starryzhang/sweb.eval.x86_64.pylint-dev_1776_pylint-10240",
+      "container_digest": "sha256:3f5669fac8204918c4ef221e3b2d00417cb0f711501996d2f9ffeeccac8f7537"
+    },
+    {
+      "ordinal": 216,
+      "task_id": "pypa__twine-1225",
+      "language": "python",
+      "base_commit": "aa3a910cdef8e0a3cb4e893f4c371b58015f52e0",
+      "task_config_sha256": "35e87b6ac57a7c82bd1a6463c6790336c8734955fcaeaaf4c469b51042ec60fd",
+      "container_image": "starryzhang/sweb.eval.x86_64.pypa_1776_twine-1225",
+      "container_digest": "sha256:15d5f3cfe009e66f07b67944fe639f479ddd75d7f4d2d937480a25179683f01e"
+    },
+    {
+      "ordinal": 217,
+      "task_id": "pypsa__pypsa-1091",
+      "language": "python",
+      "base_commit": "c36338c171cef52cdce7cd445795ee362435f6ea",
+      "task_config_sha256": "1716992b8b6b55d5c9477ab49efb0efd509939f957567de2805ee0988918b118",
+      "container_image": "starryzhang/sweb.eval.x86_64.pypsa_1776_pypsa-1091",
+      "container_digest": "sha256:51b2ed08e81979d29b148bff6ebd576e7ecbd2b09f87e58012d5af7d2eaa8526"
+    },
+    {
+      "ordinal": 218,
+      "task_id": "pypsa__pypsa-1112",
+      "language": "python",
+      "base_commit": "5822ff21dc327ab4404c9557f6f61e4da56fabf8",
+      "task_config_sha256": "c28f0ecd2326063198818e00c8ccc05817e3d1cc94636a8ff49c850e01804ec9",
+      "container_image": "starryzhang/sweb.eval.x86_64.pypsa_1776_pypsa-1112",
+      "container_digest": "sha256:b080e0607320d5dd80c0d316cb45aee5293f274d75e89f3eb58dc77e0ca359c6"
+    },
+    {
+      "ordinal": 219,
+      "task_id": "pypsa__pypsa-1172",
+      "language": "python",
+      "base_commit": "7b02177e9bf01dc0c7734cb7af9021c952426d56",
+      "task_config_sha256": "80cb493dd9934cafae46084d3367136319ad28fd4700e8bf0e606b3f83def829",
+      "container_image": "starryzhang/sweb.eval.x86_64.pypsa_1776_pypsa-1172",
+      "container_digest": "sha256:14c2eadde8fd9a330cd08936e9984f47bbc49ddbcff25f7a2bf01dbf3d96f35c"
+    },
+    {
+      "ordinal": 220,
+      "task_id": "pypsa__pypsa-1195",
+      "language": "python",
+      "base_commit": "d3e13462d0622d7cc20c383d976bf566b6b8ad76",
+      "task_config_sha256": "cb39fc5c4925057f6fc5a1fef26da1f37a8d5bf41e8c83b264bf105591dc1323",
+      "container_image": "starryzhang/sweb.eval.x86_64.pypsa_1776_pypsa-1195",
+      "container_digest": "sha256:5722d932f070d813d641349fe3474eed5effe3a61b124f97f21207a277d6a467"
+    },
+    {
+      "ordinal": 221,
+      "task_id": "python-babel__babel-1141",
+      "language": "python",
+      "base_commit": "f1c8633a7d765f07b94e0a6097b3f0c7912b955f",
+      "task_config_sha256": "670de10cde9b8d64e90401fa96d39526d86a36f616d09ed836f66bbbb3e12d90",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-babel_1776_babel-1141",
+      "container_digest": "sha256:b9847102c2e7d0f82738cd1a73fe11b242ca2152dc9c28091430ec5a12a7bd70"
+    },
+    {
+      "ordinal": 222,
+      "task_id": "python-babel__babel-1163",
+      "language": "python",
+      "base_commit": "fb8dbba89cfc8d8a54d4c34c60b38fd504c4906e",
+      "task_config_sha256": "636d151dc04886fd3ad52217c12c8b1f95fd33690a042382245e50d03badb06b",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-babel_1776_babel-1163",
+      "container_digest": "sha256:dce69d0446d536735f96ca6c0f3a01257c2777a5de3e1ccc4ee031a7d9ec6860"
+    },
+    {
+      "ordinal": 223,
+      "task_id": "python-babel__babel-1164",
+      "language": "python",
+      "base_commit": "6bbdc0e8e91a547c9f89c175d365c9abeeb45fb2",
+      "task_config_sha256": "2259ddb58fd963abc44f9f225fa41a1b1c2605ea09fc25ab4080cf7ae95257b2",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-babel_1776_babel-1164",
+      "container_digest": "sha256:96d123180106c1ae7ab0e05711dcb0b93a2073d489048189e7eaa60c7106f9f9"
+    },
+    {
+      "ordinal": 224,
+      "task_id": "python-babel__babel-1179",
+      "language": "python",
+      "base_commit": "e9c3ef8d0de3080ca59f7f8dbabf9b52983adc7d",
+      "task_config_sha256": "7eea0348e74b839f4429a7afd3df9f00d76ccfbb945b6c30064cf3395ea4b7ae",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-babel_1776_babel-1179",
+      "container_digest": "sha256:92ed18e66fdc12cc69bf56f1792a8259331b6f9f39692263e8e092684d5cc319"
+    },
+    {
+      "ordinal": 225,
+      "task_id": "python-babel__babel-1194",
+      "language": "python",
+      "base_commit": "d9a257ec85ff58b1a706d0a4f05952399cbd755b",
+      "task_config_sha256": "d8b7f13134224583dccef513b8b94634ef0267b2c5ffbc782adbee6eed14fa30",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-babel_1776_babel-1194",
+      "container_digest": "sha256:3dbc3a5e459caab4efb17dd886518ff24bf305be0848172e722049c052342654"
+    },
+    {
+      "ordinal": 226,
+      "task_id": "python-control__python-control-1064",
+      "language": "python",
+      "base_commit": "d810d5aac00cf9a4215f601247d08f6f7904bcfe",
+      "task_config_sha256": "c7198cc89d867f8f765f8da7ad9ce86ba71a543d66435024b96b164f28362b97",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-control_1776_python-control-1064",
+      "container_digest": "sha256:66347a6f0707f75045f137ae45b1533e8365b1caf9ddb291aee1657370654756"
+    },
+    {
+      "ordinal": 227,
+      "task_id": "python-control__python-control-1111",
+      "language": "python",
+      "base_commit": "ebff1259a45dc7c45409ae439d36d7607afe86ee",
+      "task_config_sha256": "0a8f07ddaef1896704051b66089b749c1b02c5b0db833298991c74adf3b5f8c3",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-control_1776_python-control-1111",
+      "container_digest": "sha256:34ca001e84f387aa0f87a1289fc5b9f33aeed79195ec302bcd14cfa8eb2d4aec"
+    },
+    {
+      "ordinal": 228,
+      "task_id": "python-control__python-control-1142",
+      "language": "python",
+      "base_commit": "394e1c2c638cc0fe37d584fee6e4799794b3666e",
+      "task_config_sha256": "50403eea912163a5f68173a2e01b2f202b68c811a207e27657766cf7a3df3250",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-control_1776_python-control-1142",
+      "container_digest": "sha256:32badb4ab9d27e9f03065b2c21d153b3e872a3df08c11ef0987b4ba2bed7bed6"
+    },
+    {
+      "ordinal": 229,
+      "task_id": "python-telegram-bot__python-telegram-bot-4617",
+      "language": "python",
+      "base_commit": "f57dd52100aafc4640891493ba43ad527433232f",
+      "task_config_sha256": "d7c5c47b15823425a4e84d3616bc8220f0807c3b60de18e0bb4570aa28c1a325",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-telegram-bot_1776_python-telegram-bot-4617",
+      "container_digest": "sha256:c3a4cdfe713c1754e39c570daf8d9fe2a52da9f5ad6b2747bcb00a74af2ab898"
+    },
+    {
+      "ordinal": 230,
+      "task_id": "python-telegram-bot__python-telegram-bot-4626",
+      "language": "python",
+      "base_commit": "e4b0f8cb640439ac8d49ee2072a0d8147f7623f2",
+      "task_config_sha256": "229db758383acd41e68de7953ec39e205e6feff8be5da5378f30be6c436e89c5",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-telegram-bot_1776_python-telegram-bot-4626",
+      "container_digest": "sha256:a447aa245041f22c9a7dcb30cf85f2cf519d028b78299bdfc686b121ccc465e5"
+    },
+    {
+      "ordinal": 231,
+      "task_id": "python-telegram-bot__python-telegram-bot-4673",
+      "language": "python",
+      "base_commit": "2d5f4a68bbf4689103db596576f719f6237f3d77",
+      "task_config_sha256": "979aa31b05e2b95a947e3924653bdd65b30466b5bb44416bd27191676bf55860",
+      "container_image": "starryzhang/sweb.eval.x86_64.python-telegram-bot_1776_python-telegram-bot-4673",
+      "container_digest": "sha256:9cf0cf88eeb963588da089b786e6eb06b9e2aad7d79628746794d29c2d3285bd"
+    },
+    {
+      "ordinal": 232,
+      "task_id": "pytorch__torchtune-1806",
+      "language": "python",
+      "base_commit": "c5b738681ef0c2541344aff1063e5f85720b3c1f",
+      "task_config_sha256": "3a4218a1284f6c2bc722a478c1d89f1779787df65ddb1454e8c5d97b0d9599d7",
+      "container_image": "starryzhang/sweb.eval.x86_64.pytorch_1776_torchtune-1806",
+      "container_digest": "sha256:6a0106a74fd85349ed8730cb41eb41e4c1f1e59cd9aa9675f0154b8c7b279c0b"
+    },
+    {
+      "ordinal": 233,
+      "task_id": "pytorch__torchtune-2066",
+      "language": "python",
+      "base_commit": "f2bd4bc25b24587aef40f486087412b9da8f1d94",
+      "task_config_sha256": "5260c7f2aa38a4f115c21451664dfda6f30e36da03caef9dbffd0fa7e6041911",
+      "container_image": "starryzhang/sweb.eval.x86_64.pytorch_1776_torchtune-2066",
+      "container_digest": "sha256:27ef29e7e89ba546a92cf648876ecf1f9c7dcd0cd0fe26f3c7813768d6efae02"
+    },
+    {
+      "ordinal": 234,
+      "task_id": "pytorch__torchtune-2139",
+      "language": "python",
+      "base_commit": "f2bd4bc25b24587aef40f486087412b9da8f1d94",
+      "task_config_sha256": "4d079f853ca5be430ef50a0860daff9adcb5ab6e09058e23e834059d98d7e637",
+      "container_image": "starryzhang/sweb.eval.x86_64.pytorch_1776_torchtune-2139",
+      "container_digest": "sha256:ece8b3acfd4013ff64c157063d1a1733e2869160fa85a693e9d921458b79aee7"
+    },
+    {
+      "ordinal": 235,
+      "task_id": "qtile__qtile-5154",
+      "language": "python",
+      "base_commit": "fecc37d8b99b8fa20c9e925660fa25c3157c206c",
+      "task_config_sha256": "84db632a78c12e4abd8937cb674b851b5c7387bcbaacd66a01cda74c82e5f955",
+      "container_image": "starryzhang/sweb.eval.x86_64.qtile_1776_qtile-5154",
+      "container_digest": "sha256:e056d40b5f5c1422f7fa100de61a43f8ac38ff8aaf3f441c019880b447fb0db6"
+    },
+    {
+      "ordinal": 236,
+      "task_id": "reata__sqllineage-661",
+      "language": "python",
+      "base_commit": "b5b5e10df55f0d153053f5e6fcb419dac89cd42d",
+      "task_config_sha256": "0939754004b814e268cd2afb982ab398806136443036f7c17e762bde40bb0567",
+      "container_image": "starryzhang/sweb.eval.x86_64.reata_1776_sqllineage-661",
+      "container_digest": "sha256:8f202c0e16b83324a0aa4e98545eb0c2ebc11cb8c34597aecc567611cfca6cb4"
+    },
+    {
+      "ordinal": 237,
+      "task_id": "reata__sqllineage-694",
+      "language": "python",
+      "base_commit": "e9e3048afae1705a4c3f80e4ca56dcc0c6df998e",
+      "task_config_sha256": "ee04a40e8c4403cf409a6e5f2f5a1f045ee31906c55606d611f4a1b7bbab27e6",
+      "container_image": "starryzhang/sweb.eval.x86_64.reata_1776_sqllineage-694",
+      "container_digest": "sha256:de8a67940d2e127f5604aa5c2d84e588a1d5474d565ddc6824fdea658401d77f"
+    },
+    {
+      "ordinal": 238,
+      "task_id": "reflex-dev__reflex-4087",
+      "language": "python",
+      "base_commit": "bec73109d60c08f0e27d407858f8048b2d5c354c",
+      "task_config_sha256": "e76c9629492c1b27572b48561eeac45083403b1e723816fac5476546ab91a067",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4087",
+      "container_digest": "sha256:a1c1db67ae7a3eadeb2139179d7615979755a1027f2894604f557a30c46a73c6"
+    },
+    {
+      "ordinal": 239,
+      "task_id": "reflex-dev__reflex-4129",
+      "language": "python",
+      "base_commit": "5e3cfecdeab4182e4a405e94fb2d78f7b70eb16a",
+      "task_config_sha256": "68542a52432bf33938653df06be018ed7a64bf31ac7a1fda87c1d84175c77a2e",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4129",
+      "container_digest": "sha256:d053b4a02f2dc8bb7101b8b8a95ad45170d99b4282b6c87e87891113722f4e42"
+    },
+    {
+      "ordinal": 240,
+      "task_id": "reflex-dev__reflex-4266",
+      "language": "python",
+      "base_commit": "98394ceb8ec40ee75c8f434b751316544cb81ec2",
+      "task_config_sha256": "5621e5414c299437587bb37109905a5e43d78f45cdc6fd9e3d804f08f5f47e34",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4266",
+      "container_digest": "sha256:be5ab18c3801f371ce747764b82b10604622f3a7c6c8e429ad4574f99ddde1a4"
+    },
+    {
+      "ordinal": 241,
+      "task_id": "reflex-dev__reflex-4347",
+      "language": "python",
+      "base_commit": "34c11fdf108395fcacbe2488655969fef5c7958c",
+      "task_config_sha256": "57dc2cc2001a2e943e00f811a61c11b3c57eaa64699507264e33f0ec6025306c",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4347",
+      "container_digest": "sha256:971c580f5ab120747701e6848094710a37da3fe3e625c1f15e38f24c9892da65"
+    },
+    {
+      "ordinal": 242,
+      "task_id": "reflex-dev__reflex-4371",
+      "language": "python",
+      "base_commit": "2b7ef0dccc94540b259d62b02d8e7acb466ed4ed",
+      "task_config_sha256": "0944f5c1a4ebd16f2db78ce3e6f327dc3f315bf45802ad5623d8be04ac550453",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4371",
+      "container_digest": "sha256:b6f535e19c0e2e369df2b05d259ff5e0f1e28eb00a1ca3fb892dc1322870e2ec"
+    },
+    {
+      "ordinal": 243,
+      "task_id": "reflex-dev__reflex-4427",
+      "language": "python",
+      "base_commit": "000938414f46aeaff20256e63d84c96612ae014d",
+      "task_config_sha256": "569416f3cfaeb56ac71765167c5a966929245916b4e55ef28078b1d7ae68735f",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4427",
+      "container_digest": "sha256:e27de6c848e6c1b3a88bb28f087436dd94e74383fb32ea3692c6a54a6897a9a9"
+    },
+    {
+      "ordinal": 244,
+      "task_id": "reflex-dev__reflex-4510",
+      "language": "python",
+      "base_commit": "2520c51aaf4c0a4af965026ae3a3fd5b03930288",
+      "task_config_sha256": "fcf2d5fe18eb9c4c0e6b78baad1ad53d0fee272a0e6de1cb9a7f4a9a05048e5d",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4510",
+      "container_digest": "sha256:0e8fbaad82867ec7680079835c2e4dc8c80a8a2c968243b90eaf3ce86f682a98"
+    },
+    {
+      "ordinal": 245,
+      "task_id": "reflex-dev__reflex-4563",
+      "language": "python",
+      "base_commit": "d8e988105fdff8c452e3cc73f7790db0b0b64c9d",
+      "task_config_sha256": "0b8905035119c9c99927ea826e8e3ed1e31b386ab4ec501642e0fd93ce9e9e27",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4563",
+      "container_digest": "sha256:f156f9ade8b40b2480db9966773aee23d8819416ed05cb60cfcd044819ce0a78"
+    },
+    {
+      "ordinal": 246,
+      "task_id": "reflex-dev__reflex-4711",
+      "language": "python",
+      "base_commit": "8663dbcb974bacc1e03d9f5158f62d7a98e398eb",
+      "task_config_sha256": "460ccc991dd5f8c24b30d2196f9b096a18c5a2b5e5181a4fe2686051c66bd15e",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4711",
+      "container_digest": "sha256:1181686b6f491a63bd4d9a34faa1f3303f109f112b7ddc4c331cf70be0453987"
+    },
+    {
+      "ordinal": 247,
+      "task_id": "reflex-dev__reflex-4717",
+      "language": "python",
+      "base_commit": "2c3257d4ea1bae113a0b2338e2b7763189287206",
+      "task_config_sha256": "4dab5c672c4e7bd9c26b813a700646eb8d82fb0c7a99826bf0421fd46294273f",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4717",
+      "container_digest": "sha256:6c08b6f2e244d9ed00e3a6495d9180be8f49234e64f6169a571f87f501887712"
+    },
+    {
+      "ordinal": 248,
+      "task_id": "reflex-dev__reflex-4720",
+      "language": "python",
+      "base_commit": "3cb44431288dd143bed6ba67e9b13afc2cde1aa9",
+      "task_config_sha256": "649855c96ef6c3644fcc5a6750c06aa6a26c678db2a6fbadf18de1917032822d",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-4720",
+      "container_digest": "sha256:651eae0d1e36d2d927618a4dca6b9ba24632ba85f8a9114599d0904f37c895fc"
+    },
+    {
+      "ordinal": 249,
+      "task_id": "reflex-dev__reflex-5039",
+      "language": "python",
+      "base_commit": "c65f3a1d60d9c41ab3e60a0a7d1309b6111b1047",
+      "task_config_sha256": "d8db7cb905679072b300c1d3e5afa4480d28954a22885bd5b32254be22914973",
+      "container_image": "starryzhang/sweb.eval.x86_64.reflex-dev_1776_reflex-5039",
+      "container_digest": "sha256:84933f93e38172b50d816cd4e5c201b768e99be29139688dc47bdac5e4c04cc3"
+    },
+    {
+      "ordinal": 250,
+      "task_id": "run-llama__llama_deploy-330",
+      "language": "python",
+      "base_commit": "73ea5949bbb8e99bacd16d1cada2a444861a9cfa",
+      "task_config_sha256": "f12aed282db4dfc09a4c4b5fe580c71d95681bc2110f8b784b398d5b49dd7411",
+      "container_image": "starryzhang/sweb.eval.x86_64.run-llama_1776_llama_deploy-330",
+      "container_digest": "sha256:fd6066aa0a3fe0b81547df8b84625572b70a8019bcfc109795dadfc2d81028f1"
+    },
+    {
+      "ordinal": 251,
+      "task_id": "run-llama__llama_deploy-356",
+      "language": "python",
+      "base_commit": "5f5e76e2c0ba47e644b11e8e2177ffff606f76af",
+      "task_config_sha256": "0b34fb20979de4f5139f336aefebdb662346bae550886ab763e297ce7d7fa233",
+      "container_image": "starryzhang/sweb.eval.x86_64.run-llama_1776_llama_deploy-356",
+      "container_digest": "sha256:a86354c208a35f099a8e9b4d0f46fdec42725c93602f8795a12da54509348cab"
+    },
+    {
+      "ordinal": 252,
+      "task_id": "run-llama__llama_deploy-372",
+      "language": "python",
+      "base_commit": "d7066e7457f782d26e9c1f74450d062310c97fe0",
+      "task_config_sha256": "d73a2d446addce6f3136a1303a22f1209ec7acbd1fe4447c166a4c7e5915c461",
+      "container_image": "starryzhang/sweb.eval.x86_64.run-llama_1776_llama_deploy-372",
+      "container_digest": "sha256:6bc4c8b83494a3905b12614abe5661f721893fe8eb037436247683ab466a7d5e"
+    },
+    {
+      "ordinal": 253,
+      "task_id": "run-llama__llama_deploy-384",
+      "language": "python",
+      "base_commit": "a8225996abf3e8c4706324fbdde2908e4dd777df",
+      "task_config_sha256": "7e78bf4a200fe0726180622764d2c4b3fe2e0032325680e547ecdfff93f3a89c",
+      "container_image": "starryzhang/sweb.eval.x86_64.run-llama_1776_llama_deploy-384",
+      "container_digest": "sha256:2537fcf038bacd14905ddb51e0eac2189cf9d80f10b56d858a8d365f2762a1cf"
+    },
+    {
+      "ordinal": 254,
+      "task_id": "run-llama__llama_deploy-397",
+      "language": "python",
+      "base_commit": "4d0945c238e96551a06a7a8382e5792cb95afa2a",
+      "task_config_sha256": "10c22f0e0891eea335e02fab0402a779755a6c363969dde4f3900f6f85fe6843",
+      "container_image": "starryzhang/sweb.eval.x86_64.run-llama_1776_llama_deploy-397",
+      "container_digest": "sha256:d3192b5dc8c503ec94ded847de4efe394e39578fe7239bbddb2b5ed9303165cd"
+    },
+    {
+      "ordinal": 255,
+      "task_id": "run-llama__llama_deploy-399",
+      "language": "python",
+      "base_commit": "28d57468c36f224bc6e50dc7922f128498f3b58c",
+      "task_config_sha256": "08dc25ff165ddb279d99f2e909bcaef2593ea0590b1048d6a66046dd4066cadd",
+      "container_image": "starryzhang/sweb.eval.x86_64.run-llama_1776_llama_deploy-399",
+      "container_digest": "sha256:1b5e9e920baa380f21a53814dbb6c3b37c1afb622aa7313d2cb8cc9e12bfc03b"
+    },
+    {
+      "ordinal": 256,
+      "task_id": "run-llama__llama_deploy-438",
+      "language": "python",
+      "base_commit": "59b23d379cfa8378490675021d20bf51dbee652d",
+      "task_config_sha256": "938710a8a539a5464a871cc0a85ac6747d71ffccbf508436c7c17c4e3ead234f",
+      "container_image": "starryzhang/sweb.eval.x86_64.run-llama_1776_llama_deploy-438",
+      "container_digest": "sha256:a4feb59f8d279f50e6002af79896e5cf32dce392e5ba4819ec5cf99fb598e2c3"
+    },
+    {
+      "ordinal": 257,
+      "task_id": "run-llama__llama_deploy-458",
+      "language": "python",
+      "base_commit": "985690cc60169e3abcdca9a4707bdb7e8ae27cd0",
+      "task_config_sha256": "3d771c826629e9203a94cb9a9364102492ac12bd4ba776bcc13da11f2d710bf9",
+      "container_image": "starryzhang/sweb.eval.x86_64.run-llama_1776_llama_deploy-458",
+      "container_digest": "sha256:a0e362107e67e4cc29eae1e64bea8a1aa9ece2aba231e250cabb8a208fb92e14"
+    },
+    {
+      "ordinal": 258,
+      "task_id": "scrapy-plugins__scrapy-splash-324",
+      "language": "python",
+      "base_commit": "538f4d1df62f0169c3371c3ac5d46ee190de7906",
+      "task_config_sha256": "1c18f338ced53975f8709aa481cb37a08e170da71f5fd50c500ad4d4b9150e28",
+      "container_image": "starryzhang/sweb.eval.x86_64.scrapy-plugins_1776_scrapy-splash-324",
+      "container_digest": "sha256:b1c59553d7d84a408d67e01fa24f50becfa537cf60672cf1b7e0ca59d292e825"
+    },
+    {
+      "ordinal": 259,
+      "task_id": "shapely__shapely-2224",
+      "language": "python",
+      "base_commit": "5b61787eb708db4990a8eb40bf4c069d04d3aa24",
+      "task_config_sha256": "0a1fd64549f0cc56ddfbe0a6d09500e1e20a20f9c1a3a3805ca1fd1c5be4dc5f",
+      "container_image": "starryzhang/sweb.eval.x86_64.shapely_1776_shapely-2224",
+      "container_digest": "sha256:d1faf3ea3adae0a292533a30fc3faab42943fbe1a9f228142e6f0e99b4a88a79"
+    },
+    {
+      "ordinal": 260,
+      "task_id": "shapely__shapely-2226",
+      "language": "python",
+      "base_commit": "74eddd6af20566771ae4551a21e389e9ec188e66",
+      "task_config_sha256": "fee0b68caf36dbe6cd74c520de1c226e36934a58d5c6949748747393da464699",
+      "container_image": "starryzhang/sweb.eval.x86_64.shapely_1776_shapely-2226",
+      "container_digest": "sha256:7572b1f8814df7b42f5fc719a1ef430b274112495988ea29bdd12b8d60ef33b5"
+    },
+    {
+      "ordinal": 261,
+      "task_id": "shapely__shapely-2255",
+      "language": "python",
+      "base_commit": "70be08ef1eea9cbd49d787ac0fe3d1fc85a1bf86",
+      "task_config_sha256": "a586a9c91812e3cd21ae9f119072e0f7439b786bdc6e88e664beae8abb2f4921",
+      "container_image": "starryzhang/sweb.eval.x86_64.shapely_1776_shapely-2255",
+      "container_digest": "sha256:d04e58b3e59fec535364a5a839c72df762ed33d201f936654ac931eecd486097"
+    },
+    {
+      "ordinal": 262,
+      "task_id": "sissbruecker__linkding-971",
+      "language": "python",
+      "base_commit": "fc48b266a8c6005dca7d21ff96f4392ef62c0ccf",
+      "task_config_sha256": "8a9c816b67afcd13fc748288909e3b418382c25691c003deb3b01ad214e44f41",
+      "container_image": "starryzhang/sweb.eval.x86_64.sissbruecker_1776_linkding-971",
+      "container_digest": "sha256:da1b29cd80836f915fdae394c3e8223774176f9afc9efaa952728048e93603eb"
+    },
+    {
+      "ordinal": 263,
+      "task_id": "sissbruecker__linkding-984",
+      "language": "python",
+      "base_commit": "c5a300a4357d40d202f92dd08894ea520f2ade3f",
+      "task_config_sha256": "fafabdcd6a68ce8f7c9bb5d1685bde6ed8aae3ab834ffc44ab0692a6c12cf5ae",
+      "container_image": "starryzhang/sweb.eval.x86_64.sissbruecker_1776_linkding-984",
+      "container_digest": "sha256:e898d8d7aa992b0cc7517973f7ea860aff416f97d3493a130a20085e47ae7e5d"
+    },
+    {
+      "ordinal": 264,
+      "task_id": "sissbruecker__linkding-989",
+      "language": "python",
+      "base_commit": "78608135d9dd2d14a569253c80c5a959cf32bff7",
+      "task_config_sha256": "3b31f1666bb95ff251d38af281538066934dd7ac387ad4e0423a8d6cd40932f4",
+      "container_image": "starryzhang/sweb.eval.x86_64.sissbruecker_1776_linkding-989",
+      "container_digest": "sha256:65193413bcbc10c342db18d0cecabf61c1cf7c7fb15e0002371069d9b3cc7ee3"
+    },
+    {
+      "ordinal": 265,
+      "task_id": "sissbruecker__linkding-995",
+      "language": "python",
+      "base_commit": "30f85103cd5efdc8359353e536730809ef020fec",
+      "task_config_sha256": "3ca9f772982291ae22846a7d6f041c674ce5110f599f1eb362e34b00cc44d668",
+      "container_image": "starryzhang/sweb.eval.x86_64.sissbruecker_1776_linkding-995",
+      "container_digest": "sha256:787bd0a2a42f6c33aac7f2ba33cf6dd3c4d94cce463bb19856c65cc7fbd8f827"
+    },
+    {
+      "ordinal": 266,
+      "task_id": "sissbruecker__linkding-999",
+      "language": "python",
+      "base_commit": "f1acb4f7c969b69a441da0c043fe5bbe6dbc3748",
+      "task_config_sha256": "733147db7493dfd71516c0ff005615ad86f0d2ce039ef7f0a3272683a88271a1",
+      "container_image": "starryzhang/sweb.eval.x86_64.sissbruecker_1776_linkding-999",
+      "container_digest": "sha256:21329046b22e4d168291390930dbdcb2b748474d819c5c98fe5dbafd7d7105cf"
+    },
+    {
+      "ordinal": 267,
+      "task_id": "sphinx-doc__sphinx-12975",
+      "language": "python",
+      "base_commit": "fe06909e32669470c190484cdc202fc46b09879f",
+      "task_config_sha256": "94f5f63429f048e7ab37ddc62265a57b6c22e51f0218ba9770295c6ffbced878",
+      "container_image": "starryzhang/sweb.eval.x86_64.sphinx-doc_1776_sphinx-12975",
+      "container_digest": "sha256:2ca68ef52f8ee25f63cfa11ca453d0c2a9864f16a09dd86cea19106bb8822386"
+    },
+    {
+      "ordinal": 268,
+      "task_id": "sphinx-doc__sphinx-13127",
+      "language": "python",
+      "base_commit": "e17ed74fe027eb84aaf72ce92c4b1bd8ebf8c049",
+      "task_config_sha256": "56bd5a42cac32b7cfa769e123036b3181ae6a438bce86cc428a91bbe65ccc008",
+      "container_image": "starryzhang/sweb.eval.x86_64.sphinx-doc_1776_sphinx-13127",
+      "container_digest": "sha256:913f4e10551a9cb6ff573302f97e05ee05c325472f29d96090724cde3d74704f"
+    },
+    {
+      "ordinal": 269,
+      "task_id": "sphinx-doc__sphinx-13200",
+      "language": "python",
+      "base_commit": "5ff3740063c1ac57f17ecd697bcd06cc1de4e75c",
+      "task_config_sha256": "3a874891bdff12e3675bc06e8a7a3403cbcead37ea35efce7fb4ea6a12b9a13f",
+      "container_image": "starryzhang/sweb.eval.x86_64.sphinx-doc_1776_sphinx-13200",
+      "container_digest": "sha256:3864a73ea5fc07ccefc9fd39d237cb5a4d771e9c1568ee2eee04560c6a0f25e7"
+    },
+    {
+      "ordinal": 270,
+      "task_id": "sphinx-doc__sphinx-13253",
+      "language": "python",
+      "base_commit": "e18155fa106cf64d7b39dcc6506b60fd82703b10",
+      "task_config_sha256": "334bd4eddfe9a399c6c1187cc317e7146e30d0fe7c4daad339c43334fdf36b08",
+      "container_image": "starryzhang/sweb.eval.x86_64.sphinx-doc_1776_sphinx-13253",
+      "container_digest": "sha256:20e02128c78c531649573dbadb499aedc50b373e6a8522373ee4b4f3d0a0f120"
+    },
+    {
+      "ordinal": 271,
+      "task_id": "sphinx-doc__sphinx-13261",
+      "language": "python",
+      "base_commit": "019a6661f4b4ae6bffcfe015387e90d8b0190c8b",
+      "task_config_sha256": "51959cc0fb578b5948e7552e022d68de7a64d39a43e816e32d64d1d86f03057e",
+      "container_image": "starryzhang/sweb.eval.x86_64.sphinx-doc_1776_sphinx-13261",
+      "container_digest": "sha256:6ecd31d59477969fd9af9a027172ef8bc34362f306cd4ef508cb43f866439563"
+    },
+    {
+      "ordinal": 272,
+      "task_id": "sphinx-doc__sphinx-13318",
+      "language": "python",
+      "base_commit": "b11303adb9771346f79f5ca7bab0f3a6f733a6eb",
+      "task_config_sha256": "3469ede68f09f04e801d4c448a4d6c8765d0fb885cb434b327765d410f1ca345",
+      "container_image": "starryzhang/sweb.eval.x86_64.sphinx-doc_1776_sphinx-13318",
+      "container_digest": "sha256:bb2cff8e532bc08303e8eb00439e2327e3b803a5854f5135891c136dac8c90ff"
+    },
+    {
+      "ordinal": 273,
+      "task_id": "stanford-crfm__helm-3467",
+      "language": "python",
+      "base_commit": "46dacf07fbef04ca21e9b4c66e5d576b10a158b4",
+      "task_config_sha256": "1b5615363ea59088e25823185bb1f08d6ee671173cc74a3ba3eecd86103aeed3",
+      "container_image": "starryzhang/sweb.eval.x86_64.stanford-crfm_1776_helm-3467",
+      "container_digest": "sha256:12a8a3eb5f2039c8a535cbfca3d92d1de9c98750ee47ca5446f89dccbe589ecf"
+    },
+    {
+      "ordinal": 274,
+      "task_id": "stanfordnlp__dspy-1609",
+      "language": "python",
+      "base_commit": "16ceaba5f7126ca86e5b50b669975c926b9f8f55",
+      "task_config_sha256": "f0ca6719e92d30fd1cb981cd23ae1745f46a20ceb1abc968ee084234738441ac",
+      "container_image": "starryzhang/sweb.eval.x86_64.stanfordnlp_1776_dspy-1609",
+      "container_digest": "sha256:b6e3f56c4e6c260e2d545725ddb3f45836074cb7f26591e170e5b4919b8758dc"
+    },
+    {
+      "ordinal": 275,
+      "task_id": "stanfordnlp__dspy-1651",
+      "language": "python",
+      "base_commit": "9a952fef5fa8399cb82cb726860814e21816f16d",
+      "task_config_sha256": "aa9aa42fbc96e1180cebfcb6456b119c9a7628be09b2696ec5e332239f0907f7",
+      "container_image": "starryzhang/sweb.eval.x86_64.stanfordnlp_1776_dspy-1651",
+      "container_digest": "sha256:f9c516debc3b4966421935ecf2b04d19f97cdc58ec1c5b5d22c40a1df4d71503"
+    },
+    {
+      "ordinal": 276,
+      "task_id": "stanfordnlp__dspy-1741",
+      "language": "python",
+      "base_commit": "9391c2a9b386cbbbe27d18206790a40c27503348",
+      "task_config_sha256": "a3699ca580108b9cce5d14b4f069dbd589c0b62d760843c2cd91631c38ee7725",
+      "container_image": "starryzhang/sweb.eval.x86_64.stanfordnlp_1776_dspy-1741",
+      "container_digest": "sha256:b14583f0604ca733db658a52836c8a72c520aebe3c111f741e882444cb1d6349"
+    },
+    {
+      "ordinal": 277,
+      "task_id": "stanfordnlp__dspy-1801",
+      "language": "python",
+      "base_commit": "78b50f12d6df56e54ed3e4b736f16c79345d0aff",
+      "task_config_sha256": "8a02e7dda0146eac6dfbf55c2f588610a3c2671bff7c5fdd7e50caa50c01705b",
+      "container_image": "starryzhang/sweb.eval.x86_64.stanfordnlp_1776_dspy-1801",
+      "container_digest": "sha256:fa5a7f02f4bf69b84bcf3a0e60fa7058e3743a44315f66daf74852c1f0d2b4ec"
+    },
+    {
+      "ordinal": 278,
+      "task_id": "streamlink__streamlink-6242",
+      "language": "python",
+      "base_commit": "23a98cc5c543fd2456a189d794ff135008e50bf6",
+      "task_config_sha256": "d63c1ce07adc90afdd453747bcc05d1893a399f7ae8fd445627b230fbc858233",
+      "container_image": "starryzhang/sweb.eval.x86_64.streamlink_1776_streamlink-6242",
+      "container_digest": "sha256:be01da54608c9083768767e8358c0e293bff101493d6972a78f3efbb90197441"
+    },
+    {
+      "ordinal": 279,
+      "task_id": "streamlink__streamlink-6328",
+      "language": "python",
+      "base_commit": "f3c3546925897243edb4e3ba42210c5262ce74cf",
+      "task_config_sha256": "32321db91db08084e23a56ecfdb83a9bae440efc8dafcc8c4e06e2c8534c621d",
+      "container_image": "starryzhang/sweb.eval.x86_64.streamlink_1776_streamlink-6328",
+      "container_digest": "sha256:eb6c8e806dc0bd95e0c5314b583f2048e817006907a0cbb7bf85dfa8706c7af0"
+    },
+    {
+      "ordinal": 280,
+      "task_id": "streamlink__streamlink-6338",
+      "language": "python",
+      "base_commit": "fac5d8f740952485ce2c094e2826ed358fbe90fd",
+      "task_config_sha256": "a01ff7d9d49c4b1817588ecefca5818db1a39c815468a38774ba2b48561c5c2b",
+      "container_image": "starryzhang/sweb.eval.x86_64.streamlink_1776_streamlink-6338",
+      "container_digest": "sha256:adecc453e13016cb24b418a9aec90db926951cd13c4d6b9c63ff9a9b5af8b254"
+    },
+    {
+      "ordinal": 281,
+      "task_id": "streamlink__streamlink-6361",
+      "language": "python",
+      "base_commit": "d532def93ed25a3831aef588627bd855a71af336",
+      "task_config_sha256": "0e59f36876e31e266396fd8fad01880aaea4699ff253c80087d05ebb88033451",
+      "container_image": "starryzhang/sweb.eval.x86_64.streamlink_1776_streamlink-6361",
+      "container_digest": "sha256:af0a1e94ef5eb2bc805a42571b55dd23bbfe85974b58af03eba45327523a32bc"
+    },
+    {
+      "ordinal": 282,
+      "task_id": "streamlink__streamlink-6381",
+      "language": "python",
+      "base_commit": "3d6a5fe55faadd4e3b242c65b2aed2fd76e1b9b9",
+      "task_config_sha256": "7abcd89be8cbf52a711fc33307bb66661442f123be58f4113e955be6f3e2a79f",
+      "container_image": "starryzhang/sweb.eval.x86_64.streamlink_1776_streamlink-6381",
+      "container_digest": "sha256:f6e5423ca448ed347d516d09d12b5c3e6d800a1f1023e4e6e583a0c0d0158859"
+    },
+    {
+      "ordinal": 283,
+      "task_id": "streamlink__streamlink-6389",
+      "language": "python",
+      "base_commit": "6e2b7af3e0334a944e2dbb8159c553cfaa0cbe05",
+      "task_config_sha256": "b5a369ed3b3dd370b6fcb501d9443a8cb448c5841bb529773305fbdc417a3207",
+      "container_image": "starryzhang/sweb.eval.x86_64.streamlink_1776_streamlink-6389",
+      "container_digest": "sha256:919587eb216098747c880f8d7fbce0d9d2e5b3b42a609def1197b5d60a314509"
+    },
+    {
+      "ordinal": 284,
+      "task_id": "streamlink__streamlink-6439",
+      "language": "python",
+      "base_commit": "5a3f7c2b018695c9290d92dfc2384ee7a2cb61c3",
+      "task_config_sha256": "6b227410a071e9b0ca513f7a7c35748a79c71d2ee8b4771aa3d89d103e3c46df",
+      "container_image": "starryzhang/sweb.eval.x86_64.streamlink_1776_streamlink-6439",
+      "container_digest": "sha256:7c354daaab2cc5a8143b5deedce53c28e3989e597f10c10d87f6bedbff521ecc"
+    },
+    {
+      "ordinal": 285,
+      "task_id": "sympy__sympy-27462",
+      "language": "python",
+      "base_commit": "5f88b01afcd7d429ffb6e549f028b34be6b28ba0",
+      "task_config_sha256": "2c71f99b1e74ef5582be2476c6ce6d81dd8a062969f2bcc967d4eda52a8a08d0",
+      "container_image": "starryzhang/sweb.eval.x86_64.sympy_1776_sympy-27462",
+      "container_digest": "sha256:96b044364277be6ef0158d02773328dc3b536208ca60ba48c309fc9a60c465d5"
+    },
+    {
+      "ordinal": 286,
+      "task_id": "theoehrly__fast-f1-699",
+      "language": "python",
+      "base_commit": "1482a077ece15e1d5a1a719faeda36d7906a6bb8",
+      "task_config_sha256": "0774a56ca72b283f5ab4e5daa667ea51a6b8af95504570f26c1dcc95500ca842",
+      "container_image": "starryzhang/sweb.eval.x86_64.theoehrly_1776_fast-f1-699",
+      "container_digest": "sha256:cf9ac3d506fa194dd933bb80d27bc9e88382f2b6d6c14d8c97a7f1e0a51533da"
+    },
+    {
+      "ordinal": 287,
+      "task_id": "tox-dev__tox-3388",
+      "language": "python",
+      "base_commit": "719b3462b58bd5c4fc12d93cb978f824bc7a610b",
+      "task_config_sha256": "a7974caa1e58bc5d47e0f3d71c09ac0f20082b99d1c6403e6dabec7f235e621c",
+      "container_image": "starryzhang/sweb.eval.x86_64.tox-dev_1776_tox-3388",
+      "container_digest": "sha256:aba35a4bb66e50a40d29b8e10645a90367d34a95470375488b189de6831cc755"
+    },
+    {
+      "ordinal": 288,
+      "task_id": "tox-dev__tox-3409",
+      "language": "python",
+      "base_commit": "f919d0d0d512a755f0f85af540ed75f73140a685",
+      "task_config_sha256": "c514470dacd353baf242cafc95b970ec7bbba79569927de0c986fe550714600d",
+      "container_image": "starryzhang/sweb.eval.x86_64.tox-dev_1776_tox-3409",
+      "container_digest": "sha256:42777acedb47cdba36726c006a996626321e10c783d1a7e74fb36e5ad7c5a52e"
+    },
+    {
+      "ordinal": 289,
+      "task_id": "urllib3__urllib3-3527",
+      "language": "python",
+      "base_commit": "e94224931feddf9e12bb25452bf0d0c21da8a7e0",
+      "task_config_sha256": "2f00d62e7a0e35ae16c455cc70014adb0ea51746dab54a46fc81b653167de067",
+      "container_image": "starryzhang/sweb.eval.x86_64.urllib3_1776_urllib3-3527",
+      "container_digest": "sha256:5e95774e45752e5d09177b982a4d2e4ec1609bc3e0540e6168b5396f9218ca25"
+    },
+    {
+      "ordinal": 290,
+      "task_id": "wemake-services__wemake-python-styleguide-3114",
+      "language": "python",
+      "base_commit": "73efd383c3712153a868a882a8353ef8169aabdc",
+      "task_config_sha256": "c57cb4138ae0af65e7334001891fce42b519942653873337552716eb9deb23b4",
+      "container_image": "starryzhang/sweb.eval.x86_64.wemake-services_1776_wemake-python-styleguide-3114",
+      "container_digest": "sha256:7aa4ffbfb42a3d2f08ac9f7262f50f6898a46e7a6556b69c586d781f5b2dc57b"
+    },
+    {
+      "ordinal": 291,
+      "task_id": "wemake-services__wemake-python-styleguide-3117",
+      "language": "python",
+      "base_commit": "e9a03c5c8ebe4f7176ee12f48ad4cc8161f492b6",
+      "task_config_sha256": "820ea44ab2ade33fe296f4d3e7435299cff57569be309763552800f9eda2fee3",
+      "container_image": "starryzhang/sweb.eval.x86_64.wemake-services_1776_wemake-python-styleguide-3117",
+      "container_digest": "sha256:378d977a385b4914e6b751c270e220085fc86bfa8fb7a01d4b827049c5ea72e1"
+    },
+    {
+      "ordinal": 292,
+      "task_id": "wemake-services__wemake-python-styleguide-3128",
+      "language": "python",
+      "base_commit": "ffcce608bbfe07dba658f9951ceeb5da78073472",
+      "task_config_sha256": "e036e89215df4193eff223034ebf6e4969964461a4dcb5b8ef398963e8bf4237",
+      "container_image": "starryzhang/sweb.eval.x86_64.wemake-services_1776_wemake-python-styleguide-3128",
+      "container_digest": "sha256:c28524d0bd2e3e5192420732d016face0abfff21da534f1e40da0e51b65b927f"
+    },
+    {
+      "ordinal": 293,
+      "task_id": "wemake-services__wemake-python-styleguide-3129",
+      "language": "python",
+      "base_commit": "cd5bd0b4bdca67c52b0e448931d00986eecc8a3a",
+      "task_config_sha256": "66fb0c0f4fe49c9124833c7399123a6e15492baba024f9fdcac4cb3a243e9482",
+      "container_image": "starryzhang/sweb.eval.x86_64.wemake-services_1776_wemake-python-styleguide-3129",
+      "container_digest": "sha256:2280421ee688ea4cc73bc3b9c7c0f90a81a43c5a1bbaaa82aa0b5310eac0c7f5"
+    },
+    {
+      "ordinal": 294,
+      "task_id": "wemake-services__wemake-python-styleguide-3195",
+      "language": "python",
+      "base_commit": "e40fe0229a5550c6eb6668974d40593a9e787f3c",
+      "task_config_sha256": "293f86c6c6239a98a0fd5ef75dff138c5fda19406621f3b289cceba99a702822",
+      "container_image": "starryzhang/sweb.eval.x86_64.wemake-services_1776_wemake-python-styleguide-3195",
+      "container_digest": "sha256:659232f6657effcd01722a783feb7f646f0fbc47a1966835f84ed0ff9c3b1b50"
+    },
+    {
+      "ordinal": 295,
+      "task_id": "wireservice__csvkit-1274",
+      "language": "python",
+      "base_commit": "bd6095d39bcd27ec227a8e802ff5329535df9a07",
+      "task_config_sha256": "a85bd452d00d7f2cd37ea9b9ee66f2df30729982e72e5e5e67a5d83dd2d91100",
+      "container_image": "starryzhang/sweb.eval.x86_64.wireservice_1776_csvkit-1274",
+      "container_digest": "sha256:c6a359f796fc518fcf4cb3570380005449eece9cd1977075b7f9b2562d36080e"
+    },
+    {
+      "ordinal": 296,
+      "task_id": "wireservice__csvkit-1281",
+      "language": "python",
+      "base_commit": "d9ee9118884accc3cde5f3fd4dbf055d95446ff8",
+      "task_config_sha256": "5480eedf11c432be3f0b7a4b4d9a778296386c7c7323008b99ab583ef84dd3ff",
+      "container_image": "starryzhang/sweb.eval.x86_64.wireservice_1776_csvkit-1281",
+      "container_digest": "sha256:c5b41589106db06ceaaa98b4a0d10aa185bc2d32d9a002ce7559662f4aab64bd"
+    },
+    {
+      "ordinal": 297,
+      "task_id": "yt-dlp__yt-dlp-11425",
+      "language": "python",
+      "base_commit": "a6783a3b9905e547f6c1d4df9d7c7999feda8afa",
+      "task_config_sha256": "68ab14a572cd49836621fa470a0a74c363390f7c78a911dae28ecdaa9d673064",
+      "container_image": "starryzhang/sweb.eval.x86_64.yt-dlp_1776_yt-dlp-11425",
+      "container_digest": "sha256:77db6cf561b7e3ac8a77ef1ad0177b33454af36c1b7cdb96126ad8adada2b0e6"
+    },
+    {
+      "ordinal": 298,
+      "task_id": "yt-dlp__yt-dlp-11880",
+      "language": "python",
+      "base_commit": "d298693b1b266d198e8eeecb90ea17c4a031268f",
+      "task_config_sha256": "1172c96c180075aacad8c2112ca4ea09e0f4c7385a537d7c249990ec0e8b83e3",
+      "container_image": "starryzhang/sweb.eval.x86_64.yt-dlp_1776_yt-dlp-11880",
+      "container_digest": "sha256:44de750b25aa2d764557151270de4cd289b29cb2c97c647d321aeb9e26728c48"
+    },
+    {
+      "ordinal": 299,
+      "task_id": "yt-dlp__yt-dlp-12684",
+      "language": "python",
+      "base_commit": "2ee3a0aff9be2be3bea60640d3d8a0febaf0acb6",
+      "task_config_sha256": "b502d310367b191e92d094791fd7bb94dbc78eb35105e84be1f52efa38fc7843",
+      "container_image": "starryzhang/sweb.eval.x86_64.yt-dlp_1776_yt-dlp-12684",
+      "container_digest": "sha256:250488e241da94b9865b76208a15395fdb4e994f9e6a63437914947ae8fa66cc"
+    },
+    {
+      "ordinal": 300,
+      "task_id": "yt-dlp__yt-dlp-12714",
+      "language": "python",
+      "base_commit": "9d5e6de2e7a47226d1f72c713ad45c88ba01db68",
+      "task_config_sha256": "55c0b59137e112dac12e896a01c7c0e7643804d9977e6fe668966bf1590478c5",
+      "container_image": "starryzhang/sweb.eval.x86_64.yt-dlp_1776_yt-dlp-12714",
+      "container_digest": "sha256:b068145cc14acc0a974687399faf6440806e8a80d52ee2bdbc2d90ff50f0ce24"
     }
   ]
 }

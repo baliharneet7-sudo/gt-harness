@@ -194,3 +194,17 @@ def test_output_is_appended_not_overwritten(tmp_path: Path, mode: str) -> None:
 
     assert main(argv) == 0
     assert out.read_text(encoding="utf-8").startswith("EARLIER\n")
+
+
+def test_a_run_on_another_model_is_labelled_context_only() -> None:
+    """The TB2 baseline is GT-off DeepSeek; a run on a launch-chosen model must
+    not read its per-task deltas as a GT effect."""
+    from scripts.tb2_run_summary import render_run
+
+    cohort = {"baseline": {"model": "deepseek-v4-flash-0731"}, "baseline_rewards": {"t": 1.0}}
+    other = render_run({"model": "stealth/space-bunny-alpha", "tasks": [{"task_id": "t", "reward": 0}],
+                        "total": 1, "completed": 1}, cohort)
+    same = render_run({"model": "openai/deepseek/deepseek-v4-flash-0731",
+                       "tasks": [{"task_id": "t", "reward": 0}], "total": 1, "completed": 1}, cohort)
+    assert "Context only" in other and "stealth/space-bunny-alpha" in other
+    assert "Context only" not in same

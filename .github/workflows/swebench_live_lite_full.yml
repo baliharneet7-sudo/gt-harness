@@ -1,9 +1,12 @@
 name: "SWE-Live Lite: certified GT dispatcher"
-run-name: "SWE-Live GT smoke5 | deepseek/deepseek-v4-flash-0731 | 921bec20 | ${{ inputs.cohort_stage }}"
+run-name: "SWE-Live GT ${{ inputs.cohort_stage }} | ${{ inputs.model }} | ${{ inputs.gt_delivery_mode }} | shard ${{ inputs.shard_index }}/${{ inputs.shard_count }}"
 
-# This registered workflow path intentionally remains stable. The certified
+# This registered workflow path intentionally remains stable (it is the
+# registered filename on the accounts that dispatch it). The certified
 # implementation lives in swelive_gt_harness_paid.yaml and is called from the
-# same commit selected by workflow_dispatch.
+# same commit selected by workflow_dispatch. Every launch input is forwarded
+# unchanged; the model and GT delivery mode are chosen here, never baked in.
+# GT-on only: no GT-off arm exists or may be added.
 on:
   workflow_dispatch:
     inputs:
@@ -13,10 +16,10 @@ on:
         type: boolean
         default: false
       cohort_stage:
-        description: "Run gate-one first; release remaining four only after an official grade"
+        description: "gate-one | remaining (needs prior_gate_run_id) | all | smoke5 | single | subset"
         required: false
         type: choice
-        options: [gate-one, remaining, all, single, subset]
+        options: [gate-one, remaining, all, smoke5, single, subset]
         default: gate-one
       single_task_id:
         description: "Required for single/subset: one task id, or a comma-separated list"
@@ -33,6 +36,61 @@ on:
         required: false
         type: string
         default: ""
+      model:
+        description: "OpenRouter model id chosen at launch (bare id, e.g. stealth/space-bunny-alpha)"
+        required: true
+        type: string
+      gt_delivery_mode:
+        description: "GT delivery: attached (gt-* tools + grep augmentation) or push (legacy injection)"
+        required: true
+        type: choice
+        options: [attached, push]
+        default: attached
+      provider_only:
+        description: "Comma list of OpenRouter provider tags; empty = OpenRouter chooses"
+        required: false
+        type: string
+        default: ""
+      quantization:
+        description: "Comma list of required quantizations (e.g. fp8); empty = none"
+        required: false
+        type: string
+        default: ""
+      allow_fallbacks:
+        description: "Allow OpenRouter provider fallbacks when provider_only is set"
+        required: false
+        type: boolean
+        default: false
+      reasoning_effort:
+        description: "minimal|low|medium|high|xhigh|max; empty = not sent"
+        required: false
+        type: string
+        default: ""
+      temperature:
+        description: "Sampling temperature"
+        required: false
+        type: string
+        default: "1.0"
+      step_limit:
+        description: "Agent step limit; 0 = time budget only"
+        required: false
+        type: string
+        default: "0"
+      max_parallel:
+        description: "Concurrent task legs (1-256)"
+        required: false
+        type: string
+        default: "20"
+      shard_index:
+        description: "1-based shard of the selected cohort (strided); all/remaining need 2+ shards"
+        required: false
+        type: string
+        default: "1"
+      shard_count:
+        description: "Number of shards the selected cohort is split into (each <= 256 legs)"
+        required: false
+        type: string
+        default: "1"
 
 permissions:
   contents: read
@@ -48,4 +106,15 @@ jobs:
       single_task_id: ${{ inputs.single_task_id }}
       prior_gate_run_id: ${{ inputs.prior_gate_run_id }}
       readiness_run_id: ${{ inputs.readiness_run_id }}
+      model: ${{ inputs.model }}
+      gt_delivery_mode: ${{ inputs.gt_delivery_mode }}
+      provider_only: ${{ inputs.provider_only }}
+      quantization: ${{ inputs.quantization }}
+      allow_fallbacks: ${{ inputs.allow_fallbacks }}
+      reasoning_effort: ${{ inputs.reasoning_effort }}
+      temperature: ${{ inputs.temperature }}
+      step_limit: ${{ inputs.step_limit }}
+      max_parallel: ${{ inputs.max_parallel }}
+      shard_index: ${{ inputs.shard_index }}
+      shard_count: ${{ inputs.shard_count }}
     secrets: inherit

@@ -41,7 +41,11 @@ def test_gt_smoke_is_source_bound_and_uses_the_product_agent() -> None:
     assert re.fullmatch(r"[0-9a-f]{40}", manifest["gt_source_commit"])
     assert verify(manifest) == []
     assert "TREATMENT_SHA: ${{ github.sha }}" in text
-    assert "GT_SOURCE_SHA: 921bec20d3dbabd12e4b442936d9259c24cdcc74" in text
+    # The source identity is the import manifest's, resolved in the plan and
+    # carried to every job - never a literal a release can leave behind.
+    assert "921bec20" not in text
+    assert 'manifest["gt_source_commit"]' in text
+    assert "GT_SOURCE_SHA: ${{ needs.plan.outputs.gt_source_sha }}" in text
     assert "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent" in text
     assert "eval.miniswe_agent:MiniSweAgent" not in text
     assert "openhands" not in text.lower()
@@ -56,7 +60,12 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert '"gate-one": tasks[:1]' in text
     assert '"remaining-19": tasks[1:]' in text
     assert 'TIMEOUT_MULTIPLIER: "5.0"' in text
-    assert 'STEP_LIMIT: "100"' in text
+    # The step limit is a launch input whose default is the frozen baseline's.
+    workflow = yaml.safe_load(text)
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    assert inputs["step_limit"]["default"] == "100"
+    assert "STEP_LIMIT: ${{ inputs.step_limit }}" in text
+    assert '"step_limit": int(os.environ["STEP_LIMIT"])' in text
     assert "attempts_per_task" in text
     assert '"parallel": min(20, len(selected))' in text
     assert '"full_task_count": len(pool)' in text
@@ -80,7 +89,10 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert '"exact_pier_environment_executed": "PASS"' in text
     assert "-a nop" in text
     assert '"task_model_requests": 0' in text
-    assert MODEL_PIN["tb2_route_manifest"] in text
+    # The route the preflight certifies is rendered from the launch inputs.
+    assert "python -m scripts.render_provider_route" in text
+    assert "--manifest planned/plan/provider-route.json" in text
+    assert MODEL_PIN["tb2_route_manifest"] not in text
     assert "scripts.provider_preflight" in text
     assert '"provider_route_live_canary": "PASS"' in text
     assert "GT_PROVIDER_CONTEXT_WINDOW_TOKENS: ${{ needs.pre_spend.outputs.context_window_tokens }}" in text
@@ -96,9 +108,12 @@ def test_gt_smoke_uses_official_harbor_grades_and_retains_evidence() -> None:
     assert "pier run" in text
     assert "Run one official Pier TB2 trial" in text
     assert 'DATASET: terminal-bench@2.0' in text
-    assert f"MODEL: {MODEL_PIN['model']}" in text
-    assert f'--effective-model "{MODEL_PIN["effective_model"]}"' in text
-    assert "secrets.OPENROUTER_NEW" in text
+    # No model is baked into the workflow: it is chosen at launch.
+    assert "MODEL: ${{ inputs.model }}" in text
+    assert MODEL_PIN["model"] not in text
+    assert '--effective-model "openai/$MODEL"' in text
+    # Accounts name the OpenRouter secret differently; either one serves.
+    assert "secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY" in text
     assert "scripts.benchmark_progress emit-harbor" in text
     assert '"official_verifier": True' in parser
     assert '"official_verifier": False' in parser
@@ -108,7 +123,7 @@ def test_gt_smoke_uses_official_harbor_grades_and_retains_evidence() -> None:
     assert 'result_path.parent / "verifier" / "ctrf.json"' in parser
     assert "results/terminal-bench/" in text
     assert "benchmark-progress-tb2-gt-${{ github.run_id }}-${{ matrix.task }}" in text
-    assert "tb2-gt-smoke20-921bec20-${{ github.run_id }}-task-${{ matrix.task }}" in text
+    assert "tb2-gt-${{ github.run_id }}-task-${{ matrix.task }}" in text
 
 
 def test_every_task_job_reports_its_result_on_its_own_page() -> None:
@@ -141,6 +156,7 @@ def _planner_budget_rows(tmp_path: Path, agent_timeout_sec: float) -> list[dict]
     """
     from scripts.resolve_harbor_budget import (
         GT_OVERHEAD_EXTENSION_SECONDS,
+        MAX_HOSTED_EXECUTION_BUDGET_SECONDS,
         SUPERVISOR_GRACE_SECONDS,
         resolve_budget,
     )
@@ -159,6 +175,7 @@ def _planner_budget_rows(tmp_path: Path, agent_timeout_sec: float) -> list[dict]
         "resolve_budget": resolve_budget,
         "GT_OVERHEAD_EXTENSION_SECONDS": GT_OVERHEAD_EXTENSION_SECONDS,
         "SUPERVISOR_GRACE_SECONDS": SUPERVISOR_GRACE_SECONDS,
+        "MAX_HOSTED_EXECUTION_BUDGET_SECONDS": MAX_HOSTED_EXECUTION_BUDGET_SECONDS,
     }
     exec(compile(textwrap.dedent(text[start:end]), str(WORKFLOW), "exec"), namespace)
     return namespace["rows"]
@@ -181,10 +198,13 @@ def test_gt_stops_the_run_before_pier_kills_it(tmp_path, agent_timeout_sec) -> N
     pier_deadline = agent_timeout_sec * row["agent_timeout_multiplier"]
     gt_deadline = row["time_budget_seconds"]
 
-    # Pier's deadline is exactly the budget the plan granted, extension included.
-    assert pier_deadline == pytest.approx(
-        row["benchmark_budget_seconds"] + row["gt_overhead_extension_seconds"]
-    )
+    # Pier's deadline is exactly the budget the plan granted, extension
+    # included, capped under the hosted job ceiling (and recorded when capped).
+    from scripts.resolve_harbor_budget import MAX_HOSTED_EXECUTION_BUDGET_SECONDS
+
+    granted = row["benchmark_budget_seconds"] + row["gt_overhead_extension_seconds"]
+    assert pier_deadline == pytest.approx(min(granted, MAX_HOSTED_EXECUTION_BUDGET_SECONDS))
+    assert row["execution_budget_capped"] is (granted > MAX_HOSTED_EXECUTION_BUDGET_SECONDS)
     # ... and GT stops one supervisor grace earlier, which is what leaves time
     # to close the session and write the receipts.
     assert gt_deadline < pier_deadline
@@ -780,7 +800,7 @@ def test_the_cross_read_step_runs_after_the_trial_and_can_redden_the_job() -> No
     text = WORKFLOW.read_text(encoding="utf-8")
     verifier = text.index("python -m scripts.verify_run_receipts")
     trial = text.index("Run one official Pier TB2 trial")
-    upload = text.index("tb2-gt-smoke20-921bec20-${{ github.run_id }}-task-")
+    upload = text.index("tb2-gt-${{ github.run_id }}-task-")
     assert trial < verifier < upload
     # always(): a failed trial is precisely the case worth cross-reading.
     assert _workflow_step(_CROSS_READ_STEP)["if"] == "always()"
@@ -1445,7 +1465,10 @@ def _planner_receipt(tmp_path: Path, monkeypatch, *, unresolved_reason: str) -> 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TREATMENT_SHA", "t" * 40)
     monkeypatch.setenv("GT_SOURCE_SHA", "g" * 40)
-    monkeypatch.setenv("MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("MODEL", "stealth/space-bunny-alpha")
+    monkeypatch.setenv("GT_DELIVERY_MODE", "attached")
+    monkeypatch.setenv("STEP_LIMIT", "100")
+    monkeypatch.setenv("PROVIDER_ROUTE_SHA256", "r" * 64)
     monkeypatch.setenv("DATASET", "terminal-bench@2.0")
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output"))
     (tmp_path / "github-output").write_text("", encoding="utf-8")
@@ -1465,6 +1488,7 @@ def _planner_receipt(tmp_path: Path, monkeypatch, *, unresolved_reason: str) -> 
         "static_unsupported": {},
         "SUPERVISOR_GRACE_SECONDS": 120,
         "GT_OVERHEAD_EXTENSION_SECONDS": 1500,
+        "MAX_HOSTED_EXECUTION_BUDGET_SECONDS": 320 * 60,
         "musl_reason": lambda task_dir: None,
         "unresolved_base_reason": lambda task_dir: unresolved_reason,
         "unparsed_dockerfile_reason": lambda task_dir: None,
@@ -1776,3 +1800,39 @@ def test_tb2_pays_for_gt_setup_like_every_other_paid_lane() -> None:
     assert '"benchmark_budget_seconds"' in text
     assert '"gt_overhead_extension_seconds"' in text
     assert '"deviates_from_benchmark_budget"' in text
+
+
+def test_every_launch_choice_reaches_the_trial_and_the_receipts() -> None:
+    """Model, route, effort, steps and delivery mode are launch inputs, and
+    each one reaches the process that uses it - not just the plan."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(text)
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    assert inputs["model"]["required"] is True and "default" not in inputs["model"]
+    assert inputs["gt_delivery_mode"]["options"] == ["attached", "push"]
+    for name in ("provider_only", "quantization", "allow_fallbacks", "reasoning_effort", "temperature"):
+        assert name in inputs
+    assert '--ak gt_delivery_mode="$GT_DELIVERY_MODE"' in text
+    assert '--ak step_limit="$STEP_LIMIT"' in text
+    assert '--ak max_iterations="$STEP_LIMIT"' in text
+    assert "GT_REASONING_EFFORT: ${{ needs.plan.outputs.reasoning_effort }}" in text
+    assert "python -m scripts.annotate_gt_delivery" in text
+    assert '"treatment_invalid_count"' in text
+
+
+def test_every_trial_fits_inside_the_hosted_job_ceiling(tmp_path) -> None:
+    """A hosted job dies at 360 minutes and takes the trial's artifacts with it."""
+    from scripts.resolve_harbor_budget import MAX_HOSTED_EXECUTION_BUDGET_SECONDS
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+    run_job = yaml.safe_load(text)["jobs"]["run"]
+    assert run_job["timeout-minutes"] <= 360
+    assert MAX_HOSTED_EXECUTION_BUDGET_SECONDS <= (run_job["timeout-minutes"] - 30) * 60
+    row = _planner_budget_rows(tmp_path, 12 * 3600.0)[0]
+    assert row["execution_budget_capped"] is True
+    assert row["time_budget_seconds"] < MAX_HOSTED_EXECUTION_BUDGET_SECONDS
+
+
+def test_a_skipped_matrix_is_not_summarized_as_missing_artifacts() -> None:
+    summarize = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["summarize"]
+    assert "needs.run.result != 'skipped'" in summarize["if"]

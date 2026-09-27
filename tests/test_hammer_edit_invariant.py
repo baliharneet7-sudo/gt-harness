@@ -124,8 +124,11 @@ def fake_amend(monkeypatch):
 
     calls: list[tuple[str, tuple[str, ...]]] = []
 
+    # Mirrors the real signature, source_revision included: a fake that lags
+    # it raises TypeError on every call, the adapter correctly refuses the
+    # amend, and the suite reports a freshness bug that is not there.
     def amend(root, *, layout, parent_graph, changed_paths,
-              excluded_roots=(), diagnostics=None):
+              excluded_roots=(), diagnostics=None, source_revision=""):
         calls.append((str(parent_graph), tuple(changed_paths)))
         n = len(calls)
         dest = layout.graph_root / "revisions" / f"amend-{n}"

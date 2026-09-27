@@ -105,3 +105,28 @@ def test_cli_writes_json_and_markdown_and_propagates_the_exit(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8"))["schema"] == "gt.deepswe_delivery_ab.v1"
     text = md.read_text(encoding="utf-8")
     assert "Leaderboard comparator" in text and "Step-limit proof failed" in text
+
+
+def test_an_attached_leg_without_a_graph_is_not_scored_as_gt(tmp_path):
+    """The push arm aborts when the graph never becomes ready; the attached arm
+    runs on as plain mini-swe and reports treatment_valid=false. Scoring it
+    would credit GT with a run GT never touched."""
+    legs = [_leg("a", "attached", 1), _leg("a", "attached", 2)]
+    _write_leg(tmp_path, legs[0], reward=1, delivery={
+        "gt_delivery_mode": "attached", "treatment_valid": False,
+        "treatment_invalid_reason": "graph_not_ready"})
+    _write_leg(tmp_path, legs[1], reward=0)
+    result, code = aggregate(_plan(legs), tmp_path, provider_failure_threshold=10)
+    assert code == 0
+    assert result["treatment_invalid"] == ["a__attached__r1"]
+    assert result["arms"]["attached"]["treatment_invalid"] == 1
+    assert result["per_task_solve_rate"] == {"a": {"attached": 0.0}}
+
+
+def test_a_leg_that_ran_in_the_wrong_arm_fails_the_proof(tmp_path):
+    legs = [_leg("a", "attached", 1)]
+    _write_leg(tmp_path, legs[0], reward=1, delivery={"gt_delivery_mode": "push"})
+    result, code = aggregate(_plan(legs), tmp_path, provider_failure_threshold=10)
+    assert code == 2
+    assert result["arm_violations"] == [
+        {"leg_id": "a__attached__r1", "planned": "attached", "reported": "push"}]
