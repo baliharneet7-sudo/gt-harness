@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from gt_engine.attached_budget import DeliveryBudget, compact_lines
+from gt_engine.attached_budget import DeliveryBudget, Draft, compact_lines
 from gt_engine.tool_render import AUGMENT_OUTPUT_BYTES, cap_text
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -339,25 +339,44 @@ class GrepAugmenter:
             except Exception:  # noqa: BLE001 - journaling never fails the action
                 pass
 
-    def _budgeted(self, symbol: str, answer: Any,
+    def _budgeted(self, draft: Draft, symbol: str, answer: Any,
                   facts: tuple[tuple[str, str], ...]) -> tuple[str | None, set[str]]:
-        """Render one symbol block under the task's delivery budget: a symbol
-        already shown collapses to one line, a fact already shown (the same
-        module line, the same co-change list) is dropped, and past the
-        detail budget the block keeps its first lines only."""
-        definition = answer.get("definition") if isinstance(answer, dict) else None
-        if not isinstance(definition, dict):
+        """Render one symbol block under the task's delivery budget.
+
+        The block is keyed by its CONTENT, not the symbol's location: a block
+        byte-identical to one the agent already received is dropped, while an
+        edit that changes the symbol's callers or callees yields a new block
+        that is shown. A fact line already shown (the same module line, the
+        same co-change list) is dropped; past the detail budget the block
+        keeps its first lines only, and a compacted block is not recorded as
+        shown, so its full form stays eligible."""
+        full = render_symbol_block(symbol, answer, tuple(line for _ids, line in facts))
+        if not full:
             return None, set()
-        key = f"sym:{definition.get('file_path')}:{definition.get('start_line')}:{definition.get('qualified_name') or symbol}"
-        if self.budget.seen(key):
-            name = definition.get("qualified_name") or symbol
-            where = f"{definition.get('file_path', '')}:{definition.get('start_line', '')}"
-            return f"  {name} ({where}): graph context shown earlier in this task", set()
-        kept = tuple((ids, line) for ids, line in facts if not self.budget.seen(f"fact:{line}"))
+        key = "sym:" + hashlib.sha256(full.encode("utf-8")).hexdigest()[:20]
+        if not draft.is_new(key):
+            return None, set()
+        kept = tuple((ids, line) for ids, line in facts if draft.is_new(f"fact:{line}"))
         block = render_symbol_block(symbol, answer, tuple(line for _ids, line in kept))
-        if block and self.budget.compact:
+        if not block:
+            return None, set()
+        if self.budget.compact:
             block = "\n".join(compact_lines(block.splitlines()))
-        return block, (block_features(answer, kept) if block else set())
+        elif block == full:
+            draft.stage(key, block)
+        for _ids, line in kept:
+            draft.stage(f"fact:{line}", line)
+        return block, block_features(answer, kept)
+
+    def _mentioned(self, draft: Draft, symbol: str, find: Any) -> Any:
+        """A non-definition mention, once per identifier per task."""
+        key = f"mention:{symbol}"
+        if not draft.is_new(key):
+            return None
+        found = find()
+        if found:
+            draft.stage(key, found[0])
+        return found
 
     def _stale_verified(self, pattern: str, symbols: tuple[str, ...]) -> str:
         """Answer from the adopted graph while it is stale, using only rows
@@ -370,17 +389,19 @@ class GrepAugmenter:
         blocks: list[str] = []
         hit_symbols: list[str] = []
         hit_features: set[str] = set()
+        draft = self.budget.draft()
         try:
             for symbol in symbols:
                 answer, facts = view.symbol(symbol)
                 if answer is None:
-                    found = None if self.budget.seen(f"mention:{symbol}") else _mention(view.conn, symbol, view.verified)
+                    found = self._mentioned(draft, symbol,
+                                            lambda: _mention(view.conn, symbol, view.verified))
                     if found:
                         blocks.append(found[0])
                         hit_symbols.append(found[2])
                         hit_features |= found[1]
                     continue
-                block, carried = self._budgeted(symbol, answer, facts)
+                block, carried = self._budgeted(draft, symbol, answer, facts)
                 if block:
                     blocks.append(block)
                     hit_symbols.append(symbol)
@@ -388,19 +409,21 @@ class GrepAugmenter:
         finally:
             view.close()
         if not blocks:
-            self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="silent_stale")
+            draft.commit("")
+            self._journal(pattern=pattern[:200], symbols=list(symbols),
+                          outcome="repeat_stale" if draft.suppressed else "silent_stale")
             return ""
-        return self._deliver(pattern, symbols, blocks, hit_symbols, hit_features,
+        return self._deliver(draft, pattern, symbols, blocks, hit_symbols, hit_features,
                              header="[GT] graph context for your search (graph from before your "
                                     "latest edits; rows from files you changed are left out):")
 
-    def _deliver(self, pattern: str, symbols: tuple[str, ...], blocks: list[str],
+    def _deliver(self, draft: Draft, pattern: str, symbols: tuple[str, ...], blocks: list[str],
                  hit_symbols: list[str], hit_features: set[str], *,
                  header: str = "[GT] graph context for your search:") -> str:
         hint = (f"\n  next: `gt-impact {hit_symbols[0]}` (what breaks if it changes), "
                 "`gt-tests <file>` (tests to run)") if self.budget.hint_allowed() else ""
         text = cap_text(header + "\n" + "\n".join(blocks) + hint, self.max_bytes)
-        self.budget.charge(text)
+        draft.commit(text)
         self.metrics.hits += 1
         for feature in hit_features:
             self.metrics.features[feature] = self.metrics.features.get(feature, 0) + 1
@@ -430,6 +453,7 @@ class GrepAugmenter:
             started = time.perf_counter()
             self.metrics.calls += 1
             blocks: list[str] = []
+            draft = self.budget.draft()
             try:
                 from gt_engine.tool_server import refresh_if_stale
 
@@ -450,7 +474,7 @@ class GrepAugmenter:
                     if result.status in ("unavailable", "error", "abstain"):
                         continue
                     facts = _facts(self.session, result.answer)
-                    block, carried = self._budgeted(symbol, result.answer, facts)
+                    block, carried = self._budgeted(draft, symbol, result.answer, facts)
                     if block:
                         blocks.append(block)
                         hit_symbols.append(symbol)
@@ -462,7 +486,7 @@ class GrepAugmenter:
                     if conn is not None:
                         try:
                             for symbol in unresolved:
-                                found = None if self.budget.seen(f"mention:{symbol}") else _mention(conn, symbol)
+                                found = self._mentioned(draft, symbol, lambda: _mention(conn, symbol))
                                 if found:
                                     blocks.append(found[0])
                                     hit_symbols.append(found[2])
@@ -476,9 +500,12 @@ class GrepAugmenter:
             finally:
                 self.metrics.time_ms += int(round((time.perf_counter() - started) * 1000))
             if not blocks:
-                self._journal(pattern=pattern[:200], symbols=list(symbols), outcome="silent")
+                # Everything this search touched was already shown: say nothing.
+                draft.commit("")
+                self._journal(pattern=pattern[:200], symbols=list(symbols),
+                              outcome="repeat" if draft.suppressed else "silent")
                 return ""
-            return self._deliver(pattern, symbols, blocks, hit_symbols, hit_features)
+            return self._deliver(draft, pattern, symbols, blocks, hit_symbols, hit_features)
 
 
 __all__ = [

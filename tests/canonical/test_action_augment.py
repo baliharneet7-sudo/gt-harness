@@ -377,8 +377,7 @@ def test_budget_says_each_thing_once(polyglot_session):
         first = delivery.augmenter.augment('grep -rn "def execute" .')
         again = delivery.augmenter.augment('grep -rn "execute(" pyapp')
         assert "called by: run_query" in first
-        assert "graph context shown earlier in this task" in again
-        assert "called by" not in again
+        assert again == ""  # the same block again says nothing
         before = _server_text(adapter)
         after = before.replace("    return execute(command)", "    return execute(command.strip())")
         one = delivery.action_augmenter.after_edit({SERVER: (before, after)})
@@ -391,3 +390,107 @@ def test_budget_says_each_thing_once(polyglot_session):
         assert delivery.metrics()["gt_repeats_suppressed"] > 0
     finally:
         _with_issue(adapter, previous)
+
+
+def _callers(count: int) -> list[dict]:
+    return [{"name": f"c{i}", "file_path": "pkg/mod.py", "line": i} for i in range(count)]
+
+
+def test_callers_cut_by_the_display_cap_are_never_called_shown():
+    augmenter = ActionAugmenter(session=None)
+    augmenter._draft = augmenter.budget.draft()
+    first = augmenter._caller_lines(_callers(6), "f", "pkg/f.py")
+    augmenter._draft.commit("\n".join(first))
+    assert "(+2 more)" in first[0]
+    augmenter._draft = augmenter.budget.draft()
+    second = augmenter._caller_lines(_callers(6), "f", "pkg/f.py")
+    augmenter._draft.commit("\n".join(second))
+    # the two callers the cap hid are shown now, and the four shown are counted
+    assert "c4 (pkg/mod.py:4)" in second[0] and "c5 (pkg/mod.py:5)" in second[0]
+    assert "(4 shown earlier)" in second[0] and "c0 " not in second[0]
+    augmenter._draft = augmenter.budget.draft()
+    third = augmenter._caller_lines(_callers(6), "f", "pkg/f.py")
+    assert third == ["    f: callers unchanged since shown earlier"]
+
+
+def test_a_new_caller_after_an_edit_is_shown():
+    augmenter = ActionAugmenter(session=None)
+    augmenter._draft = augmenter.budget.draft()
+    augmenter._draft.commit("\n".join(augmenter._caller_lines(_callers(2), "f", "pkg/f.py")))
+    augmenter._draft = augmenter.budget.draft()
+    grown = augmenter._caller_lines(_callers(3), "f", "pkg/f.py")
+    assert "c2 (pkg/mod.py:2)" in grown[0] and "(2 shown earlier)" in grown[0]
+
+
+def test_a_fact_lost_to_truncation_or_silence_is_not_recorded():
+    from gt_engine.attached_budget import DeliveryBudget
+    from gt_engine.tool_render import cap_text
+
+    budget = DeliveryBudget()
+    draft = budget.draft()
+    draft.stage("a", "line a")
+    draft.stage("b", "line b " + "x" * 400)
+    draft.commit(cap_text("header\nline a\nline b " + "x" * 400, 120))
+    assert budget.was_shown("a") and not budget.was_shown("b")
+    draft = budget.draft()
+    draft.stage("c", "line c")
+    draft.commit("")  # a silent block delivers nothing
+    assert not budget.was_shown("c")
+
+
+def test_symbol_block_is_keyed_by_content_not_location():
+    augmenter = GrepAugmenter(session=None)
+    definition = {"qualified_name": "f", "kind": "function", "file_path": "a.py", "start_line": 3}
+    before = {"definition": definition, "callers": [{"name": "g", "file_path": "b.py", "line": 1}],
+              "caller_count": 1}
+    after = {**before, "callers": [*before["callers"], {"name": "h", "file_path": "c.py", "line": 2}],
+             "caller_count": 2}
+    for answer, expect_block in ((before, True), (before, False), (after, True)):
+        draft = augmenter.budget.draft()
+        block, _features = augmenter._budgeted(draft, "f", answer, ())
+        assert bool(block) is expect_block
+        draft.commit(block or "")
+
+
+def test_a_repeated_failure_points_back_to_the_earlier_location():
+    augmenter = ActionAugmenter(session=None)
+    lines = augmenter._repeat_lines("E   AssertionError: boom", [("pkg/a.py", 3)], False, True)
+    augmenter._failures_seen = {k: -1 for k in augmenter._failures_seen}
+    lines = augmenter._repeat_lines("E   AssertionError: boom", [("pkg/a.py", 3)], False, True)
+    assert lines and "location shown earlier" in lines[0]
+
+
+def test_a_removed_caller_is_never_reported_as_unchanged():
+    augmenter = ActionAugmenter(session=None)
+    augmenter._draft = augmenter.budget.draft()
+    augmenter._draft.commit("\n".join(augmenter._caller_lines(_callers(3), "f", "pkg/f.py")))
+    augmenter._draft = augmenter.budget.draft()
+    shrunk = augmenter._caller_lines(_callers(2), "f", "pkg/f.py")
+    augmenter._draft.commit("\n".join(shrunk))
+    assert "unchanged" not in shrunk[0] and "called by (current): c0" in shrunk[0]
+    augmenter._draft = augmenter.budget.draft()
+    assert augmenter._caller_lines(_callers(2), "f", "pkg/f.py") == [
+        "    f: callers unchanged since shown earlier"]
+
+
+def test_a_different_message_at_the_same_line_is_a_different_failure():
+    from gt_engine.action_augment import _failure_signature
+
+    frames = [("pkg/a.py", 3)]
+    one = _failure_signature("E   KeyError: 'foo'", frames, detailed=True)
+    two = _failure_signature("E   KeyError: 'bar'", frames, detailed=True)
+    assert one and two and one != two
+    assert _failure_signature("E   KeyError: 'foo'", frames) == _failure_signature("E   KeyError: 'bar'", frames)
+
+
+def test_compaction_keeps_parse_errors_and_sinks():
+    from gt_engine.action_augment import _ALWAYS_SHOWN
+    from gt_engine.attached_budget import compact_lines
+
+    lines = ["  changed: f", "    f is called by: g", "  tests reaching a.py: t",
+             "    f reaches sink-like call(s): os.system", "  PARSE ERROR a.py:3 (syntax)"]
+    kept = compact_lines(lines, always=_ALWAYS_SHOWN)
+    assert kept[:2] == lines[:2]
+    assert lines[3] in kept and lines[4] in kept and lines[2] not in kept
+    assert kept[-1] == "  (+1 more line(s); GT detail budget reached)"
+

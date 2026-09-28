@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
-from gt_engine.attached_budget import DeliveryBudget, compact_lines
+from gt_engine.attached_budget import DeliveryBudget, Draft, compact_lines
 from gt_engine.tool_render import AUGMENT_OUTPUT_BYTES, cap_text
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -54,6 +54,11 @@ _PATH_LINE = re.compile(r"((?:[\w.\-]+/)*[\w.\-]+\.(?:py|go|rs|ts|tsx|js|jsx|mjs
                         r":(\d+)")
 _ERROR_LINE = re.compile(r"^(?:E\s+)?([A-Za-z_][\w.]*(?:Error|Exception|Failure|panic))\b.*$", re.M)
 _TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]*$|_test\.[a-z]+$|\.(test|spec)\.[a-z]+$")
+
+
+# Lines the detail budget never compacts away: a broken parse or a reached
+# sink is worth more than any byte it costs.
+_ALWAYS_SHOWN = re.compile(r"PARSE ERROR|sink")
 
 
 def is_test_command(command: str) -> bool:
@@ -340,8 +345,12 @@ def _indexed_as_on_disk(conn: sqlite3.Connection, root: Path, path: str) -> bool
         return False
     return row is not None and row[0] == hashlib.sha256(data).hexdigest()
 
-def _failure_signature(output: str, frames: list[tuple[str, int]]) -> str:
-    errors = _ERROR_LINE.findall(output)
+def _failure_signature(output: str, frames: list[tuple[str, int]], *, detailed: bool = False) -> str:
+    """``detailed`` keys on the full error lines (``KeyError: 'a'`` and
+    ``KeyError: 'b'`` differ); the default keys on the exception classes,
+    which is what "the same failure again" after an edit means."""
+    errors = ([m.group(0).strip()[:200] for m in _ERROR_LINE.finditer(output)] if detailed
+              else _ERROR_LINE.findall(output))
     basis = "|".join([*(f"{p}:{n}" for p, n in frames[-3:]), *errors[-2:]])
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16] if basis else ""
 
@@ -401,6 +410,8 @@ class ActionAugmenter:
         self._failures_seen: dict[str, int] = {}
         # Shared with the grep augmenter by AttachedDelivery: one task budget.
         self.budget = DeliveryBudget()
+        # The block being built (under ``_lock``); committed by ``_finish``.
+        self._draft: Draft = self.budget.draft()
         self._lock = threading.Lock()
 
     def _journal(self, **row: Any) -> None:
@@ -418,12 +429,13 @@ class ActionAugmenter:
                 before: dict[str, int] | None = None) -> str:
         self.metrics.time_ms += int(round((time.perf_counter() - started) * 1000))
         if len(lines) <= 1:
-            self._journal(kind=kind, outcome="silent")
+            self._draft.commit("")
+            self._journal(kind=kind, outcome="repeat" if self._draft.suppressed else "silent")
             return ""
         if self.budget.compact:
-            lines = [lines[0], *compact_lines(lines[1:])]
+            lines = [lines[0], *compact_lines(lines[1:], always=_ALWAYS_SHOWN)]
         text = cap_text("\n".join(lines), self.max_bytes)
-        self.budget.charge(text)
+        self._draft.commit(text)
         self.metrics.bytes_delivered += len(text.encode("utf-8"))
         self.delivered_texts.append(text)
         carried = sorted((f for f, n in self.metrics.features.items() if n > (before or {}).get(f, 0)),
@@ -450,6 +462,7 @@ class ActionAugmenter:
             return ""
         with self._lock:
             self.metrics.edit_calls += 1
+            self._draft = self.budget.draft()
             started = time.perf_counter()
             before = dict(self.metrics.features)
             try:
@@ -507,20 +520,7 @@ class ActionAugmenter:
                             self.metrics.note("F4", "F20")
                             lines.append(f"    test {name} exercises: {_listed(exercised, MAX_CALLERS_SHOWN)}")
                         continue
-                    all_callers = relocate(_direct_callers(conn, node_id))
-                    callers = [row for row in all_callers if not self.budget.seen(
-                        f"caller:{node_id}:{row.get('file_path')}:{row.get('name')}")]
-                    if callers:
-                        self.metrics.note("F4")
-                        if any(row.get("trust_tier") == "via function value" for row in callers):
-                            self.metrics.note("F6")
-                        shown_before = len(all_callers) - len(callers)
-                        tail = f" ({shown_before} shown earlier)" if shown_before else ""
-                        lines.append(f"    {name} is called by: {_listed(callers, MAX_CALLERS_SHOWN)}{tail}")
-                    elif all_callers:
-                        lines.append(f"    {name}: callers unchanged since shown earlier")
-                    elif not self.budget.seen(f"nocallers:{node_id}"):
-                        lines.append(f"    {name}: no callers in the graph")
+                    lines += self._caller_lines(relocate(_direct_callers(conn, node_id)), name, path)
                     lines += self._route_lines(conn, node_id, name)
             added = _added_definitions(changes)
             if added:
@@ -540,6 +540,44 @@ class ActionAugmenter:
         if changed and time.perf_counter() - started < EDIT_OPTIONAL_BUDGET_SECONDS:
             typed = self._taint_lines([name for _id, name, _p, _l in changed[:MAX_TAINT_CHECKS]])
         return lines + (typed or sink_lines) + tests
+
+    def _caller_lines(self, all_callers: list[dict[str, Any]], name: str, path: str) -> list[str]:
+        """Callers not yet shown for this function. Only the callers that
+        fit the display cap are staged, so the ``(+N more)`` stay eligible;
+        "unchanged" is said only when every caller was delivered before."""
+        draft = self._draft
+        keyed = [(f"caller:{path}:{name}<-{row.get('file_path')}:{row.get('name')}", row)
+                 for row in all_callers]
+        fresh = [(key, row) for key, row in keyed if draft.is_new(key)]
+        set_key = f"callerset:{path}:{name}:" + hashlib.sha256(
+            "|".join(sorted(key for key, _row in keyed)).encode("utf-8")).hexdigest()[:20]
+        if fresh:
+            self.metrics.note("F4")
+            rows = [row for _key, row in fresh]
+            if any(row.get("trust_tier") == "via function value" for row in rows):
+                self.metrics.note("F6")
+            shown_before = len(all_callers) - len(fresh)
+            tail = f" ({shown_before} shown earlier)" if shown_before else ""
+            line = f"    {name} is called by: {_listed(rows, MAX_CALLERS_SHOWN)}{tail}"
+            for key, _row in fresh[:MAX_CALLERS_SHOWN]:
+                draft.stage(key, line)
+            if len(fresh) <= MAX_CALLERS_SHOWN:
+                draft.stage(set_key, line)
+            return [line]
+        if all_callers:
+            if not draft.is_new(set_key):
+                return [f"    {name}: callers unchanged since shown earlier"]
+            # Every caller was shown before, but not as this set: one went
+            # away. State the current set rather than claim nothing changed.
+            line = f"    {name} is called by (current): {_listed(all_callers, MAX_CALLERS_SHOWN)}"
+            draft.stage(set_key, line)
+            return [line]
+        key = f"nocallers:{path}:{name}"
+        if not draft.is_new(key):
+            return []
+        line = f"    {name}: no callers in the graph"
+        draft.stage(key, line)
+        return [line]
 
     def _preimages(self) -> dict[str, str]:
         """Each edited file's text before the agent first touched it."""
@@ -599,9 +637,12 @@ class ActionAugmenter:
         if not reached:
             return []
         self.metrics.note("F20")
-        if self.budget.seen("tests:" + ",".join(sorted(source))):
+        line = f"  tests reaching {', '.join(source[:3])}: {_listed(relocate(reached), MAX_TESTS_SHOWN)}"
+        key = "tests:" + hashlib.sha256(line.encode("utf-8")).hexdigest()[:20]
+        if not self._draft.is_new(key):
             return []
-        return [f"  tests reaching {', '.join(source[:3])}: {_listed(relocate(reached), MAX_TESTS_SHOWN)}"]
+        self._draft.stage(key, line)
+        return [line]
 
     # -- failing test runs ---------------------------------------------------
 
@@ -636,16 +677,20 @@ class ActionAugmenter:
             return ""
         with self._lock:
             self.metrics.failure_calls += 1
+            self._draft = self.budget.draft()
             started = time.perf_counter()
             before = dict(self.metrics.features)
             try:
                 lines = ["[GT] about this failure:"]
                 frames = failure_frames(output, self._repo_root())
-                signature = _failure_signature(output, frames)
-                located = ([] if signature and self.budget.seen(f"failure:{signature}")
-                           else self._location_lines(frames, output))
+                signature = _failure_signature(output, frames, detailed=True)
+                key = f"failure:{signature}"
+                shown_before = bool(signature) and not self._draft.is_new(key)
+                located = [] if shown_before else self._location_lines(frames, output)
+                if located and signature:
+                    self._draft.stage(key, located[0])
                 lines += located
-                lines += self._repeat_lines(output, frames, bool(located))
+                lines += self._repeat_lines(output, frames, bool(located), shown_before)
             except Exception as exc:  # noqa: BLE001 - enrichment is silent on failure
                 self.metrics.errors += 1
                 self._journal(kind="failure", outcome=f"error:{type(exc).__name__}")
@@ -739,7 +784,8 @@ class ActionAugmenter:
         rows = [f"    {path}:{n}: {_source_line(self.session, path, n)}" for n in numbers]
         return [f"  line {line} depends on (backward slice; control + data):", *rows]
 
-    def _repeat_lines(self, output: str, frames: list[tuple[str, int]], located: bool = True) -> list[str]:
+    def _repeat_lines(self, output: str, frames: list[tuple[str, int]], located: bool = True,
+                      located_earlier: bool = False) -> list[str]:
         signature = _failure_signature(output, frames)
         if not signature:
             return []
@@ -749,7 +795,9 @@ class ActionAugmenter:
         if previous is None or previous == epoch:
             return []
         self.metrics.note("F20")
-        where = "re-check the location above" if located else "re-check where the failing assertion reads its value"
+        where = ("re-check the location shown earlier for this failure" if located_earlier
+                 else "re-check the location above" if located
+                 else "re-check where the failing assertion reads its value")
         return [f"  same failure as before your last edit(s): the change did not reach this path; {where}"]
 
 

@@ -9,16 +9,26 @@ callers, the same module line, the same "next:" hint).
 
 ``DeliveryBudget`` is the one place those decisions are made:
 
-* ``seen(key)``: a fact already shown in this task is not shown again;
+* a fact already shown in this task is not shown again;
 * ``hint_allowed()``: the "next:" tool pointer is offered a few times, not
   on every block;
 * ``compact``: past ``FULL_DETAIL_BYTES`` a block keeps its first line and
   counts, replacing lower-value detail instead of appending it (HAR-94's
   "replace, don't expand").
+
+"Shown" means present in the text the agent received. A block is built as a
+``Draft``: facts are *staged* with the exact text that carries them, and the
+draft is committed against the final delivered text. A fact dropped by a
+display cap, by ``compact_lines`` or by ``cap_text`` truncation is therefore
+never recorded, and a later "shown earlier" can never point at something the
+agent did not see. A draft that is not delivered (silent block, error) is
+simply discarded.
 """
 from __future__ import annotations
 
 import os
+import re
+import threading
 from dataclasses import dataclass, field
 
 FULL_DETAIL_BYTES = int(os.environ.get("GT_ATTACHED_FULL_DETAIL_BYTES", "12000"))
@@ -29,36 +39,72 @@ HINTS_SHOWN = 3
 class DeliveryBudget:
     spent: int = 0
     hints: int = 0
-    _seen: set[str] = field(default_factory=set)
     suppressed: int = 0
+    _seen: set[str] = field(default_factory=set)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def seen(self, key: str) -> bool:
-        """True if ``key`` was already delivered; records it otherwise."""
-        if key in self._seen:
-            self.suppressed += 1
-            return True
-        self._seen.add(key)
-        return False
+    def draft(self) -> "Draft":
+        return Draft(self)
+
+    def was_shown(self, key: str) -> bool:
+        with self._lock:
+            return key in self._seen
 
     def hint_allowed(self) -> bool:
-        if self.hints >= HINTS_SHOWN:
-            return False
-        self.hints += 1
-        return True
+        with self._lock:
+            if self.hints >= HINTS_SHOWN:
+                return False
+            self.hints += 1
+            return True
 
     @property
     def compact(self) -> bool:
         return self.spent >= FULL_DETAIL_BYTES
 
-    def charge(self, text: str) -> None:
-        self.spent += len(text.encode("utf-8"))
+
+class Draft:
+    """The facts one block would carry, recorded only once delivered."""
+
+    def __init__(self, budget: DeliveryBudget):
+        self.budget = budget
+        self._staged: dict[str, str] = {}
+        self.suppressed = 0
+
+    def is_new(self, key: str) -> bool:
+        """False if ``key`` was delivered earlier in the task, or is already
+        staged in this block; each such repeat counts as suppressed."""
+        if key in self._staged or self.budget.was_shown(key):
+            self.suppressed += 1
+            return False
+        return True
+
+    def stage(self, key: str, carrier: str) -> None:
+        """``carrier`` is the exact text that will show ``key`` to the agent."""
+        if carrier:
+            self._staged.setdefault(key, carrier)
+
+    def commit(self, delivered: str) -> None:
+        """Record every staged fact whose carrier survived into ``delivered``,
+        and charge the delivered bytes."""
+        with self.budget._lock:
+            for key, carrier in self._staged.items():
+                if carrier in delivered:
+                    self.budget._seen.add(key)
+            self.budget.suppressed += self.suppressed
+            self.budget.spent += len(delivered.encode("utf-8"))
+        self._staged.clear()
+        self.suppressed = 0
 
 
-def compact_lines(lines: list[str], keep: int = 2) -> list[str]:
-    """First ``keep`` lines plus a count of what was left out."""
-    if len(lines) <= keep:
+def compact_lines(lines: list[str], keep: int = 2, always: "re.Pattern[str] | None" = None) -> list[str]:
+    """The first ``keep`` lines, every line matching ``always``, and a count
+    of what was left out."""
+    kept = [line for index, line in enumerate(lines)
+            if index < keep or (always is not None and always.search(line))]
+    dropped = len(lines) - len(kept)
+    if not dropped:
         return lines
-    return [*lines[:keep], f"  (+{len(lines) - keep} more line(s); GT detail budget reached)"]
+    return [*kept, f"  (+{dropped} more line(s); GT detail budget reached)"]
 
 
-__all__ = ["DeliveryBudget", "FULL_DETAIL_BYTES", "compact_lines"]
+__all__ = ["DeliveryBudget", "Draft", "FULL_DETAIL_BYTES", "compact_lines"]

@@ -119,6 +119,7 @@ class AttachedDelivery:
         self.action_augmenter = ActionAugmenter(session)
         # One per-task delivery budget across search, edit and failure blocks.
         self.action_augmenter.budget = self.augmenter.budget
+        self.action_augmenter._draft = self.augmenter.budget.draft()
         self.uptake = UptakeTracker()
         self.server = None
         self.bin_dir: Path | None = None
