@@ -324,8 +324,7 @@ def test_system_section_lists_only_core_tools_and_points_to_help():
     # Paid on every request: the correctness workflow (run 36359464192 loss
     # analysis) is the only addition over the 2 KB tool reference.
     assert len(section.encode("utf-8")) < 2_600
-    assert "Write your tests from the task's own text" in section
-    assert "On your first submit GT lists every requirement" in section
+    assert "## Recommended Workflow" not in section  # the method lives in the task message
 
 
 def test_every_feature_has_a_registered_attached_surface():
@@ -610,3 +609,29 @@ def test_gt_host_time_is_credited_back_to_the_agent_clock_up_to_the_cap(monkeypa
     assert credit_agent_clock(agent, attached, 60.0) == 40.0  # only the cap's remainder
     assert agent._start_time == 1100.0 and attached.clock_credit_seconds == 100.0
     assert credit_agent_clock(agent, attached, 5.0) == 0.0
+
+
+def test_task_message_workflow_and_example_make_gt_part_of_how_the_agent_works():
+    """GitNexus's levers, pointed at GT: the stock workflow is replaced (no
+    reproduce-script loop) and the one worked example is a gt-query."""
+    import jinja2
+
+    from gt_engine.attached_delivery import attached_instance_template
+
+    stock = (
+        "Please solve this issue: {{task}}\n\n## Recommended Workflow\n\n"
+        "1. Analyze the codebase\n2. Create a script to reproduce the issue\n\n"
+        "## Command Execution Rules\n\nrules\n<example_response>\nlook first\n\n"
+        '[Makes bash tool call with {"command": "ls -la"} as arguments]\n</example_response>\n'
+    )
+    text = attached_instance_template(stock)
+    assert "Create a script to reproduce" not in text
+    for needle in ('`gt-query "<words from the task>"` first', "`gt-context <symbol>`",
+                   "`gt-impact <symbol>`", "`gt-tests <file>`", "## Debugging Patterns",
+                   "## Risk Assessment", "come from the task text, never from what your code prints",
+                   "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT", "## Command Execution Rules"):
+        assert needle in text, needle
+    example = text[text.index("<example_response>"):text.index("</example_response>")]
+    assert "gt-query" in example and "ls -la" not in example
+    assert jinja2.Template(text).render(task="T").startswith("Please solve this issue: T")
+    assert attached_instance_template("no sections here") == "no sections here"

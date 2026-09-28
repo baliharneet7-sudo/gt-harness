@@ -404,25 +404,12 @@ def attached_system_section() -> str:
     # tasks under a prompt that said "skip them when grep is enough", so only
     # grep augmentation ever reached the agent. The commands stay optional -
     # nothing is enforced - but each is tied to the moment it pays off.
-    # A GT-on arm that only ADDS information changed nothing: on the 7
-    # DeepSWE tasks it lost (run 36359464192) the agent never mentioned GT
-    # and wrote its own tests to match its own misreading of the task. Like
-    # GitNexus's harness, the section now sets the working method; unlike
-    # it, the method is aimed at correctness (tests from the task's values,
-    # existing tests, a requirement review at submit), not navigation only.
+    # The working method lives in the TASK message (attached_instance_template),
+    # where GitNexus puts it; this section is the tool reference only.
     return (
         "## Code intelligence\n\n"
         "GroundTruth keeps a code graph of this repository, updated after every edit; its "
-        "`gt-*` commands answer in under a second.\n\n"
-        "## How to work\n\n"
-        "1. Read the task and note every requirement sentence: each one is tested.\n"
-        "2. Locate with `gt-query \"<words from the task>\"`; run `gt-context <symbol>` before "
-        "changing a function and `gt-impact <symbol>` before changing one others call.\n"
-        "3. Write your tests from the task's own text: expected values, names, order, messages "
-        "and precedence come from the task, never from what your code prints.\n"
-        "4. Run the existing tests that cover your files (`gt-tests <file>`), not only your script.\n"
-        "5. On your first submit GT lists every requirement against your changes, once; close any "
-        "gap, then submit again.\n\n"
+        "`gt-*` commands answer in under a second and each replaces several grep/cat rounds.\n\n"
         f"{tool_reference()}\n\n"
         "`gt-help` lists more (routes, slices, taint, renames, co-change, recurring failures). "
         "`[GT]` blocks after your searches, edits and failing tests add callers, tests and "
@@ -430,6 +417,72 @@ def attached_system_section() -> str:
         "GT's own files under /logs/agent and /installed-agent are internals and say nothing "
         "about the task's tests."
     )
+
+
+GT_WORKFLOW = """## Recommended Workflow
+
+Work step-by-step so you can iterate on your changes and catch problems early.
+
+1. **Understand the task** - read it and note every requirement sentence; each one is tested.
+2. **Find the relevant code** - run `gt-query "<words from the task>"` first: it ranks files and symbols from the code graph. Use grep for exact strings.
+3. **Understand the suspect** - run `gt-context <symbol>` to see every caller, callee and flow, then read the source.
+4. **Check blast radius** - before editing a function others call, run `gt-impact <symbol>`.
+5. **Implement** - make minimal, targeted changes.
+6. **Test from the task** - write tests whose expected values, names, order, messages and precedence come from the task text, never from what your code prints; run the existing tests that cover your files (`gt-tests <file>`).
+7. **Submit** - issue `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+   Do not combine it with any other command. <important>After this command, you cannot continue working on this task.</important>
+   Your first submit is answered once by GT with every requirement set against your changes; close any gap, then submit again.
+
+## Debugging Patterns
+
+| Symptom | Approach |
+|---------|----------|
+| Error message / exception | `gt-query "<error text>"`, then `gt-context` on the raising function |
+| Wrong value / wrong behaviour | `gt-context <function>` and follow its callees; `gt-slice <function> <line>` for what a line depends on |
+| Missing feature | `gt-query "<feature>"`, then `gt-context` on the entry point to find the gap |
+| Who calls this / what uses this name | `gt-context` or `gt-refs`: graph-complete, finds callers grep misses |
+| Which tests to run | `gt-tests <file>` |
+
+## Risk Assessment
+
+Before editing shared code, run `gt-impact <symbol>`:
+
+| Callers at depth 1 | Risk | Action |
+|--------------------|------|--------|
+| fewer than 5 | Low | Fix with confidence |
+| 5 to 15 | Medium | Fix carefully; run the tests `gt-tests` lists |
+| more than 15 | High | Minimal change; run the full test suite |
+
+"""
+
+_FIRST_ACTION = (
+    'The task concerns how configuration files are located. Let me ask the code graph where that '
+    'behaviour lives before reading files.\n\n'
+    '[Makes bash tool call with {"command": "gt-query \\"config file search paths\\""} as arguments]'
+)
+
+
+def attached_instance_template(stock: str) -> str:
+    """The stock Mini-SWE task message with GitNexus's two levers, pointed at
+    GT: the Recommended Workflow is REPLACED by one that names the tools at
+    the moment each pays off (plus correctness steps), and the one worked
+    example makes a GT query the first action instead of `ls -la`. On the 7
+    DeepSWE tasks GT-on lost (run 36359464192) the agent followed the stock
+    workflow (reproduce script, fix, re-run own script, submit) and made 2
+    GT tool calls in 7 tasks; the same guidance in the SYSTEM prompt
+    (run 36477828325) changed neither. A template missing either section is
+    returned with only what could be replaced."""
+    text = stock
+    start = text.find("## Recommended Workflow")
+    end = text.find("## Command Execution Rules")
+    if start != -1 and end > start:
+        text = text[:start] + GT_WORKFLOW + text[end:]
+    example_start = text.find("<example_response>")
+    example_end = text.find("</example_response>")
+    if example_start != -1 and example_end > example_start:
+        text = (text[:example_start + len("<example_response>")] + "\n" + _FIRST_ACTION + "\n"
+                + text[example_end:])
+    return text
 
 
 def push_metrics(adapter: Any) -> dict[str, Any]:
@@ -463,6 +516,7 @@ __all__ = [
     "PUSH",
     "UPTAKE_METHOD",
     "UptakeTracker",
+    "attached_instance_template",
     "attached_system_section",
     "delivery_mode",
     "delivery_report",

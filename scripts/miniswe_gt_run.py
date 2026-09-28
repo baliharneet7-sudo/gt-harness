@@ -892,13 +892,20 @@ def build_agent(
     gt_disabled = gt_off or gt_mode == "off" or global_killed
     attached = False
     if not gt_disabled:
-        from gt_engine.attached_delivery import attached_system_section, is_attached
+        from gt_engine.attached_delivery import (
+            attached_instance_template,
+            attached_system_section,
+            is_attached,
+        )
 
         attached = is_attached()
     if attached:
-        # One tool surface (bash), one prompt delta: the stock template plus
-        # the GT tool reference. The typed function tool stays unadvertised.
+        # One tool surface (bash). The system prompt gains the GT tool
+        # reference; the task message's workflow and worked example are
+        # replaced so GT is part of how the agent works (GitNexus's levers).
+        # The typed function tool stays unadvertised.
         system_template = f"{system_template}\n\n{attached_system_section()}"
+        instance_template = attached_instance_template(instance_template)
         disabled_capabilities = tuple(
             dict.fromkeys((*disabled_capabilities, "typed_actions"))
         )
