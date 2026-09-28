@@ -111,7 +111,16 @@ Evidence: every delivered `[GT]` block parsed from the trajectories (`scripts/de
 - DeepSWE full cohort: images mirrored to GHCR before the digest gate (public ECR per-IP data limit).
 - Runs relaunched on 7863ed52: DeepSWE 36350395444, TB2 36350397955, SWE-Live 1/2 36350400233, 2/2 36350402561.
 
+## Round 7: token budget + feature reach (9edd71e6 -> 09a33f16 -> da431c18, pin 9b064de8)
+- Full runs @e1d05a2f: TB2 final 59/88 (81 graded, 7 harbor_trial_failed infra) vs space-bunny GT-off 5-run mean 56.8/89 (best 61). GT-on wall ~2x baseline; on the 7 lost DeepSWE tasks GT-on took 947 actions vs 830 (+14%: more edit/test cycles, fewer file reads). GT text is a few % of input tokens.
+- `attached_budget.DeliveryBudget` (one per task, shared by grep/edit/failure blocks): a fact is said once. Blocks are built as a `Draft`; a fact counts as shown only if its text is in the delivered block (display caps, compaction and `cap_text` truncation never record it). Symbol blocks keyed by content (an edit that adds a caller is shown); "callers unchanged" only when that exact caller set was delivered; failure-location dedupe keys on full error lines; compaction keeps PARSE ERROR / sink lines; 3 tool hints per task; past 12 KB blocks keep their first lines.
+- Shadow push pipeline (contract delta, task-start localization) computed once per task, not per turn (~144 s host time per task the agent never saw). Known: a later drift re-localization in shadow is not journaled.
+- Feature reach: live run 36359464192 had F7 absent on 31/62 tasks with data, F19 31, F8 28, F14/16/17 27, F9 26, F18 17. The plan now carries dispatch, non-trivial call resolution, flows, routes/injection and sinks of the anchored symbols (one row per kind first); the edit block carries a backward slice of the first edited Python statement (last in the block).
+- Replay (13 recorded runs): GT bytes 259,742 -> 201,830 (-22%); +1..+3 features on 10, none lost; audited claims unchanged (4 known producer name-match claims: cliffy 3, aiogram 1).
+- Open: GT-on step inflation (edit/test loop) is the main efficiency lever; plan build 152 s and LSP seal wait 90 s host time; producer oracle gaps (nested defs TS/Py, F18 middleware).
+
 ## Log
+- 2026-09-28: 9b064de8 on all three accounts; SWE-Live shards @e1d05a2f cancelled at ~45/150 each; 5-task smokes TB2 36376490824, SWE-Live 36376502867; DeepSWE @e1d05a2f continues (restart on 9b064de8 when it ends).
 - 2026-09-27: round 3 landed (44af8b6d, pin ee20bb8e) on all three accounts; SWE-Live first5 @5994b3ef 5/5 solved, red only on the cfn-lint amend refusal; stale DeepSWE rest15 @09ae8ff4 (queued for hours) cancelled.
 - 2026-09-27: GT-on on 3 accounts x 3 benchmarks landed (54822a6b); producer 93e2e86e (mcp 2 import) certified + vendored (ab159952, pin 2dcfbb88); pushed to all three accounts.
 - 2026-09-27: producer ec587ccc certified + vendored (70969751); import pin re-derived (98d2c332); producer CI profile identical to certified 1e83ea68 (pre-existing lint + 60 s Go-build fixture timeouts on ubuntu-3.11/windows), the one real regression fixed.
