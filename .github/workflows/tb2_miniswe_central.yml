@@ -8,10 +8,10 @@ on:
         description: "Run gate-one first; release remaining-19 only after an official grade. full-89 is the frozen GT-off baseline cohort - authorized full runs only"
         required: true
         type: choice
-        options: [gate-one, remaining-19, all-20, full-89, subset]
+        options: [gate-one, remaining-19, all-20, full-89, subset, rerun-89]
         default: gate-one
       subset_tasks:
-        description: "subset only: comma-separated task ids, each drawn from the frozen repair20 set"
+        description: "subset: task ids from the frozen repair20 set; rerun-89: task ids from the frozen full-89 cohort (re-grade tasks a full run lost to runner infrastructure)"
         required: false
         type: string
         default: ""
@@ -69,7 +69,7 @@ on:
         type: string
         default: "gate-one"
       subset_tasks:
-        description: "subset only: comma-separated task ids, each drawn from the frozen repair20 set"
+        description: "subset: task ids from the frozen repair20 set; rerun-89: task ids from the frozen full-89 cohort (re-grade tasks a full run lost to runner infrastructure)"
         required: false
         type: string
         default: ""
@@ -289,8 +289,18 @@ jobs:
           }.get(stage)
           # The pool this stage draws from, and the identity that binds it.
           pool, pool_digest = (
-              (full89, full89_digest) if stage == "full-89" else (tasks, digest)
+              (full89, full89_digest) if stage in ("full-89", "rerun-89") else (tasks, digest)
           )
+          if stage == "rerun-89":
+              # Re-grade tasks a full-89 run lost to runner infrastructure
+              # (run 36394025893: a dead Docker daemon, a stalled PyPI
+              # install) - drawn from the frozen cohort, so its identity
+              # check above binds every task, in cohort order.
+              wanted = [t.strip() for t in os.environ.get("SUBSET_TASKS", "").split(",") if t.strip()]
+              unknown = sorted(set(wanted) - set(full89))
+              if not wanted or unknown or len(set(wanted)) != len(wanted):
+                  raise SystemExit(f"invalid rerun-89 set (empty, duplicate, or outside full-89): {unknown or wanted}")
+              selected = [t for t in full89 if t in set(wanted)]
           if stage == "subset":
               # A controlled experiment draws from the frozen repair20 set only,
               # so the task_set_sha256 identity check above still binds every

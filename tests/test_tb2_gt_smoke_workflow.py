@@ -63,7 +63,12 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert inputs_default("max_parallel") == "20"
     assert "max-parallel: ${{ fromJSON(inputs.max_parallel) }}" in text
     assert 'int(os.environ["MAX_PARALLEL"]) > 20' in text
-    assert "options: [gate-one, remaining-19, all-20, full-89, subset]" in text
+    assert "options: [gate-one, remaining-19, all-20, full-89, subset, rerun-89]" in text
+    # rerun-89 re-grades tasks a full run lost to runner infrastructure; it
+    # may only draw from the frozen full-89 cohort, in cohort order.
+    assert 'unknown = sorted(set(wanted) - set(full89))' in text
+    assert 'selected = [t for t in full89 if t in set(wanted)]' in text
+    assert 'if stage in ("full-89", "rerun-89") else (tasks, digest)' in text
     assert '"gate-one": tasks[:1]' in text
     assert '"remaining-19": tasks[1:]' in text
     assert 'TIMEOUT_MULTIPLIER: "5.0"' in text
