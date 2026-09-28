@@ -724,13 +724,17 @@ class ActionAugmenter:
     def _test_lines(self, conn: sqlite3.Connection, paths: list[str],
                     relocate: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] = lambda rows: rows,
                     ) -> list[str]:
-        from gt_engine.tool_server import _TEST_REACH_DEPTH, _TEST_REACH_LIMIT, _TEST_REACH_QUERY
+        from gt_engine.tool_server import (
+            _TEST_REACH_DEPTH, _TEST_REACH_LIMIT, _TEST_REACH_QUERY, is_real_test,
+        )
 
         source = [path for path in paths if not _TEST_PATH.search(path)]
         reached: list[dict[str, Any]] = []
         for path in source:
             for file_path, qualified, name, line, depth in conn.execute(
                     _TEST_REACH_QUERY, (path, _TEST_REACH_DEPTH, _TEST_REACH_LIMIT)):
+                if not is_real_test(file_path, qualified or name):
+                    continue
                 reached.append({"file_path": file_path, "line": line,
                                 "name": f"{qualified or name} ({depth} call hop(s) away)"})
         if not reached:

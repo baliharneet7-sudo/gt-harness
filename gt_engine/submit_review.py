@@ -1,0 +1,231 @@
+"""Pre-submit requirement review for attached delivery.
+
+Trajectory analysis of the DeepSWE tasks GT-on lost (run 36359464192, 7 of 7)
+found one mechanism: the agent wrote its own tests to match its own reading
+of the task, saw them pass, and submitted - with a sentence of the task
+unimplemented or misread (cliffy looked for ``test.rc`` where the task says
+``.namerc``; httpx evicted the newest where it says oldest; fastapi never
+tested an include_router value against a router default). Every run ended
+green on tests that encoded the misreading. Showing the requirements at the
+START (the task plan) did not help; the check has to happen at submit.
+
+So the first submit is held once and answered with the task's requirement
+lines set against the agent's actual changes:
+
+* every literal the task names (backticked code, quoted strings, --flags,
+  dotted / snake / camel identifiers) that appears nowhere in the added code
+  or tests is flagged under its requirement line;
+* requirement lines with no such literal are listed for the agent to check
+  by reading - they cannot be verified mechanically and are not claimed to be;
+* the real tests reaching the changed files are named to run.
+
+The second submit always goes through: this is a review, never a gate
+(the push arm's plan gate refused every submission on unverifiable rows and
+cost TB2 whole runs).
+"""
+from __future__ import annotations
+
+import re
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from gt_engine.gt_session import GTSession
+
+MAX_REVIEW_BYTES = 6000
+MAX_PROSE_ROWS = 12
+MAX_TESTS_SHOWN = 6
+
+_BACKTICK = re.compile(r"`([^`\n]{2,80})`")
+_QUOTED = re.compile(r"""(?<![\w'"])(['"])([^'"\n]{2,60})\1(?![\w'"])""")
+_FLAG = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]{1,40})")
+# Bare dot-prefixed names the task spells out: ".namerc", ".json".
+_DOTNAME = re.compile(r"(?<![\w.])(\.[a-z][a-z0-9_]{1,30})\b")
+_ATOM = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+# Placeholders in a task's templates: N, M, <url>, <RFC 7231 date>.
+_PLACEHOLDER = re.compile(r"<[^<>]{1,40}>|\b[A-Z]\b")
+_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`(\"'])")
+# Identifiers that are clearly code: dotted, snake_case, camelCase, PascalCase
+# with an inner capital. Plain English words never match.
+_IDENT = re.compile(r"(?<![\w.])([A-Za-z_][A-Za-z0-9]*(?:[._][A-Za-z0-9_]+)+|[a-z]+[A-Z][A-Za-z0-9]*|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*)(?![\w])")
+# Lines that are code or process, not requirements.
+_CODE_LINE = re.compile(r"^\s*(?:[{}()\[\];]|(?:const|let|var|def|class|import|from|return|function|public|private|func|fn)\b)|[;{]\s*$|=>")
+_PROCESS = re.compile(
+    r"\b(?:new branch|from main|pull request|commit (?:everything|your|all)|push (?:your|to)|"
+    r"you can execute|bash commands|edit files to implement|IMPORTANT:)", re.I)
+_FENCED = re.compile(r"```.*?```", re.S)
+_BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+
+@dataclass
+class ReviewRow:
+    text: str
+    literals: tuple[str, ...]
+    missing: tuple[str, ...] = ()
+
+    @property
+    def checkable(self) -> bool:
+        return bool(self.literals)
+
+
+@dataclass
+class SubmitReview:
+    rows: list[ReviewRow] = field(default_factory=list)
+    tests: list[str] = field(default_factory=list)
+
+    @property
+    def flagged(self) -> list[ReviewRow]:
+        return [row for row in self.rows if row.missing]
+
+    @property
+    def prose(self) -> list[ReviewRow]:
+        return [row for row in self.rows if not row.checkable]
+
+    def render(self) -> str:
+        """Every requirement sentence, numbered, once. Shown in full because
+        the requirement a run misses is not predictable: all 7 misses in run
+        36359464192 were ordinary sentences, 3 of them inside one paragraph."""
+        head = ("[GT] before you submit: the task's requirements, one per line. For EACH, "
+                "confirm your change implements it and a test asserts it with the values the "
+                "task states (names, order, messages, precedence) - not values copied from your "
+                "own output. Fix what is missing, then submit again; this review appears once.")
+        lines = [head, ""]
+        for index, row in enumerate(self.rows, start=1):
+            note = f"   [not in your changes: {', '.join(row.missing)}]" if row.missing else ""
+            lines.append(f"{index}. {row.text}{note}")
+        if self.tests:
+            lines.append("")
+            lines.append("Existing tests that reach the files you changed (run them): "
+                         + ", ".join(self.tests[:MAX_TESTS_SHOWN]))
+        text = "\n".join(lines)
+        encoded = text.encode("utf-8")
+        if len(encoded) <= MAX_REVIEW_BYTES:
+            return text
+        return encoded[:MAX_REVIEW_BYTES].decode("utf-8", "ignore").rsplit("\n", 1)[0] + \
+            "\n... (more requirements in the task text; re-read it)"
+
+
+def literals_of(text: str) -> tuple[str, ...]:
+    """The code literals a requirement line names, in order, de-duplicated."""
+    found: list[str] = []
+    for match in _BACKTICK.finditer(text):
+        found.append(match.group(1).strip())
+    stripped = _BACKTICK.sub(" ", text)
+    for match in _QUOTED.finditer(stripped):
+        found.append(match.group(2).strip())
+    for match in _FLAG.finditer(stripped):
+        found.append(match.group(1))
+    for match in _DOTNAME.finditer(stripped):
+        found.append(match.group(1))
+    for match in _IDENT.finditer(_QUOTED.sub(" ", stripped)):
+        found.append(match.group(1))
+    out: list[str] = []
+    for item in found:
+        if len(item) >= 2 and item not in out:
+            out.append(item)
+    return tuple(out)
+
+
+def requirement_lines(issue_text: str) -> list[str]:
+    """Every requirement sentence of the task, in order.
+
+    Not the plan's ledger: its workflow-noise filter dropped real
+    requirements (bandit-taint's safe-call list and two sink rules, run
+    36359464192) while keeping "work on this in a new branch". Here fenced
+    code is removed, each line is split into sentences, and only process
+    sentences (branches, commits, how to use the shell) are dropped."""
+    text = _FENCED.sub("\n", issue_text or "")
+    rows: list[str] = []
+    for raw in text.splitlines():
+        line = _BULLET.sub("", raw).strip()
+        if not line or line.startswith("#"):
+            continue
+        for sentence in _SENTENCE.split(" ".join(line.split())):
+            sentence = sentence.strip()
+            if sentence.lower().startswith("please solve this issue:"):
+                sentence = sentence.split(":", 1)[1].strip()
+            if (len(sentence) < 12 or _CODE_LINE.search(sentence) or _PROCESS.search(sentence)
+                    or sentence in rows):
+                continue
+            rows.append(sentence)
+    return rows
+
+
+def _present(literal: str, haystack: str) -> bool:
+    """A literal is present when it appears verbatim, or when every word of it
+    does once template placeholders are removed (a signature or message
+    template is never written verbatim in code)."""
+    if literal in haystack:
+        return True
+    tail = literal.rsplit(".", 1)[-1]
+    if len(tail) >= 4 and tail != literal and tail in haystack:
+        return True  # a dotted name used as an attribute
+    atoms = _ATOM.findall(_PLACEHOLDER.sub(" ", literal))
+    return bool(atoms) and all(atom in haystack for atom in atoms)
+
+
+def build_review(issue_text: str, added_text: str, tests: list[str] | None = None) -> SubmitReview:
+    review = SubmitReview(tests=list(tests or []))
+    for text in requirement_lines(issue_text):
+        literals = literals_of(text)
+        missing = tuple(lit for lit in literals if not _present(lit, added_text))
+        review.rows.append(ReviewRow(text=text, literals=literals, missing=missing))
+    return review
+
+
+def added_text_since(repo_root: str, baseline: str) -> str:
+    """Every line the agent added since ``baseline`` (committed or not), plus
+    the full text of new untracked files."""
+    root = Path(repo_root)
+    parts: list[str] = []
+    try:
+        ref = baseline or "HEAD"
+        diff = subprocess.run(["git", "-C", str(root), "diff", "--no-color", "-U0", ref],
+                              capture_output=True, text=True, timeout=30, errors="replace").stdout
+        parts += [line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")]
+        untracked = subprocess.run(["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"],
+                                   capture_output=True, text=True, timeout=30, errors="replace").stdout
+        for rel in untracked.splitlines()[:200]:
+            path = root / rel
+            try:
+                if path.is_file() and path.stat().st_size < 400_000:
+                    parts.append(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return "\n".join(parts)
+
+
+def changed_files_since(repo_root: str, baseline: str) -> list[str]:
+    try:
+        out = subprocess.run(["git", "-C", repo_root, "diff", "--name-only", baseline or "HEAD"],
+                             capture_output=True, text=True, timeout=30, errors="replace").stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def session_review(session: "GTSession", baseline: str) -> str:
+    """The rendered review for this session, or '' when there is nothing to say."""
+    engine = getattr(session, "_engine", None)
+    issue = str(getattr(engine, "issue_text", "") or "")
+    root = str(getattr(engine, "repo_root", "") or "")
+    if not issue.strip() or not root:
+        return ""
+    tests: list[str] = []
+    try:
+        from gt_engine.tool_server import _tests_by_reachability
+
+        changed = changed_files_since(root, baseline)
+        tests = [f"{row.get('file_path')}::{row.get('name')}" for row in
+                 _tests_by_reachability(session, changed)[:MAX_TESTS_SHOWN]] if changed else []
+    except Exception:  # noqa: BLE001 - tests are advisory
+        tests = []
+    review = build_review(issue, added_text_since(root, baseline), tests)
+    return review.render() if review.rows else ""
+
+
+__all__ = ["SubmitReview", "build_review", "literals_of", "requirement_lines", "session_review"]

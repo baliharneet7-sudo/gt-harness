@@ -18,6 +18,7 @@ Attached delivery keeps exactly that substance and none of the control:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -78,12 +79,29 @@ class AttachedPlan:
         return answer
 
 
+def _anchor_named_in(anchor: Any, text: str) -> bool:
+    """An anchor is shown only when the requirement itself names it: its
+    dotted name, or its own name as a whole, case-exact word that looks like
+    code (a capital, underscore or digit) or is 6+ letters. On the 7 DeepSWE
+    losses (run 36359464192) most anchors were unrelated - Keypress.then for
+    "name.json then .namerc", Limits for "when limits are exceeded",
+    _init_logger for walrus taint - and two plausibly misled the agent."""
+    qualified = str(getattr(anchor, "qualified_name", "") or "")
+    if qualified and "." in qualified and qualified in text:
+        return True
+    leaf = str(getattr(anchor, "name", "") or qualified).rsplit(".", 1)[-1]
+    if not leaf or not re.search(r"(?<![\w])" + re.escape(leaf) + r"(?![\w])", text):
+        return False
+    return len(leaf) >= 6 or bool(re.search(r"[A-Z_0-9]", leaf))
+
+
 def _row_entry(row: Any, anchors: tuple[Any, ...], callers: dict[int, tuple[Any, ...]],
                index: int) -> dict[str, Any]:
     text = " ".join(str(row.text).split())
     if len(text) > MAX_ROW_CHARS:
         text = text[:MAX_ROW_CHARS - 3] + "..."
     entry: dict[str, Any] = {"name": f"R{index}: {text}"}
+    anchors = tuple(anchor for anchor in anchors if _anchor_named_in(anchor, text))
     if not anchors:
         entry["name"] += "  -> no code anchor in the graph (locate it yourself)"
         return entry

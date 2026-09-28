@@ -124,6 +124,30 @@ class AttachedDelivery:
         self.server = None
         self.bin_dir: Path | None = None
         self._tool_texts_seen = 0
+        # Pre-submit requirement review (gt_engine.submit_review): once per
+        # task, against everything the agent changed since the task began.
+        self.submit_review_done = False
+        self.submit_review_bytes = 0
+        self.review_baseline = _repository_head(session)
+
+    def submit_review_once(self) -> str:
+        """The review text for the first submit of the task, '' afterwards
+        (or when disabled with GT_SUBMIT_REVIEW=0 or there is nothing to say)."""
+        if self.submit_review_done or os.environ.get("GT_SUBMIT_REVIEW", "1") == "0":
+            return ""
+        self.submit_review_done = True
+        from gt_engine.submit_review import session_review
+
+        text = session_review(self.session, self.review_baseline)
+        self.submit_review_bytes = len(text.encode("utf-8"))
+        store = getattr(getattr(self.session, "_engine", None), "store", None)
+        if store is not None:
+            try:
+                store.append("gt_submit_review", bytes=self.submit_review_bytes,
+                             baseline=self.review_baseline)
+            except Exception:  # noqa: BLE001 - journaling never costs the action
+                pass
+        return text
 
     def start(self, bin_dir: str | os.PathLike[str], env_config: dict[str, str] | None) -> None:
         from gt_engine.tool_server import ToolServer, install_wrappers
@@ -310,6 +334,8 @@ class AttachedDelivery:
             "feature_inventory": dict(self.feature_inventory),
             "gt_search_commands": self.augmenter.search_commands,
             "gt_repeats_suppressed": self.augmenter.budget.suppressed,
+            "gt_submit_review_delivered": bool(self.submit_review_bytes),
+            "gt_submit_review_bytes": self.submit_review_bytes,
             # Budget parity: host seconds GT spent that were given back to the
             # agent's clock (miniswe_runtime.credit_agent_clock).
             "gt_clock_credit_seconds": round(float(getattr(self, "clock_credit_seconds", 0.0) or 0.0), 1),
@@ -353,6 +379,21 @@ FEATURE_SURFACES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _repository_head(session: "GTSession") -> str:
+    """The task's starting commit, so the review diffs everything the agent
+    changed - committed or not."""
+    import subprocess
+
+    root = str(getattr(getattr(session, "_engine", None), "repo_root", "") or "")
+    if not root:
+        return ""
+    try:
+        return subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True,
+                              text=True, timeout=15).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def attached_system_section() -> str:
     """The one prompt addition of the attached arm, appended to the stock
     system template. Short on purpose: it is paid on every request."""
@@ -363,27 +404,31 @@ def attached_system_section() -> str:
     # tasks under a prompt that said "skip them when grep is enough", so only
     # grep augmentation ever reached the agent. The commands stay optional -
     # nothing is enforced - but each is tied to the moment it pays off.
+    # A GT-on arm that only ADDS information changed nothing: on the 7
+    # DeepSWE tasks it lost (run 36359464192) the agent never mentioned GT
+    # and wrote its own tests to match its own misreading of the task. Like
+    # GitNexus's harness, the section now sets the working method; unlike
+    # it, the method is aimed at correctness (tests from the task's values,
+    # existing tests, a requirement review at submit), not navigation only.
     return (
         "## Code intelligence\n\n"
-        "GroundTruth keeps a code graph of this repository, updated after every edit. "
-        "These shell commands answer in well under a second and replace several "
-        "grep/cat rounds each:\n\n"
-        "| When you need to | Run |\n"
-        "|---|---|\n"
-        "| find where the task's behaviour lives | `gt-query \"<words from the issue>\"` |\n"
-        "| understand a function before touching it | `gt-context <symbol>` |\n"
-        "| know what breaks if you change it | `gt-impact <symbol>` |\n"
-        "| pick the tests to run for a file | `gt-tests <file>` |\n"
-        "| check your edits before submitting | `gt-changes` |\n\n"
+        "GroundTruth keeps a code graph of this repository, updated after every edit; its "
+        "`gt-*` commands answer in under a second.\n\n"
+        "## How to work\n\n"
+        "1. Read the task and note every requirement sentence: each one is tested.\n"
+        "2. Locate with `gt-query \"<words from the task>\"`; run `gt-context <symbol>` before "
+        "changing a function and `gt-impact <symbol>` before changing one others call.\n"
+        "3. Write your tests from the task's own text: expected values, names, order, messages "
+        "and precedence come from the task, never from what your code prints.\n"
+        "4. Run the existing tests that cover your files (`gt-tests <file>`), not only your script.\n"
+        "5. On your first submit GT lists every requirement against your changes, once; close any "
+        "gap, then submit again.\n\n"
         f"{tool_reference()}\n\n"
-        "`gt-help` lists more (routes and API clients, slices, taint, interface checks, "
-        "renames, co-change, recurring failures).\n\n"
-        "Your grep/rg/ag results may end with a `[GT]` block about the symbols you searched "
-        "for (definition, callers, callees, flows, references, overrides, routes, module). "
-        "After an edit, a `[GT]` block lists the functions you changed, their callers and "
-        "the tests that reach them; after a failing test run, where it failed and the lines "
-        "that value depends on. A `[GT] task plan` ties the issue's lines to the code they "
-        "name (run gt-plan to see it again). Graph facts are name-level: confirm by reading the code."
+        "`gt-help` lists more (routes, slices, taint, renames, co-change, recurring failures). "
+        "`[GT]` blocks after your searches, edits and failing tests add callers, tests and "
+        "failure locations; graph facts are name-level, so confirm by reading the code. "
+        "GT's own files under /logs/agent and /installed-agent are internals and say nothing "
+        "about the task's tests."
     )
 
 

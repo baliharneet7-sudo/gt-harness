@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -197,6 +198,26 @@ _TEST_REACH_QUERY = (
 )
 
 
+# A file under a test location whose function is test-shaped. The producer's
+# is_test flag also marks fixtures and examples: 80 of 342 "tests reaching"
+# entries on the 7 DeepSWE losses (run 36359464192) were not tests
+# (examples/koa/index.js, docs_src/...GzipRoute, conftest TestServer.restart).
+_REAL_TEST_FILE = re.compile(
+    r"(^|/)(tests?|__tests__|spec|specs)/|(^|/)test_[^/]*$|_test\.[a-z]+$|\.(test|spec)\.[a-z]+$")
+_JS_TEST_FILE = re.compile(r"\.(test|spec)\.[a-z]+$|(^|/)__tests__/")
+_EXCLUDED_PARTS = re.compile(r"(^|/)(examples?|docs?|docs_src|fixtures?|benchmarks?)/")
+
+
+def is_real_test(file_path: str, name: str) -> bool:
+    path = str(file_path or "")
+    if not _REAL_TEST_FILE.search(path) or _EXCLUDED_PARTS.search(path):
+        return False
+    if _JS_TEST_FILE.search(path):
+        return True  # describe/it bodies carry no test_ name
+    leaf = str(name or "").split(" (")[0].rsplit(".", 1)[-1].lower()
+    return leaf.startswith("test") or leaf.endswith("_test")
+
+
 def _tests_by_reachability(session: "GTSession", files: list[str]) -> list[dict[str, Any]]:
     """Test functions that reach the files' functions within a few CALLS hops.
 
@@ -215,6 +236,8 @@ def _tests_by_reachability(session: "GTSession", files: list[str]) -> list[dict[
             for file_path, qualified, name, line, depth in conn.execute(
                 _TEST_REACH_QUERY, (path, _TEST_REACH_DEPTH, _TEST_REACH_LIMIT)
             ):
+                if not is_real_test(file_path, qualified or name):
+                    continue
                 rows.append({"file_path": file_path, "line": line,
                              "name": f"{qualified or name} ({depth} call hop(s) away)"})
     finally:

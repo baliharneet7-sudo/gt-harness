@@ -400,9 +400,23 @@ def _run_submit_gate(session: GTSession, command: str, *, pre_execution: bool = 
     if adapter is None or session.disabled:
         return True
     if is_attached():
-        # Attached delivery never blocks a native action (HAR-93): the submit
-        # goes through exactly as in stock Mini-SWE.
+        # Attached delivery never refuses a submission (HAR-93). It holds the
+        # FIRST one once, answering with the task's requirements set against
+        # the agent's changes (gt_engine.submit_review); the next submit goes
+        # through as in stock Mini-SWE. The push arm's plan gate refused every
+        # submit on unverifiable rows - this can hold exactly one.
         if pre_execution:
+            attached = getattr(adapter, "attached_delivery", None)
+            review = ""
+            if attached is not None:
+                try:
+                    review = attached.submit_review_once()
+                except Exception as exc:  # noqa: BLE001 - the review is advisory
+                    adapter.store.append("gt_submit_review_fault", error=type(exc).__name__)
+            if review:
+                adapter.pending_directives.append(review)
+                adapter.store.append("submit_review_held", bytes=len(review.encode("utf-8")))
+                return False
             adapter.store.append("submit_gate_bypassed", reason="attached_delivery")
         return True
     if not pre_execution and adapter.phase in {"IMPLEMENT", "VERIFY"}:

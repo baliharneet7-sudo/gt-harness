@@ -321,7 +321,11 @@ def test_system_section_lists_only_core_tools_and_points_to_help():
         assert (f"`{spec.usage}`" in section) == spec.core, name
     assert "`gt-help`" in section
     assert "{{" not in section and "{%" not in section
-    assert len(section.encode("utf-8")) < 2_000
+    # Paid on every request: the correctness workflow (run 36359464192 loss
+    # analysis) is the only addition over the 2 KB tool reference.
+    assert len(section.encode("utf-8")) < 2_600
+    assert "Write your tests from the task's own text" in section
+    assert "On your first submit GT lists every requirement" in section
 
 
 def test_every_feature_has_a_registered_attached_surface():
