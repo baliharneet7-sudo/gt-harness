@@ -1817,7 +1817,7 @@ def test_tb2_pays_for_gt_setup_like_every_other_paid_lane() -> None:
     assert "multiplier=1.0 if parity else 5.0" in text
     # Under parity the outer deadline carries only the clock-credit cap; the
     # agent's own clock is the baseline's and pauses while GT works.
-    assert "overhead_extension_sec=CLOCK_CREDIT_CAP_SECONDS if parity else GT_OVERHEAD_EXTENSION_SECONDS" in text
+    assert "overhead_extension_sec=(CLOCK_CREDIT_CAP_SECONDS + SUPERVISOR_GRACE_SECONDS) if parity else GT_OVERHEAD_EXTENSION_SECONDS" in text
     assert '--ak gt_clock_credit_cap_sec="${{ matrix.gt_clock_credit_cap_sec }}"' in text
     assert '"benchmark_budget_seconds"' in text
     assert '"gt_overhead_extension_seconds"' in text
@@ -1858,3 +1858,19 @@ def test_every_trial_fits_inside_the_hosted_job_ceiling(tmp_path) -> None:
 def test_a_skipped_matrix_is_not_summarized_as_missing_artifacts() -> None:
     summarize = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["summarize"]
     assert "needs.run.result != 'skipped'" in summarize["if"]
+
+
+def test_parity_gives_the_agent_exactly_the_baseline_deadline(tmp_path) -> None:
+    """Under parity the agent's own clock (runner budget minus the clock-credit
+    cap) equals the task's benchmark timeout x 1.0 - what the GT-off baseline
+    agent had before Pier killed it."""
+    import os
+
+    os.environ["GT_BUDGET_PARITY"] = "1"
+    for timeout in (900.0, 1800.0):
+        sub = tmp_path / str(int(timeout))
+        sub.mkdir()
+        row = _planner_budget_rows(sub, timeout)[0]
+        agent_clock = row["time_budget_seconds"] - row["gt_clock_credit_cap_sec"]
+        assert agent_clock == int(timeout)
+

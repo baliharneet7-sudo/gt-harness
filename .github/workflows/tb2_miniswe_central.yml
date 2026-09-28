@@ -750,10 +750,15 @@ jobs:
               # time on TB2 36394025893: median 4 s, p95 229 s; setup before the
               # first step: p95 70 s.
               CLOCK_CREDIT_CAP_SECONDS = 600.0
+              # + SUPERVISOR_GRACE_SECONDS: the runner's deadline is the execution
+              # budget minus that grace, and the agent's clock is the runner's minus
+              # the cap - so the agent's own clock is exactly the baseline deadline
+              # (task timeout x 1.0; the GT-off agent had no inner clock and ran
+              # until Pier killed it there).
               budget = resolve_budget(
                   dataset / task / "task.toml",
                   multiplier=1.0 if parity else 5.0,
-                  overhead_extension_sec=CLOCK_CREDIT_CAP_SECONDS if parity else GT_OVERHEAD_EXTENSION_SECONDS,
+                  overhead_extension_sec=(CLOCK_CREDIT_CAP_SECONDS + SUPERVISOR_GRACE_SECONDS) if parity else GT_OVERHEAD_EXTENSION_SECONDS,
               )
               # Pier's agent deadline is `task.[agent].timeout_sec * multiplier`
               # (pier/trial/execution.py::_resolve_agent_timeout).  Passing the
