@@ -699,10 +699,13 @@ def test_unreaped_descendants_over_committed_work_keep_the_run(tmp_path, monkeyp
     assert receipt["status"] == "finished"
 
 
-def test_unreaped_descendants_over_a_pristine_tree_raise_after_publishing(
+def test_unreaped_descendants_over_a_pristine_tree_keep_the_run(
     tmp_path, monkeypatch
 ):
-    """Nothing to conserve: still a refusal, still not before the publish."""
+    """The command ran; an escaped child is a gap, not broken tooling.
+
+    An agent that starts a server as its first command has a pristine tree:
+    ending the run there (exit 5, ungraded) is what TB2 lost 7 tasks to."""
     baseline = _git_workspace(tmp_path)
     _install_stub_worker(monkeypatch, [
         {"output": b"slow\n", "returncode": 0, "receipt": NOT_REAPED_RECEIPT},
@@ -710,10 +713,10 @@ def test_unreaped_descendants_over_a_pristine_tree_raise_after_publishing(
     env = CredentialIsolatedLocalEnvironment(cwd=str(tmp_path), timeout=5)
     env._patch_baseline = baseline
 
-    with pytest.raises(RuntimeError) as caught:
-        env.execute({"command": "echo slow"})
+    result = env.execute({"command": "echo slow"})
 
-    assert str(caught.value) == "command_descendants_not_reaped"
+    assert result["extra"]["containment_gap"] == "descendants_not_reaped"
+    assert env.containment_gap_streak == 1
     from gt_engine.output_evidence import EvidenceStore
 
     receipts = _capture_receipts(env)
@@ -840,3 +843,25 @@ class _StubWorkerChildPid:
 
     def wait(self, timeout=None):
         return 0
+
+
+def test_an_unwitnessed_command_in_a_workspace_without_git_keeps_the_run(
+    tmp_path, monkeypatch
+):
+    """TB2 containers often have no git: the tree is unobservable, not
+    pristine. One escaped background child must not end the run; three in a
+    row end it gradably (ContainmentLost), never as internal_error."""
+    from scripts.miniswe_gt_run import ContainmentLost
+
+    (tmp_path / "re.json").write_text("[]", encoding="utf-8")
+    _install_stub_worker(monkeypatch, [{"output": b"ok\n", "returncode": 0}])
+    env = CredentialIsolatedLocalEnvironment(cwd=str(tmp_path), timeout=5)
+    env._patch_baseline = ""
+
+    first = env.execute({"command": "sleep 100 &"})
+    assert first["extra"]["containment_gap"] == "containment_unwitnessed"
+    assert first["extra"]["submission_patch_state"]["status"] != "observed"
+    env.execute({"command": "echo two"})
+    with pytest.raises(ContainmentLost):
+        env.execute({"command": "echo three"})
+

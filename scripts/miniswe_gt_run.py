@@ -514,8 +514,21 @@ class CredentialIsolatedLocalEnvironment(LocalEnvironment):
             "containment_gap": gap,
             "submission_patch_state": state,
         })
-        if not _workspace_holds_work(state):
+        if gap == "worker_start_failed" and not _workspace_holds_work(state):
+            # Broken tooling: the worker never ran the command, so every
+            # command fails this way; with nothing to conserve, fail fast.
             return RuntimeError(refusal)
+        # The command RAN (containment_unwitnessed / descendants_not_reaped):
+        # a background child escaped the witness. That is not broken tooling,
+        # and "no work" is not knowable where the workspace has no git
+        # baseline: TB2 containers without git read `status: unavailable`.
+        # Failing fast there ended 6 of 7 TB2 infra-failed tasks in run
+        # 36359465729 (crack-7z-hash, extract-moves-from-video,
+        # headless-terminal, install-windows-3.11,
+        # llm-inference-batching-scheduler, train-fasttext; 18-270 actions
+        # in) and regex-chess in 36376490824 with exit 5 - ungraded work the
+        # agent had written to /app. It now counts toward the streak like any
+        # other gap; the backstop is `ContainmentLost` (graded, exit 0).
         self.containment_gap_streak += 1
         output["extra"]["containment_gap_streak"] = self.containment_gap_streak
         if self.containment_gap_streak < CONTAINMENT_GAP_LIMIT:
