@@ -1321,6 +1321,7 @@
   "gt_engine/task_contract.py",
   "gt_engine/test_names.py",
   "gt_engine/tool_outcomes.py",
+  "gt_engine/read_augment.py",
   "gt_engine/submit_review.py",
   "gt_engine/tool_render.py",
   "gt_engine/tool_server.py",

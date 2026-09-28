@@ -293,7 +293,9 @@ class AttachedDelivery:
                     tool_features[fid] = tool_features.get(fid, 0) + int(count or 0)
         substrate = {"F1": 1, "F21": 1} if self.feature_inventory.get("F2") else {}
         return merge(self.augmenter.metrics.features, self.action_augmenter.metrics.features,
-                     self.read_augmenter.metrics.features, self.plan_features, tool_features, substrate)
+                     getattr(getattr(self, "read_augmenter", None), "metrics", None).features
+                     if getattr(self, "read_augmenter", None) is not None else {},
+                     self.plan_features, tool_features, substrate)
 
     def _wake_on_new_source(self, changes: dict) -> None:
         """An edit that writes source into a graph-less workspace starts the
@@ -314,7 +316,8 @@ class AttachedDelivery:
 
     def _block(self, command: str, facts: dict | None) -> str:
         """Search, edit and failure blocks for one action, in that order."""
-        blocks = [self.augmenter.augment(command), self.read_augmenter.augment(command)]
+        reader = getattr(self, "read_augmenter", None)
+        blocks = [self.augmenter.augment(command), reader.augment(command) if reader is not None else ""]
         if facts:
             if facts.get("changes"):
                 self._wake_on_new_source(facts["changes"])
@@ -329,7 +332,10 @@ class AttachedDelivery:
         tools = self.dispatcher.metrics.as_dict()
         augment = self.augmenter.metrics.as_dict(self.augmenter.search_commands)
         actions = self.action_augmenter.metrics.as_dict()
-        reads = self.read_augmenter.metrics.as_dict()
+        from gt_engine.read_augment import ReadAugmentMetrics
+
+        reader = getattr(self, "read_augmenter", None)
+        reads = (reader.metrics if reader is not None else ReadAugmentMetrics()).as_dict()
         return {
             "gt_delivery_mode": ATTACHED,
             **tools,
