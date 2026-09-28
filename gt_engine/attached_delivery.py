@@ -226,13 +226,16 @@ class AttachedDelivery:
     _inventory_graph: str = ""
 
     def _record_inventory(self) -> None:
-        """Journal what the repository's graph holds per feature, once per
-        adopted graph (``feature_trace``)."""
+        """Journal what the repository's graph holds per feature for each
+        newly adopted graph (``feature_trace``); the report keeps the latest."""
         from gt_engine.feature_trace import inventory
 
         state = getattr(getattr(self.session, "_engine", None), "engine_state", None)
         graph = str(getattr(state, "graph_path", "") or "")
-        if not graph or graph == self._inventory_graph or self.feature_inventory:
+        # Refreshed on every newly adopted graph: a TB2 workspace that starts
+        # empty grows its graph as the agent writes code (run 36359465729:
+        # F4 delivered on 3 tasks against an inventory of 1).
+        if not graph or graph == self._inventory_graph:
             return
         conn = sqlite3.connect(Path(graph).resolve().as_uri() + "?mode=ro", uri=True)
         try:
