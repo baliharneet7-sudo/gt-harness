@@ -139,6 +139,13 @@ env:
   DATASET: terminal-bench@2.0
   IMAGE_TAG: "20251031"
   TIMEOUT_MULTIPLIER: "5.0"
+  # Budget parity (default): the agent gets exactly the GT-off baseline's
+  # budget - task timeout x 1.0, no GT overhead extension - so GT's own host
+  # time is charged to GT. The space-bunny TB2 and DeepSWE baselines ran at
+  # agent_timeout_multiplier 1.0; GT-on had 6.67x (TB2) and 1.28x (DeepSWE),
+  # which made wall-time, token and solve comparisons non-comparable.
+  # GT_BUDGET_PARITY=0 restores the declared deviation.
+  GT_BUDGET_PARITY: "1"
   PYTHONUTF8: "1"
   PYTHONIOENCODING: utf-8
 
@@ -735,10 +742,11 @@ jobs:
               # SWE-Live paid lanes both add the same extension. It is a
               # declared deviation, so the untouched benchmark figure rides
               # beside it in the receipt.
+              parity = os.environ.get("GT_BUDGET_PARITY", "1") == "1"
               budget = resolve_budget(
                   dataset / task / "task.toml",
-                  multiplier=5.0,
-                  overhead_extension_sec=GT_OVERHEAD_EXTENSION_SECONDS,
+                  multiplier=1.0 if parity else 5.0,
+                  overhead_extension_sec=0.0 if parity else GT_OVERHEAD_EXTENSION_SECONDS,
               )
               # Pier's agent deadline is `task.[agent].timeout_sec * multiplier`
               # (pier/trial/execution.py::_resolve_agent_timeout).  Passing the

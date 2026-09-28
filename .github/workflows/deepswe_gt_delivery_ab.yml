@@ -164,6 +164,13 @@ concurrency:
 # (TB2 36394025893, SWE-Live 36394014065, DeepSWE 36394563100: mobly,
 # koota). Every pip call in every job retries with a longer timeout.
 env:
+  # Budget parity (default): the agent gets exactly the GT-off baseline's
+  # budget - task timeout x 1.0, no GT overhead extension - so GT's own host
+  # time is charged to GT. The space-bunny TB2 and DeepSWE baselines ran at
+  # agent_timeout_multiplier 1.0; GT-on had 6.67x (TB2) and 1.28x (DeepSWE),
+  # which made wall-time, token and solve comparisons non-comparable.
+  # GT_BUDGET_PARITY=0 restores the declared deviation.
+  GT_BUDGET_PARITY: "1"
   PIP_DEFAULT_TIMEOUT: "60"
   PIP_RETRIES: "10"
   NPM_CONFIG_FETCH_RETRIES: "5"
@@ -306,8 +313,10 @@ jobs:
           legs = []
           for task in tasks:
               config = bench / "tasks" / task / "task.toml"
+              parity = os.environ.get("GT_BUDGET_PARITY", "1") == "1"
               budget = resolve_budget(
-                  config, multiplier=1.0, overhead_extension_sec=GT_OVERHEAD_EXTENSION_SECONDS,
+                  config, multiplier=1.0,
+                  overhead_extension_sec=0.0 if parity else GT_OVERHEAD_EXTENSION_SECONDS,
               )
               if budget["task_config_sha256"] != rows[task]["task_config_sha256"]:
                   raise SystemExit(f"task config digest differs from catalog: {task}")

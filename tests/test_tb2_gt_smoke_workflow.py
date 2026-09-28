@@ -184,6 +184,7 @@ def _planner_budget_rows(tmp_path: Path, agent_timeout_sec: float) -> list[dict]
     namespace: dict = {
         "selected": ["some-task"],
         "dataset": tmp_path,
+        "os": __import__("os"),
         "resolve_budget": resolve_budget,
         "GT_OVERHEAD_EXTENSION_SECONDS": GT_OVERHEAD_EXTENSION_SECONDS,
         "SUPERVISOR_GRACE_SECONDS": SUPERVISOR_GRACE_SECONDS,
@@ -1499,6 +1500,7 @@ def _planner_receipt(tmp_path: Path, monkeypatch, *, unresolved_reason: str) -> 
         "pool_digest": "d" * 64,
         "dataset": tmp_path,
         "static_unsupported": {},
+        "os": __import__("os"),
         "SUPERVISOR_GRACE_SECONDS": 120,
         "GT_OVERHEAD_EXTENSION_SECONDS": 1500,
         "MAX_HOSTED_EXECUTION_BUDGET_SECONDS": 320 * 60,
@@ -1809,7 +1811,11 @@ def test_tb2_pays_for_gt_setup_like_every_other_paid_lane() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
     assert "GT_OVERHEAD_EXTENSION_SECONDS" in text
-    assert "overhead_extension_sec=GT_OVERHEAD_EXTENSION_SECONDS" in text
+    # Parity with the GT-off baseline is the default (multiplier 1.0, no
+    # extension); the extension applies only when GT_BUDGET_PARITY=0.
+    assert 'GT_BUDGET_PARITY: "1"' in text
+    assert "multiplier=1.0 if parity else 5.0" in text
+    assert "overhead_extension_sec=0.0 if parity else GT_OVERHEAD_EXTENSION_SECONDS" in text
     assert '"benchmark_budget_seconds"' in text
     assert '"gt_overhead_extension_seconds"' in text
     assert '"deviates_from_benchmark_budget"' in text
