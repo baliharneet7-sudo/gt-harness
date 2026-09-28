@@ -889,8 +889,19 @@ jobs:
       - name: Install Pier and the canonical product source
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check \
-            --require-hashes -r config/product-requirements.lock
+          # PyPI flakes mid-download on hosted runners: run 36394025893
+          # (multi-source-data-merger) and 36394014065 (haystack-8609) lost
+          # tasks to a lock install that exited 1 with no error. Retry the
+          # hash-locked install; --require-hashes keeps every attempt exact.
+          for attempt in 1 2 3; do
+            if python -m pip install --disable-pip-version-check --retries 5 --timeout 60 \
+                --require-hashes -r config/product-requirements.lock; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then echo "::error::locked install failed 3 times"; exit 1; fi
+            echo "::warning::locked install attempt $attempt failed; retrying"
+            sleep 20
+          done
           python -m pip install --disable-pip-version-check --no-deps "$GT_HARNESS_WHEEL_HOST"
           test "$(python -c 'import importlib.metadata as m; print(m.version("mini-swe-agent"))')" = "2.4.6"
           test "$(python -c 'import importlib.metadata as m; print(m.version("datacurve-pier"))')" = "0.3.1"
