@@ -332,6 +332,14 @@ class GTSession:
         )
         self._terminal: str | None = None
         self._task_start_shipped = False
+        # Attached delivery computes the push pipeline in SHADOW. Shadow never
+        # ships, so without this the task-start localization (a dense query)
+        # and the contract delta re-ran on EVERY turn: awilix (run
+        # 36359464192) journaled 97 dense_index_ready rows, ~144 s of host
+        # time the agent never saw. Once per task keeps the receipt's
+        # query-ready dense execution and drops the per-turn cost.
+        self._shadow_localization_done = False
+        self._shadow_contract_done = False
         self._pending_contract_delta = ""
         self._pending_contract_rendered = ""
         self._pending_contract_identity = ""
@@ -851,13 +859,18 @@ class GTSession:
         contract_unit_id = ""
         contract_was_shipped = bool(self._engine.contract_shipped)
         contract_kind = "context_delta" if contract_was_shipped else "context_contract"
-        delta = self._engine.next_contract_delta(
-            commit=False,
-            max_chars=min(
-                self.config.context_budget_bytes,
-                delivery_byte_limit(lane="prompt", kind=contract_kind),
+        shadow_once = not self.model_visible and _attached_delivery()
+        if shadow_once and self._shadow_contract_done:
+            delta = ""
+        else:
+            delta = self._engine.next_contract_delta(
+                commit=False,
+                max_chars=min(
+                    self.config.context_budget_bytes,
+                    delivery_byte_limit(lane="prompt", kind=contract_kind),
+                )
             )
-        )
+            self._shadow_contract_done = shadow_once
         if delta:
             tag = "GT_TASK_CONTRACT" if not contract_was_shipped else "GT_OBLIGATION_DELTA"
             rendered = f"[{tag}]\n{delta}"
@@ -908,8 +921,11 @@ class GTSession:
                 self._engine, "localization_resolution_pending", None
             )
             resolution_pending = pending_fn() if callable(pending_fn) else True
-            if (not self._task_start_shipped and resolution_pending) or drift_trigger:
+            if ((not self._task_start_shipped and resolution_pending) or drift_trigger) and not (
+                shadow_once and self._shadow_localization_done
+            ):
                 if not self.model_visible:
+                    self._shadow_localization_done = shadow_once
                     localization = self._engine.task_start_localization(commit=False)
                     if localization:
                         self._engine.store.append(

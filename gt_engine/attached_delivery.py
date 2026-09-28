@@ -117,6 +117,8 @@ class AttachedDelivery:
         self.dispatcher = ToolDispatcher(session)
         self.augmenter = GrepAugmenter(session)
         self.action_augmenter = ActionAugmenter(session)
+        # One per-task delivery budget across search, edit and failure blocks.
+        self.action_augmenter.budget = self.augmenter.budget
         self.uptake = UptakeTracker()
         self.server = None
         self.bin_dir: Path | None = None
@@ -306,6 +308,7 @@ class AttachedDelivery:
             "features_reached": self.features_reached(),
             "feature_inventory": dict(self.feature_inventory),
             "gt_search_commands": self.augmenter.search_commands,
+            "gt_repeats_suppressed": self.augmenter.budget.suppressed,
             "gt_bytes_delivered": (tools["gt_tool_bytes_delivered"] + augment["augment_bytes_delivered"]
                                    + actions["action_augment_bytes_delivered"] + self.plan_bytes_delivered),
             **self.uptake.as_dict(),

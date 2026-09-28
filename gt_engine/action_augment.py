@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
+from gt_engine.attached_budget import DeliveryBudget, compact_lines
 from gt_engine.tool_render import AUGMENT_OUTPUT_BYTES, cap_text
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -398,6 +399,8 @@ class ActionAugmenter:
         self.metrics = ActionAugmentMetrics()
         self.delivered_texts: list[str] = []
         self._failures_seen: dict[str, int] = {}
+        # Shared with the grep augmenter by AttachedDelivery: one task budget.
+        self.budget = DeliveryBudget()
         self._lock = threading.Lock()
 
     def _journal(self, **row: Any) -> None:
@@ -417,7 +420,10 @@ class ActionAugmenter:
         if len(lines) <= 1:
             self._journal(kind=kind, outcome="silent")
             return ""
+        if self.budget.compact:
+            lines = [lines[0], *compact_lines(lines[1:])]
         text = cap_text("\n".join(lines), self.max_bytes)
+        self.budget.charge(text)
         self.metrics.bytes_delivered += len(text.encode("utf-8"))
         self.delivered_texts.append(text)
         carried = sorted((f for f, n in self.metrics.features.items() if n > (before or {}).get(f, 0)),
@@ -501,13 +507,19 @@ class ActionAugmenter:
                             self.metrics.note("F4", "F20")
                             lines.append(f"    test {name} exercises: {_listed(exercised, MAX_CALLERS_SHOWN)}")
                         continue
-                    callers = relocate(_direct_callers(conn, node_id))
+                    all_callers = relocate(_direct_callers(conn, node_id))
+                    callers = [row for row in all_callers if not self.budget.seen(
+                        f"caller:{node_id}:{row.get('file_path')}:{row.get('name')}")]
                     if callers:
                         self.metrics.note("F4")
                         if any(row.get("trust_tier") == "via function value" for row in callers):
                             self.metrics.note("F6")
-                        lines.append(f"    {name} is called by: {_listed(callers, MAX_CALLERS_SHOWN)}")
-                    else:
+                        shown_before = len(all_callers) - len(callers)
+                        tail = f" ({shown_before} shown earlier)" if shown_before else ""
+                        lines.append(f"    {name} is called by: {_listed(callers, MAX_CALLERS_SHOWN)}{tail}")
+                    elif all_callers:
+                        lines.append(f"    {name}: callers unchanged since shown earlier")
+                    elif not self.budget.seen(f"nocallers:{node_id}"):
                         lines.append(f"    {name}: no callers in the graph")
                     lines += self._route_lines(conn, node_id, name)
             added = _added_definitions(changes)
@@ -587,6 +599,8 @@ class ActionAugmenter:
         if not reached:
             return []
         self.metrics.note("F20")
+        if self.budget.seen("tests:" + ",".join(sorted(source))):
+            return []
         return [f"  tests reaching {', '.join(source[:3])}: {_listed(relocate(reached), MAX_TESTS_SHOWN)}"]
 
     # -- failing test runs ---------------------------------------------------
@@ -627,7 +641,9 @@ class ActionAugmenter:
             try:
                 lines = ["[GT] about this failure:"]
                 frames = failure_frames(output, self._repo_root())
-                located = self._location_lines(frames, output)
+                signature = _failure_signature(output, frames)
+                located = ([] if signature and self.budget.seen(f"failure:{signature}")
+                           else self._location_lines(frames, output))
                 lines += located
                 lines += self._repeat_lines(output, frames, bool(located))
             except Exception as exc:  # noqa: BLE001 - enrichment is silent on failure

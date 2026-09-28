@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from gt_engine.attached_budget import DeliveryBudget, compact_lines
 from gt_engine.tool_render import AUGMENT_OUTPUT_BYTES, cap_text
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -325,6 +326,7 @@ class GrepAugmenter:
         self.session = session
         self.max_bytes = max_bytes
         self.metrics = AugmentMetrics()
+        self.budget = DeliveryBudget()
         self.search_commands = 0
         self.delivered_texts: list[str] = []
         self._lock = threading.Lock()
@@ -336,6 +338,26 @@ class GrepAugmenter:
                 store.append("gt_augment", **row)
             except Exception:  # noqa: BLE001 - journaling never fails the action
                 pass
+
+    def _budgeted(self, symbol: str, answer: Any,
+                  facts: tuple[tuple[str, str], ...]) -> tuple[str | None, set[str]]:
+        """Render one symbol block under the task's delivery budget: a symbol
+        already shown collapses to one line, a fact already shown (the same
+        module line, the same co-change list) is dropped, and past the
+        detail budget the block keeps its first lines only."""
+        definition = answer.get("definition") if isinstance(answer, dict) else None
+        if not isinstance(definition, dict):
+            return None, set()
+        key = f"sym:{definition.get('file_path')}:{definition.get('start_line')}:{definition.get('qualified_name') or symbol}"
+        if self.budget.seen(key):
+            name = definition.get("qualified_name") or symbol
+            where = f"{definition.get('file_path', '')}:{definition.get('start_line', '')}"
+            return f"  {name} ({where}): graph context shown earlier in this task", set()
+        kept = tuple((ids, line) for ids, line in facts if not self.budget.seen(f"fact:{line}"))
+        block = render_symbol_block(symbol, answer, tuple(line for _ids, line in kept))
+        if block and self.budget.compact:
+            block = "\n".join(compact_lines(block.splitlines()))
+        return block, (block_features(answer, kept) if block else set())
 
     def _stale_verified(self, pattern: str, symbols: tuple[str, ...]) -> str:
         """Answer from the adopted graph while it is stale, using only rows
@@ -352,17 +374,17 @@ class GrepAugmenter:
             for symbol in symbols:
                 answer, facts = view.symbol(symbol)
                 if answer is None:
-                    found = _mention(view.conn, symbol, view.verified)
+                    found = None if self.budget.seen(f"mention:{symbol}") else _mention(view.conn, symbol, view.verified)
                     if found:
                         blocks.append(found[0])
                         hit_symbols.append(found[2])
                         hit_features |= found[1]
                     continue
-                block = render_symbol_block(symbol, answer, tuple(line for _ids, line in facts))
+                block, carried = self._budgeted(symbol, answer, facts)
                 if block:
                     blocks.append(block)
                     hit_symbols.append(symbol)
-                    hit_features |= block_features(answer, facts)
+                    hit_features |= carried
         finally:
             view.close()
         if not blocks:
@@ -375,9 +397,10 @@ class GrepAugmenter:
     def _deliver(self, pattern: str, symbols: tuple[str, ...], blocks: list[str],
                  hit_symbols: list[str], hit_features: set[str], *,
                  header: str = "[GT] graph context for your search:") -> str:
-        hint = (f"  next: `gt-impact {hit_symbols[0]}` (what breaks if it changes), "
-                "`gt-tests <file>` (tests to run)")
-        text = cap_text(header + "\n" + "\n".join(blocks) + "\n" + hint, self.max_bytes)
+        hint = (f"\n  next: `gt-impact {hit_symbols[0]}` (what breaks if it changes), "
+                "`gt-tests <file>` (tests to run)") if self.budget.hint_allowed() else ""
+        text = cap_text(header + "\n" + "\n".join(blocks) + hint, self.max_bytes)
+        self.budget.charge(text)
         self.metrics.hits += 1
         for feature in hit_features:
             self.metrics.features[feature] = self.metrics.features.get(feature, 0) + 1
@@ -427,11 +450,11 @@ class GrepAugmenter:
                     if result.status in ("unavailable", "error", "abstain"):
                         continue
                     facts = _facts(self.session, result.answer)
-                    block = render_symbol_block(symbol, result.answer, tuple(line for _ids, line in facts))
+                    block, carried = self._budgeted(symbol, result.answer, facts)
                     if block:
                         blocks.append(block)
                         hit_symbols.append(symbol)
-                        hit_features |= block_features(result.answer, facts)
+                        hit_features |= carried
                 if unresolved:
                     from gt_engine.capabilities._query import graph_conn
 
@@ -439,7 +462,7 @@ class GrepAugmenter:
                     if conn is not None:
                         try:
                             for symbol in unresolved:
-                                found = _mention(conn, symbol)
+                                found = None if self.budget.seen(f"mention:{symbol}") else _mention(conn, symbol)
                                 if found:
                                     blocks.append(found[0])
                                     hit_symbols.append(found[2])

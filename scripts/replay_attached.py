@@ -178,6 +178,7 @@ def replay(agent_dir: Path, *, workdir: Path, audit: bool = False) -> dict[str, 
     outcomes = {int(r.get("action_id") or 0): str(r.get("observed_test_outcome") or "")
                 for r in events if r.get("event") == "execution_evidence"}
     slow: list[tuple[int, str, float]] = []
+    gt_added: list[int] = []  # GT bytes appended at each action (stay in history)
     from audit_delivered import Audit, audit_output
     checks = Audit()
     blocks: dict[str, int] = {}
@@ -210,6 +211,7 @@ def replay(agent_dir: Path, *, workdir: Path, audit: bool = False) -> dict[str, 
         out = delivery.observe_turn([action["command"]], [{"output": action["output"]}], [facts])
         elapsed = time.perf_counter() - started
         text = str(out[0].get("output") or "")
+        gt_added.append(max(0, len(text.encode("utf-8")) - len(str(action["output"]).encode("utf-8"))))
         if audit:
             audit_output(text[len(action['output']):], root, checks)
         for head in ("[GT] task plan", "[GT] graph context", "[GT] after your edit", "[GT] about this failure"):
@@ -232,6 +234,9 @@ def replay(agent_dir: Path, *, workdir: Path, audit: bool = False) -> dict[str, 
         "edits": f"{metrics.get('edit_augment_hits')}/{metrics.get('edit_augment_calls')}",
         "failures": f"{metrics.get('failure_augment_hits')}/{metrics.get('failure_augment_calls')}",
         "gt_seconds": round(metrics.get("augment_time_s", 0) + metrics.get("action_augment_time_s", 0), 1),
+        "gt_bytes": sum(gt_added),
+        # Every appended block is re-sent on each later turn: bytes x turns left.
+        "gt_history_bytes": sum(b * (len(gt_added) - i) for i, b in enumerate(gt_added)),
         "slow_actions": slow[:8],
         "errors": metrics.get("augment_errors", 0) + metrics.get("action_augment_errors", 0),
         **({"audit": checks.as_dict()} if audit else {}),

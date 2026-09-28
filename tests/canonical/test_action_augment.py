@@ -365,3 +365,29 @@ def test_plan_wiring_and_feature_trace(polyglot_session):
         assert built and "F18" in built[-1]["features"]
     finally:
         _with_issue(adapter, previous)
+
+
+def test_budget_says_each_thing_once(polyglot_session):
+    from gt_engine.attached_delivery import AttachedDelivery
+
+    session, adapter = polyglot_session
+    previous = _with_issue(adapter, "")
+    try:
+        delivery = AttachedDelivery(session)
+        first = delivery.augmenter.augment('grep -rn "def execute" .')
+        again = delivery.augmenter.augment('grep -rn "execute(" pyapp')
+        assert "called by: run_query" in first
+        assert "graph context shown earlier in this task" in again
+        assert "called by" not in again
+        before = _server_text(adapter)
+        after = before.replace("    return execute(command)", "    return execute(command.strip())")
+        one = delivery.action_augmenter.after_edit({SERVER: (before, after)})
+        two = delivery.action_augmenter.after_edit({SERVER: (before, after)})
+        assert "run_query is called by: list_items" in one
+        assert "callers unchanged since shown earlier" in two and "tests reaching" not in two
+        hints = sum("next: `gt-impact" in delivery.augmenter.augment(f'grep -rn "def {name}" .')
+                    for name in ("sanitize", "format_total", "apply_tax", "round_price", "audit"))
+        assert hints <= 2  # three hints per task in total; one was already spent
+        assert delivery.metrics()["gt_repeats_suppressed"] > 0
+    finally:
+        _with_issue(adapter, previous)
