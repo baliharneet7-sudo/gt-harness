@@ -1200,11 +1200,16 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          mkdir -p gt-features
-          find results/deepswe -path '*/agent/miniswe_report.json' -not -path '*/gt-state/*' -exec cp {} gt-features/miniswe_report.json \; -quit
-          find results/deepswe -path '*/agent/official-verifier-result.json' -exec cp {} gt-features/ \; -quit
-          find results/deepswe -name reward.txt -path '*verifier*' -exec cp {} gt-features/ \; -quit
-          echo "${{ matrix.task }}" > gt-features/task.txt
+          # agent/ mirrors the evidence layout, so the aggregate job reads
+          # these small files instead of downloading every leg's graphs:
+          # run 36359464192 (113 legs, up to 124 MB each) died in that
+          # download and published no result.
+          mkdir -p gt-features/agent
+          find results/deepswe -path '*/agent/miniswe_report.json' -not -path '*/gt-state/*' -exec cp {} gt-features/agent/miniswe_report.json \; -quit
+          find results/deepswe -path '*/agent/gt-run.json' -not -path '*/gt-state/*' -exec cp {} gt-features/agent/gt-run.json \; -quit
+          find results/deepswe -path '*/agent/official-verifier-result.json' -exec cp {} gt-features/agent/ \; -quit
+          find results/deepswe -name reward.txt -path '*verifier*' -exec cp {} gt-features/agent/ \; -quit
+          echo "${{ matrix.task }}" > gt-features/agent/task.txt
           true
 
       - name: Upload the small per-task GT feature report
@@ -1235,10 +1240,12 @@ jobs:
           name: gt-harness-deepswe-ab-plan-${{ github.run_id }}
           path: plan
 
-      - name: Download every leg artifact (one directory per leg)
+      - name: Download every leg's small result (one directory per leg)
+        # Not the evidence artifacts: those carry graphs (100s of MB each)
+        # and 113 of them exhausted the runner (run 36359464192).
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          pattern: gt-harness-deepswe-ab-leg-*-${{ github.run_id }}
+          pattern: gt-features-deepswe-*-${{ github.run_id }}
           path: legs
 
       - name: Aggregate the A/B with the step-limit proof

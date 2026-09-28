@@ -38,6 +38,8 @@ def _gh(args: list[str], token: str | None) -> str:
 def _rows_from(directory: Path) -> list[dict[str, Any]]:
     rows = []
     for path in directory.rglob("*.json"):
+        if path.name == "gt-run.json":  # the product receipt repeats the report's delivery
+            continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):

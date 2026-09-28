@@ -29,6 +29,9 @@ from typing import Any
 
 ARMS = ("push", "attached")
 ARTIFACT_PREFIX = "gt-harness-deepswe-ab-leg-"
+# The per-leg result without graphs (report, product receipt, verifier
+# result under agent/): what the aggregate job downloads.
+SMALL_ARTIFACT_PREFIX = "gt-features-deepswe-"
 _MECHANISM_FIELDS = (
     "gt_bytes_delivered", "gt_tool_calls", "augment_hits", "augment_hit_rate",
     "gt_context_referenced", "gt_context_referenced_rate", "gt_deliveries",
@@ -45,9 +48,10 @@ def _read(path: Path) -> dict[str, Any] | None:
 
 
 def _leg_dir(legs_root: Path, leg_id: str) -> Path | None:
-    for candidate in sorted(legs_root.glob(f"{ARTIFACT_PREFIX}{leg_id}-*")):
-        if candidate.is_dir():
-            return candidate
+    for prefix in (ARTIFACT_PREFIX, SMALL_ARTIFACT_PREFIX):
+        for candidate in sorted(legs_root.glob(f"{prefix}{leg_id}-*")):
+            if candidate.is_dir():
+                return candidate
     exact = legs_root / leg_id
     return exact if exact.is_dir() else None
 
