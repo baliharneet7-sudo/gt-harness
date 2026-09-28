@@ -182,6 +182,13 @@ concurrency:
   group: gt-harness-swelive-${{ github.run_id }}
   cancel-in-progress: false
 
+# PyPI read timeouts on hosted runners lost tasks before the agent ran
+# (TB2 36394025893, SWE-Live 36394014065, DeepSWE 36394563100: mobly,
+# koota). Every pip call in every job retries with a longer timeout.
+env:
+  PIP_DEFAULT_TIMEOUT: "60"
+  PIP_RETRIES: "10"
+
 jobs:
   plan:
     runs-on: ubuntu-latest
