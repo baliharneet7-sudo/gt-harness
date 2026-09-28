@@ -74,6 +74,15 @@ _PROVIDER_BILLING_FAILURE = re.compile(
 SUPERVISOR_TIMEOUT_EXIT_CODE = 3
 
 
+
+_LSP_UNRUNNABLE_MARKER = "/installed-agent/lsp-unrunnable.txt"
+
+
+def _lsp_unrunnable(server: str) -> str:
+    """Shell that records a language server this container cannot execute."""
+    return (f"{{ echo 'GT_LSP_UNRUNNABLE {server}'; "
+            f"echo '{server}' >> {_LSP_UNRUNNABLE_MARKER}; }}")
+
 class ProviderBillingError(NonZeroAgentExitCodeError):
     """The provider rejected a request because the account cannot fund it."""
 
@@ -451,29 +460,35 @@ class MiniSweAgent(BaseInstalledAgent):
             f'"{_REMOTE_GT_BINARY}" -root /tmp/gt-install-smoke-src '
             "-output /tmp/gt-install-smoke.db >/dev/null && "
             "test -s /tmp/gt-install-smoke.db && rm -f /tmp/gt-install-smoke.db && "
-            # Mandatory capability must WORK, not merely be present. The asset
-            # manifest proves the bytes arrived; it cannot tell whether a
-            # server executes in this container. A language server that is
-            # staged but unrunnable degrades the graph exactly as a missing one
-            # does, and just as quietly, so each is executed here and a
-            # non-zero exit fails the install.
-            f"{_REMOTE_LSP_BIN}/gopls version >/dev/null && "
-            f"{_REMOTE_LSP_BIN}/rust-analyzer --version >/dev/null && "
+            # A language server must WORK, not merely be present: the asset
+            # manifest proves the bytes arrived, not that a server executes in
+            # this container. Each is executed here, and one that cannot run
+            # is recorded LOUDLY - a GT_LSP_UNRUNNABLE line in the install log
+            # and in _LSP_UNRUNNABLE_MARKER - so the graph's degradation for
+            # that language is never quiet. It no longer fails the install:
+            # TB2 qemu-startup (run 36394025893) ships glibc 2.31, gopls needs
+            # 2.32+, and the task - C and shell, no Go - was lost ungraded.
+            # Losing the run costs every feature; a missing server costs one
+            # language's LSP promotion, which the graph already reports.
+            f"rm -f {_LSP_UNRUNNABLE_MARKER} && "
+            "{ "
+            f"{_REMOTE_LSP_BIN}/gopls version >/dev/null 2>&1 || {_lsp_unrunnable('gopls')}; "
+            f"{_REMOTE_LSP_BIN}/rust-analyzer --version >/dev/null 2>&1 || {_lsp_unrunnable('rust-analyzer')}; "
             # pyright-langserver has no non-server invocation: --version,
             # --help and --stdio --version all exit 1 with "Connection input
-            # stream is not set", because it only speaks LSP. Executed in the
-            # gate task's own image, that exit killed the && chain and the
-            # install with it. The same node runtime and the same package are
-            # exercised through pyright's CLI entry, and node --check proves
-            # the langserver entry itself parses under this node without
-            # starting a server that would never return.
+            # stream is not set", because it only speaks LSP. The same node
+            # runtime and package are exercised through pyright's CLI entry,
+            # and node --check proves the langserver entry parses under this
+            # node without starting a server that would never return.
             f'"{_REMOTE_LSP_BIN}/node-runtime/bin/node" '
             f"{_REMOTE_LSP_BIN}/node-runtime/servers/node_modules/pyright/index.js "
-            "--version >/dev/null && "
+            f"--version >/dev/null 2>&1 || {_lsp_unrunnable('pyright')}; "
             f'"{_REMOTE_LSP_BIN}/node-runtime/bin/node" --check '
             f"{_REMOTE_LSP_BIN}/node-runtime/servers/node_modules/pyright/"
-            "langserver.index.js >/dev/null && "
-            f"{_REMOTE_LSP_BIN}/typescript-language-server --version >/dev/null && "
+            f"langserver.index.js >/dev/null 2>&1 || {_lsp_unrunnable('pyright-langserver')}; "
+            f"{_REMOTE_LSP_BIN}/typescript-language-server --version >/dev/null 2>&1 "
+            f"|| {_lsp_unrunnable('typescript-language-server')}; "
+            "true; } && "
             # The embedder likewise: loading the pinned ONNX graph and the
             # tokenizer is what proves retrieval can actually embed. An
             # unloadable model would otherwise surface as "no dense evidence"
