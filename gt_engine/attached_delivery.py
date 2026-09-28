@@ -120,6 +120,13 @@ class AttachedDelivery:
         # One per-task delivery budget across search, edit and failure blocks.
         self.action_augmenter.budget = self.augmenter.budget
         self.action_augmenter._draft = self.augmenter.budget.draft()
+        # GT answers on the agent's own reads and finds (gt_engine.read_augment):
+        # the agent does not call gt-* tools, however they are offered.
+        from gt_engine.read_augment import ReadAugmenter
+
+        self.read_augmenter = ReadAugmenter(session)
+        self.read_augmenter.budget = self.augmenter.budget
+        self.read_augmenter.grep = self.augmenter
         self.uptake = UptakeTracker()
         self.server = None
         self.bin_dir: Path | None = None
@@ -286,7 +293,7 @@ class AttachedDelivery:
                     tool_features[fid] = tool_features.get(fid, 0) + int(count or 0)
         substrate = {"F1": 1, "F21": 1} if self.feature_inventory.get("F2") else {}
         return merge(self.augmenter.metrics.features, self.action_augmenter.metrics.features,
-                     self.plan_features, tool_features, substrate)
+                     self.read_augmenter.metrics.features, self.plan_features, tool_features, substrate)
 
     def _wake_on_new_source(self, changes: dict) -> None:
         """An edit that writes source into a graph-less workspace starts the
@@ -307,7 +314,7 @@ class AttachedDelivery:
 
     def _block(self, command: str, facts: dict | None) -> str:
         """Search, edit and failure blocks for one action, in that order."""
-        blocks = [self.augmenter.augment(command)]
+        blocks = [self.augmenter.augment(command), self.read_augmenter.augment(command)]
         if facts:
             if facts.get("changes"):
                 self._wake_on_new_source(facts["changes"])
@@ -322,11 +329,13 @@ class AttachedDelivery:
         tools = self.dispatcher.metrics.as_dict()
         augment = self.augmenter.metrics.as_dict(self.augmenter.search_commands)
         actions = self.action_augmenter.metrics.as_dict()
+        reads = self.read_augmenter.metrics.as_dict()
         return {
             "gt_delivery_mode": ATTACHED,
             **tools,
             **augment,
             **actions,
+            **reads,
             "gt_plan_delivered": plan_holder_delivered(self.session),
             "gt_plan_bytes_delivered": self.plan_bytes_delivered,
             "gt_plan_features": list(self.plan_features),
@@ -340,7 +349,8 @@ class AttachedDelivery:
             # agent's clock (miniswe_runtime.credit_agent_clock).
             "gt_clock_credit_seconds": round(float(getattr(self, "clock_credit_seconds", 0.0) or 0.0), 1),
             "gt_bytes_delivered": (tools["gt_tool_bytes_delivered"] + augment["augment_bytes_delivered"]
-                                   + actions["action_augment_bytes_delivered"] + self.plan_bytes_delivered),
+                                   + actions["action_augment_bytes_delivered"]
+                                   + reads["read_augment_bytes_delivered"] + self.plan_bytes_delivered),
             **self.uptake.as_dict(),
         }
 

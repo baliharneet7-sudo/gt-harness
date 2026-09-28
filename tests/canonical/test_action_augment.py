@@ -517,3 +517,25 @@ def test_edit_block_slices_the_edited_statement(polyglot_session):
     finally:
         path.write_bytes(before.encode("utf-8"))
 
+
+def test_reading_a_source_file_is_answered_once_with_its_definitions_callers_and_tests(polyglot_session):
+    """The agent does not call gt-* tools; its `cat` is answered instead."""
+    from gt_engine.attached_delivery import AttachedDelivery
+
+    session, adapter = polyglot_session
+    previous = _with_issue(adapter, "")
+    try:
+        delivery = AttachedDelivery(session)
+        first = delivery.observe_turn(["cat pyapp/server.py"], [{"output": "source text"}])[0]["output"]
+        assert "[GT] about pyapp/server.py:" in first, first
+        assert "defines:" in first
+        again = delivery.observe_turn(["nl -ba pyapp/server.py | sed -n '1,40p'"], [{"output": "x"}])[0]["output"]
+        assert "[GT] about pyapp/server.py" not in again  # described once per task
+        edit = delivery.observe_turn(["sed -i 's/a/b/' pyapp/server.py"], [{"output": ""}])[0]["output"]
+        assert "[GT] about" not in edit  # sed -i is an edit, not a read
+        metrics = delivery.metrics()
+        assert metrics["read_augment_hits"] >= 1 and metrics["read_augment_bytes_delivered"] > 0
+        assert metrics["features_reached"].get("F2")
+    finally:
+        _with_issue(adapter, previous)
+
