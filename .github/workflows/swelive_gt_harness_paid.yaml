@@ -188,6 +188,8 @@ concurrency:
 env:
   PIP_DEFAULT_TIMEOUT: "60"
   PIP_RETRIES: "10"
+  NPM_CONFIG_FETCH_RETRIES: "5"
+  NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: "120000"
 
 jobs:
   plan:
@@ -1110,11 +1112,17 @@ jobs:
 
           # gopls: module-only, so version-pinned and checksum-verified by the
           # Go module proxy against sum.golang.org.
-          GOBIN="$lsp_bin" go install golang.org/x/tools/gopls@v0.23.0
+          # The Go module proxy drops streams on hosted runners (DeepSWE rerun
+          # 36419796162 mobly: "stream error ... INTERNAL_ERROR"); retry.
+          for attempt in 1 2 3; do
+            GOBIN="$lsp_bin" go install golang.org/x/tools/gopls@v0.23.0 && break
+            if [ "$attempt" = 3 ]; then echo "::error::gopls install failed 3 times"; exit 1; fi
+            echo "::warning::gopls install attempt $attempt failed; retrying"; sleep 20
+          done
 
           # rust-analyzer: released as a binary, pinned by tag and digest.
           ra_gz="$RUNNER_TEMP/rust-analyzer.gz"
-          curl -fsSL -o "$ra_gz" \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$ra_gz" \
             https://github.com/rust-lang/rust-analyzer/releases/download/2026-08-31/rust-analyzer-x86_64-unknown-linux-gnu.gz
           echo "a775f9edb543bb0c077da339b783e89446092986cde921c9d8e1733b091080c6  $ra_gz" | sha256sum -c -
           gunzip -c "$ra_gz" > "$lsp_bin/rust-analyzer"
@@ -1131,7 +1139,7 @@ jobs:
           # switch. The Node runtime travels with it exactly as in the
           # DeepSWE task job.
           node_tar="$RUNNER_TEMP/node.tar.xz"
-          curl -fsSL -o "$node_tar" \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$node_tar" \
             https://nodejs.org/dist/v24.20.0/node-v24.20.0-linux-x64.tar.xz
           echo "2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2  $node_tar" | sha256sum -c -
           node_root="$lsp_bin/node-runtime"
