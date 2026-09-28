@@ -348,12 +348,15 @@ def test_plan_wiring_and_feature_trace(polyglot_session):
     try:
         delivery = AttachedDelivery(session)
         text = delivery.observe_turn(["ls"], [{"output": ""}])[0]["output"]
-        assert "wiring of the anchored code" in text, text
+        assert "graph facts about the anchored code" in text, text
+        assert "GoGreeter.Greet overridden by: FriendlyGreeter.Greet" in text  # F7
+        assert "format_greeting is in flow: format_greeting -> sanitize" in text  # F9
+        assert "resolved by: 1 direct" not in text
         assert "list_items handles route GET /api/items" in text
         assert "run_query reaches sink-like call(s): execute" in text
         delivery.augmenter.augment('grep -rn "def execute" .')
         metrics = delivery.metrics()
-        for feature in ("F2", "F4", "F8", "F11", "F18", "F19"):
+        for feature in ("F2", "F4", "F7", "F8", "F9", "F11", "F18", "F19"):
             assert metrics["features_reached"].get(feature), (feature, metrics["features_reached"])
         inventory = metrics["feature_inventory"]
         assert inventory["F18"] > 0 and inventory["F2"] > 0 and inventory["F1"] == 1
@@ -493,4 +496,24 @@ def test_compaction_keeps_parse_errors_and_sinks():
     assert kept[:2] == lines[:2]
     assert lines[3] in kept and lines[4] in kept and lines[2] not in kept
     assert kept[-1] == "  (+1 more line(s); GT detail budget reached)"
+
+
+def test_edit_block_slices_the_edited_statement(polyglot_session):
+    session, adapter = polyglot_session
+    augmenter = ActionAugmenter(session)
+    before = _server_text(adapter)
+    after = before.replace("def run_query(command):\n    return execute(command)",
+                           "def run_query(command):\n    cleaned = command.strip()\n    return execute(cleaned)")
+    assert after != before
+    path = Path(adapter.repo_root) / SERVER
+    path.write_bytes(after.encode("utf-8"))
+    try:
+        text = augmenter.after_edit({SERVER: (before, after)})
+        assert "depends on (backward slice; control + data):" in text, text
+        assert "cleaned = command.strip()" not in text.split("depends on")[0]
+        assert all(augmenter.metrics.features.get(f) for f in ("F14", "F15", "F16", "F17"))
+        again = augmenter.after_edit({SERVER: (before, after)})
+        assert "depends on" not in again  # the same slice is said once
+    finally:
+        path.write_bytes(before.encode("utf-8"))
 

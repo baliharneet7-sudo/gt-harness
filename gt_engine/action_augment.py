@@ -116,6 +116,21 @@ def _changed_line_ranges_before(before: str, after: str) -> list[tuple[int, int]
     return ranges
 
 
+def _first_changed_line(before: str, after: str) -> int:
+    """1-based line of ``after`` holding the first non-blank changed text."""
+    import difflib
+
+    new = after.splitlines()
+    matcher = difflib.SequenceMatcher(a=before.splitlines(), b=new, autojunk=False)
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        for index in range(j1, j2):
+            if new[index].strip():
+                return index + 1
+    return 0
+
+
 def _changed_functions(conn: sqlite3.Connection,
                        changes: Mapping[str, tuple[str | None, str | None]],
                        preimages: Callable[[], Mapping[str, str]] | None = None,
@@ -505,6 +520,7 @@ class ActionAugmenter:
             self._journal(kind="edit", skipped="no_graph")
             return []
         lines: list[str] = []
+        sliced: list[str] = []
         try:
             changed = _changed_functions(conn, changes, self._preimages)
             relocate = Relocator(conn, Path(self._repo_root()), self._preimages).rows
@@ -521,6 +537,8 @@ class ActionAugmenter:
                             lines.append(f"    test {name} exercises: {_listed(exercised, MAX_CALLERS_SHOWN)}")
                         continue
                     lines += self._caller_lines(relocate(_direct_callers(conn, node_id)), name, path)
+                    if not sliced:
+                        sliced = self._edit_slice_lines(changes, name, path)
                     lines += self._route_lines(conn, node_id, name)
             added = _added_definitions(changes)
             if added:
@@ -539,7 +557,9 @@ class ActionAugmenter:
         typed = []
         if changed and time.perf_counter() - started < EDIT_OPTIONAL_BUDGET_SECONDS:
             typed = self._taint_lines([name for _id, name, _p, _l in changed[:MAX_TAINT_CHECKS]])
-        return lines + (typed or sink_lines) + tests
+        # The slice goes last: it is the longest and least decisive part, so
+        # the byte cap trims it before a sink, route or test line.
+        return lines + (typed or sink_lines) + tests + sliced
 
     def _caller_lines(self, all_callers: list[dict[str, Any]], name: str, path: str) -> list[str]:
         """Callers not yet shown for this function. Only the callers that
@@ -578,6 +598,34 @@ class ActionAugmenter:
         line = f"    {name}: no callers in the graph"
         draft.stage(key, line)
         return [line]
+
+    def _edit_slice_lines(self, changes: Mapping[str, tuple[str | None, str | None]],
+                          name: str, path: str) -> list[str]:
+        """F14-F17 on an edit: what the first edited statement of a changed
+        Python function depends on (control + data), from the runtime CFG on
+        the file as it is now - the values the new code reads and where they
+        come from. Slices otherwise surfaced only on a located failure (27 of
+        62 live DeepSWE tasks never got one)."""
+        from gt_engine.tool_server import _source_line
+
+        if not path.endswith(".py") or _TEST_PATH.search(path):
+            return []
+        before, after = changes.get(path, (None, None))
+        line = _first_changed_line(before or "", after or "")
+        if not line:
+            return []
+        numbers = [n for n in _python_slice(Path(self._repo_root()) / path, name, line) if n != line]
+        numbers = numbers[-MAX_SLICE_LINES:]
+        if not numbers:
+            return []
+        rows = [f"    {path}:{n}: {_source_line(self.session, path, n)}" for n in numbers]
+        head = f"  your edit at {path}:{line} ({name}) depends on (backward slice; control + data):"
+        key = "slice:" + hashlib.sha256("\n".join([head, *rows]).encode("utf-8")).hexdigest()[:20]
+        if not self._draft.is_new(key):
+            return []
+        self._draft.stage(key, rows[-1])
+        self.metrics.note("F14", "F15", "F16", "F17")
+        return [head, *rows]
 
     def _preimages(self) -> dict[str, str]:
         """Each edited file's text before the agent first touched it."""

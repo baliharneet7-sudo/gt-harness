@@ -71,7 +71,8 @@ class AttachedPlan:
         if self.related:
             answer["code most related to the issue (hybrid lexical + semantic rank)"] = list(self.related)
         if self.wiring:
-            answer["wiring of the anchored code (routes, middleware, injection, sinks)"] = list(self.wiring)
+            answer["graph facts about the anchored code (dispatch, call resolution, flows, "
+                   "routes, injection, sinks)"] = list(self.wiring)
         if self.tests:
             answer["tests reaching the anchored code"] = list(self.tests)
         return answer
@@ -129,47 +130,112 @@ def build_attached_plan(session: "GTSession", issue_text: str) -> AttachedPlan |
         anchored_rows=anchors.anchored_rows(),
         graph_revision=str(getattr(getattr(engine, "engine_state", None), "graph_source_revision", "") or ""),
         related=_related_code(session, issue_text),
-        **_wiring(graph, [anchor for items in anchors.anchors.values() for anchor in items]),
+        **_wiring(graph, [anchor for items in anchors.anchors.values() for anchor in items], session),
     )
 
 
-MAX_WIRING_SHOWN = 8
+MAX_WIRING_SHOWN = 14
+MAX_WIRING_ANCHORS = 40  # indexed lookups only; flows are capped separately
+MAX_FLOW_ANCHORS = 3
 
 
-def _wiring(graph: str, anchors: list[Any]) -> dict[str, Any]:
-    """Routes/middleware/injection and sink reach of the anchored symbols."""
+def _wiring(graph: str, anchors: list[Any], session: "GTSession | None" = None) -> dict[str, Any]:
+    """What the graph knows about the anchored symbols beyond their callers.
+
+    Live full runs (run 36359464192, 62 graphs) showed these features present
+    in the graph but never delivered on 17-31 tasks each, because they surface
+    only when the agent happens to search or edit the one symbol that carries
+    them: dispatch (F7, 31 tasks), sink reach (F19, 31), frameworks (F8, 28),
+    flows (F9, 26), function values (F6, 21), routes (F18, 17). The plan is
+    the one delivery every task gets, and the anchored symbols are the ones
+    the issue names, so each fact here is about code the task is about."""
     import sqlite3
 
     from gt_engine.action_augment import _reached_sinks
-    from gt_engine.graph_facts import _framework, _guarded
+    from gt_engine.graph_facts import _dispatch, _framework, _guarded, _resolution, _resolution_mix
 
-    rows: list[dict[str, Any]] = []
-    features: list[str] = []
-    seen: set[Any] = set()
+    found: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+
+    def add(anchor: Any, text: str, *carried: str) -> None:
+        found.append((tuple(f for f in carried if f),
+                      {"file_path": anchor.file_path, "line": anchor.start_line,
+                       "name": f"{anchor.qualified_name or anchor.name} {text}"}))
+
+    distinct: list[Any] = []
+    for anchor in anchors:
+        if anchor.node_id not in {a.node_id for a in distinct}:
+            distinct.append(anchor)
+    distinct = distinct[:MAX_WIRING_ANCHORS]
     try:
         conn = sqlite3.connect(Path(graph).resolve().as_uri() + "?mode=ro", uri=True)
     except sqlite3.Error:
         return {}
     try:
-        for anchor in anchors:
-            if anchor.node_id in seen or len(rows) >= MAX_WIRING_SHOWN:
-                continue
-            seen.add(anchor.node_id)
-            name = anchor.qualified_name or anchor.name
+        for anchor in distinct:
             for fact in _guarded(lambda: _framework(conn, anchor.node_id)) or ():
-                rows.append({"file_path": anchor.file_path, "line": anchor.start_line, "name": f"{name} {fact}"})
-                for feature in (("F8", "F18") if fact.startswith("handles route") else ("F8",)):
-                    if feature not in features:
-                        features.append(feature)
+                add(anchor, fact, *(("F8", "F18") if fact.startswith("handles route") else ("F8",)))
+            for fact in _guarded(lambda: _dispatch(conn, anchor.node_id, anchor.label or "")) or ():
+                add(anchor, fact, "F7")
+            mix = _guarded(lambda: _resolution_mix(conn, anchor.node_id))
+            if mix and set(mix[0].split()) - {"F5"}:  # only direct calls: nothing to add
+                add(anchor, mix[1], *mix[0].split())
+            resolution = _guarded(lambda: _resolution(conn, anchor.node_id))
+            if resolution and "function value" in resolution:
+                add(anchor, resolution, "F5", "F6")
             sinks = _guarded(lambda: _reached_sinks(conn, anchor.node_id))
             if sinks:
-                rows.append({"file_path": anchor.file_path, "line": anchor.start_line,
-                             "name": f"{name} reaches sink-like call(s): {', '.join(sinks)}"})
-                if "F19" not in features:
-                    features.append("F19")
+                add(anchor, f"reaches sink-like call(s): {', '.join(sinks)}", "F19")
     finally:
         conn.close()
-    return {"wiring": tuple(rows[:MAX_WIRING_SHOWN]), "wiring_features": tuple(features)}
+    for anchor in distinct[:MAX_FLOW_ANCHORS] if session is not None else ():
+        for flow in _flows(session, anchor):
+            add(anchor, f"is in flow: {flow}", "F9")
+    rows = _one_of_each_first(found, MAX_WIRING_SHOWN)
+    features: list[str] = []
+    for carried, row in found:
+        if any(row is kept for kept in rows):
+            features.extend(f for f in carried if f not in features)
+    return {"wiring": tuple(rows), "wiring_features": tuple(features)}
+
+
+def _one_of_each_first(found: list[tuple[tuple[str, ...], dict[str, Any]]],
+                       limit: int) -> list[dict[str, Any]]:
+    """Up to ``limit`` rows, taking one of each kind of fact (its feature set)
+    before a second of any kind, in discovery order: seven overriders of one
+    method must not crowd out the only sink or route row."""
+    kinds: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for carried, row in found:
+        kinds.setdefault(carried, []).append(row)
+    chosen: list[dict[str, Any]] = []
+    depth = 0
+    while len(chosen) < limit and any(len(rows) > depth for rows in kinds.values()):
+        for rows in kinds.values():
+            if len(rows) > depth and len(chosen) < limit:
+                chosen.append(rows[depth])
+        depth += 1
+    order = {id(row): index for index, (_c, row) in enumerate(found)}
+    return sorted(chosen, key=lambda row: order[id(row)])
+
+
+def _flows(session: "GTSession", anchor: Any) -> list[str]:
+    """F9: detected entry-to-terminal flows through the anchored symbol."""
+    from gt_engine.capabilities import structure
+    from gt_engine.grep_augment import MAX_FLOWS_SHOWN
+
+    try:
+        result = structure.symbol_context(session, anchor.qualified_name or anchor.name)
+    except Exception:  # noqa: BLE001 - flows are advisory
+        return []
+    answer = result.answer if isinstance(result.answer, dict) else {}
+    definition = answer.get("definition") if isinstance(answer.get("definition"), dict) else {}
+    if definition.get("file_path") not in (None, anchor.file_path):
+        return []  # a same-named symbol elsewhere; its flows are not this anchor's
+    out = []
+    for flow in (answer.get("flows") or [])[:MAX_FLOWS_SHOWN]:
+        text = (flow.get("display_label") or flow.get("label")) if isinstance(flow, dict) else flow
+        if text:
+            out.append(str(text))
+    return out
 
 
 MAX_RELATED_SHOWN = 6
