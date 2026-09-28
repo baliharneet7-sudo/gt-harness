@@ -116,6 +116,47 @@ def _changed_line_ranges_before(before: str, after: str) -> list[tuple[int, int]
     return ranges
 
 
+MAX_SLICE_TARGETS = 4
+
+
+def _slice_targets(before: str, after: str) -> list[int]:
+    """Lines of ``after`` worth slicing: the LAST real statement of each
+    changed hunk (a return or assignment has the richest backward slice), in
+    file order. Real statements come from the AST, so a ``def`` line, a
+    docstring or a comment - what an added function starts with - is never
+    chosen; an unparsable file falls back to the first changed line."""
+    import ast
+    import difflib
+
+    try:
+        tree = ast.parse(after)
+    except (SyntaxError, ValueError):
+        first = _first_changed_line(before, after)
+        return [first] if first else []
+    statements: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.stmt) or isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue  # a docstring
+        statements.add(node.lineno)
+    matcher = difflib.SequenceMatcher(a=before.splitlines(), b=after.splitlines(), autojunk=False)
+    targets = []
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        inside = [n for n in range(j1 + 1, j2 + 1) if n in statements]
+        if inside:
+            targets.append(inside[-1])
+    first = _first_changed_line(before, after)
+    targets = targets[:MAX_SLICE_TARGETS]
+    if first and first not in targets:
+        targets.append(first)  # the pre-fix choice, kept as the last resort
+    return targets
+
+
 def _first_changed_line(before: str, after: str) -> int:
     """1-based line of ``after`` holding the first non-blank changed text."""
     import difflib
@@ -611,11 +652,21 @@ class ActionAugmenter:
         if not path.endswith(".py") or _TEST_PATH.search(path):
             return []
         before, after = changes.get(path, (None, None))
-        line = _first_changed_line(before or "", after or "")
-        if not line:
-            return []
-        numbers = [n for n in _python_slice(Path(self._repo_root()) / path, name, line) if n != line]
-        numbers = numbers[-MAX_SLICE_LINES:]
+        source = Path(self._repo_root()) / path
+        numbers: list[int] = []
+        line = 0
+        for target in _slice_targets(before or "", after or ""):
+            # The function around the edit in the file as it is NOW: an edit
+            # that adds a method is attributed by the pre-edit graph to the
+            # neighbouring function (aiogram smoke 36383301807: get_value
+            # added above update_data), whose slice at that line is empty.
+            enclosing = _python_enclosing(source, target)
+            if enclosing is None:
+                continue
+            found = [n for n in _python_slice(source, enclosing[0], target) if n != target]
+            if found:
+                numbers, line, name = found[-MAX_SLICE_LINES:], target, enclosing[0]
+                break
         if not numbers:
             return []
         rows = [f"    {path}:{n}: {_source_line(self.session, path, n)}" for n in numbers]
