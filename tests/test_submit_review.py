@@ -99,3 +99,10 @@ def test_no_review_means_no_hold(monkeypatch):
     assert runtime._run_submit_gate(session, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
                                     pre_execution=True) is True
     assert adapter.pending_directives == []
+
+
+def test_issue_template_placeholders_are_not_requirements():
+    rows = requirement_lines("### Description\nAdd a get_value function for FSMContext that takes value by key\n"
+                             "### Additional information\n_No response_\nN/A\n")
+    assert rows == ["Add a get_value function for FSMContext that takes value by key"]
+

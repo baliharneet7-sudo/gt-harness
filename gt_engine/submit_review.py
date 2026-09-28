@@ -56,6 +56,8 @@ _PROCESS = re.compile(
     r"\b(?:new branch|from main|pull request|commit (?:everything|your|all)|push (?:your|to)|"
     r"you can execute|bash commands|edit files to implement|IMPORTANT:)", re.I)
 _FENCED = re.compile(r"```.*?```", re.S)
+# Issue-template placeholders (aiogram smoke 36477831875 listed "_No response_").
+_PLACEHOLDER_LINE = re.compile(r"^_?(?:no response|n/?a|none|tbd|-+)_?\.?$", re.I)
 _BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 
 
@@ -146,8 +148,8 @@ def requirement_lines(issue_text: str) -> list[str]:
             sentence = sentence.strip()
             if sentence.lower().startswith("please solve this issue:"):
                 sentence = sentence.split(":", 1)[1].strip()
-            if (len(sentence) < 12 or _CODE_LINE.search(sentence) or _PROCESS.search(sentence)
-                    or sentence in rows):
+            if (_PLACEHOLDER_LINE.match(sentence) or len(sentence) < 12 or _CODE_LINE.search(sentence)
+                    or _PROCESS.search(sentence) or sentence in rows):
                 continue
             rows.append(sentence)
     return rows
