@@ -999,6 +999,14 @@ jobs:
             "anthropic==0.120.2" "openai==2.50.0" \
             "pydantic==2.13.4" "rich==15.0.0" \
             "mcp==1.27.1" "structlog==25.5.0"
+          # The runner (glibc 2.39) makes pip pick cryptography's
+          # manylinux_2_34 wheel; a task image on an older glibc then cannot
+          # install GT at all (TB2 qemu-startup, run 36359465729: "cryptography
+          # ==50.0.1 has no wheels with a matching platform tag
+          # manylinux_2_31"). Add the older-glibc builds; uv picks per image.
+          for platform in manylinux_2_28_x86_64 manylinux2014_x86_64; do
+            python -m pip download --only-binary=:all: --no-deps --dest "$wheelhouse"               --python-version 3.12 --implementation cp --abi abi3               --platform "$platform" "cryptography==50.0.1"
+          done
           test -n "$(find "$wheelhouse" -type f -print -quit)"
           echo "GT_WHEELHOUSE_HOST=$wheelhouse" >> "$GITHUB_ENV"
 
