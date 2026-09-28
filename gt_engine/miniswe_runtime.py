@@ -414,7 +414,12 @@ def _run_submit_gate(session: GTSession, command: str, *, pre_execution: bool = 
                 except Exception as exc:  # noqa: BLE001 - the review is advisory
                     adapter.store.append("gt_submit_review_fault", error=type(exc).__name__)
             if review:
-                adapter.pending_directives.append(review)
+                # Delivered AS the held submit's observation: attached runs
+                # are SHADOW (not model_visible), and the directive path drops
+                # every pending directive there - the first live run (36473680356)
+                # held the submit and showed the agent only "action was not
+                # executed", with the review discarded.
+                adapter.attached_submit_review = review
                 adapter.store.append("submit_review_held", bytes=len(review.encode("utf-8")))
                 return False
             adapter.store.append("submit_gate_bypassed", reason="attached_delivery")
@@ -2204,6 +2209,13 @@ def install_runtime_hooks(
                 carried_snapshot = None
             # Command-level fast path: the marker is literally in the command.
             if is_submit and not submit_allowed(pre_execution=True):
+                review = getattr(adapter, "attached_submit_review", "") if adapter is not None else ""
+                if review:
+                    adapter.attached_submit_review = ""
+                    outputs.append(session.suppress(action, {
+                        "output": review, "returncode": 0, "exception_info": "",
+                    }, reason="submit_review"))
+                    continue
                 outputs.append(session.suppress(action, dict(_NOT_EXECUTED), reason="submit_refused"))
                 if session.can_enforce:
                     # The enforced gate speaks for itself. A plan-gate refusal

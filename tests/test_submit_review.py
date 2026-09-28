@@ -85,7 +85,10 @@ def test_the_first_submit_is_held_once_with_the_review_and_the_second_goes_throu
     runtime, session, adapter, events = _gate(monkeypatch, "[GT] before you submit: ...")
     assert runtime._run_submit_gate(session, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
                                     pre_execution=True) is False
-    assert adapter.pending_directives == ["[GT] before you submit: ..."]
+    # Not a directive: attached sessions are SHADOW and drop directives. The
+    # review rides the held submit's own observation.
+    assert adapter.pending_directives == []
+    assert adapter.attached_submit_review == "[GT] before you submit: ..."
     assert runtime._run_submit_gate(session, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
                                     pre_execution=True) is True
     assert events == ["submit_review_held", "submit_gate_bypassed"]

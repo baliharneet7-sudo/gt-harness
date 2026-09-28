@@ -3885,3 +3885,34 @@ def test_boundary_amend_clears_provably_non_indexable_masks(tmp_path, monkeypatc
         for line in adapter.store.path.read_text().splitlines()
     ]
     assert any(row["event"] == "graph_mask_cleared" for row in rows)
+
+
+def test_attached_first_submit_is_answered_with_the_review_as_its_observation(tmp_path, monkeypatch):
+    """End to end through execute_actions: attached sessions are SHADOW, so a
+    directive would be dropped (live run 36473680356 held the submit and the
+    agent saw only "action was not executed"). The review must BE the held
+    submit's observation, and the second submit must execute."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("GT_DELIVERY_MODE", "attached")
+    agent = FakeAgent()
+    adapter = MiniSweAdapter(task_id="t", state_dir=tmp_path, predicates=[Predicate("p", "p")])
+    calls = {"n": 0}
+
+    def submit_review_once():
+        calls["n"] += 1
+        return "[GT] before you submit: 1. The thing the task asks." if calls["n"] == 1 else ""
+
+    adapter.attached_delivery = SimpleNamespace(
+        submit_review_once=submit_review_once,
+        observe_turn=lambda commands, outputs, facts=None: outputs,
+    )
+    install_runtime_hooks(agent, adapter)
+    agent.model._prepare_messages_for_api([{"role": "user", "content": "task"}])
+    submit = {"extra": {"actions": [{"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}]}}
+
+    first = agent.execute_actions(submit)
+    assert agent.env.executed == []
+    assert any("[GT] before you submit" in str(m.get("content", m.get("output", ""))) for m in first), first
+    agent.execute_actions(submit)
+    assert agent.env.executed == ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
