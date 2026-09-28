@@ -588,3 +588,21 @@ def test_an_edit_that_writes_source_wakes_the_graph_build(monkeypatch):
     delivery.session._engine.engine_state.graph_path = "/g/graph.db"
     delivery._wake_on_new_source({"fix_wal.py": ("a", "b")})
     assert calls == [True]
+
+
+def test_gt_host_time_is_credited_back_to_the_agent_clock_up_to_the_cap(monkeypatch):
+    """Budget parity: GT's host work pauses the agent's wall clock, capped."""
+    from types import SimpleNamespace
+
+    from gt_engine.miniswe_runtime import credit_agent_clock
+
+    agent = SimpleNamespace(_start_time=1000.0)
+    attached = SimpleNamespace()
+    monkeypatch.setenv("GT_CLOCK_CREDIT_CAP_SECONDS", "0")
+    assert credit_agent_clock(agent, attached, 50.0) == 0.0 and agent._start_time == 1000.0
+    monkeypatch.setenv("GT_CLOCK_CREDIT_CAP_SECONDS", "100")
+    assert credit_agent_clock(agent, attached, 60.0) == 60.0
+    assert agent._start_time == 1060.0
+    assert credit_agent_clock(agent, attached, 60.0) == 40.0  # only the cap's remainder
+    assert agent._start_time == 1100.0 and attached.clock_credit_seconds == 100.0
+    assert credit_agent_clock(agent, attached, 5.0) == 0.0

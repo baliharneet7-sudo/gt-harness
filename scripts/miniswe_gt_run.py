@@ -1809,10 +1809,19 @@ def main() -> int:
         "persistent-state-bootstrap-timeout-sec",
         "persistent-state-bootstrap-input-tokens",
         "persistent-state-bootstrap-output-tokens",
-        "persistent-state-context-tokens",
+        "persistent-state-context-tokens", "gt-clock-credit-cap-sec",
     ):
         parser.add_argument("--" + name, type=int, default=0)
     args = parser.parse_args()
+    # Budget parity with the GT-off baseline. --time-budget-seconds is the
+    # outer deadline (the supervisor's and Pier's); the agent's own clock gets
+    # exactly the baseline's share of it, and pauses while GT does host work
+    # (graph queries, the plan, edit/failure blocks), up to the cap - so GT's
+    # work is neither charged to the agent nor turned into free agent time.
+    clock_credit_cap = max(0, int(args.gt_clock_credit_cap_sec or 0))
+    agent_wall_seconds = (max(30, args.time_budget_seconds - clock_credit_cap)
+                          if clock_credit_cap else args.time_budget_seconds)
+    os.environ["GT_CLOCK_CREDIT_CAP_SECONDS"] = str(clock_credit_cap)
     patch_baseline = ""
     capability_modes: dict[str, str] = {}
     for item in args.gt_capability_mode:
@@ -1858,7 +1867,7 @@ def main() -> int:
             disabled_capabilities=tuple(args.gt_disable_capability),
             step_limit=args.step_limit,
             timeout=args.timeout,
-            wall_time_limit_seconds=args.time_budget_seconds,
+            wall_time_limit_seconds=agent_wall_seconds,
         )
     except Exception as exc:  # noqa: BLE001 - setup must leave an audit artifact
         terminal = "setup_error"

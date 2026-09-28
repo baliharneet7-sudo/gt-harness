@@ -1815,7 +1815,10 @@ def test_tb2_pays_for_gt_setup_like_every_other_paid_lane() -> None:
     # extension); the extension applies only when GT_BUDGET_PARITY=0.
     assert 'GT_BUDGET_PARITY: "1"' in text
     assert "multiplier=1.0 if parity else 5.0" in text
-    assert "overhead_extension_sec=0.0 if parity else GT_OVERHEAD_EXTENSION_SECONDS" in text
+    # Under parity the outer deadline carries only the clock-credit cap; the
+    # agent's own clock is the baseline's and pauses while GT works.
+    assert "overhead_extension_sec=CLOCK_CREDIT_CAP_SECONDS if parity else GT_OVERHEAD_EXTENSION_SECONDS" in text
+    assert '--ak gt_clock_credit_cap_sec="${{ matrix.gt_clock_credit_cap_sec }}"' in text
     assert '"benchmark_budget_seconds"' in text
     assert '"gt_overhead_extension_seconds"' in text
     assert '"deviates_from_benchmark_budget"' in text

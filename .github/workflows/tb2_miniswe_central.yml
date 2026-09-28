@@ -743,10 +743,17 @@ jobs:
               # declared deviation, so the untouched benchmark figure rides
               # beside it in the receipt.
               parity = os.environ.get("GT_BUDGET_PARITY", "1") == "1"
+              # Under parity the outer deadlines (Pier, supervisor) get
+              # CLOCK_CREDIT_CAP_SECONDS of room and the runner gives the
+              # agent's own clock exactly the baseline budget, pausing it while
+              # GT works (miniswe_runtime.credit_agent_clock). Measured GT host
+              # time on TB2 36394025893: median 4 s, p95 229 s; setup before the
+              # first step: p95 70 s.
+              CLOCK_CREDIT_CAP_SECONDS = 600.0
               budget = resolve_budget(
                   dataset / task / "task.toml",
                   multiplier=1.0 if parity else 5.0,
-                  overhead_extension_sec=0.0 if parity else GT_OVERHEAD_EXTENSION_SECONDS,
+                  overhead_extension_sec=CLOCK_CREDIT_CAP_SECONDS if parity else GT_OVERHEAD_EXTENSION_SECONDS,
               )
               # Pier's agent deadline is `task.[agent].timeout_sec * multiplier`
               # (pier/trial/execution.py::_resolve_agent_timeout).  Passing the
@@ -779,6 +786,7 @@ jobs:
                   "execution_budget_capped": execution_budget < float(budget["execution_budget_sec"]),
                   "benchmark_budget_seconds": float(budget["benchmark_budget_sec"]),
                   "gt_overhead_extension_seconds": float(budget["gt_overhead_extension_sec"]),
+                  "gt_clock_credit_cap_sec": int(CLOCK_CREDIT_CAP_SECONDS) if parity else 0,
                   "deviates_from_benchmark_budget": bool(budget["deviates_from_benchmark_budget"]),
                   "task_config_sha256": budget["task_config_sha256"],
               })
@@ -1368,6 +1376,7 @@ jobs:
             --ak temperature="${{ needs.plan.outputs.temperature }}" \
             --ak gt_delivery_mode="$GT_DELIVERY_MODE" \
             --ak time_budget_seconds="${{ matrix.time_budget_seconds }}" \
+            --ak gt_clock_credit_cap_sec="${{ matrix.gt_clock_credit_cap_sec }}" \
             -i "$TASK"
           rc=$?
           echo "$rc" > harbor-exit-code.txt

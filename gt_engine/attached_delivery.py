@@ -310,6 +310,9 @@ class AttachedDelivery:
             "feature_inventory": dict(self.feature_inventory),
             "gt_search_commands": self.augmenter.search_commands,
             "gt_repeats_suppressed": self.augmenter.budget.suppressed,
+            # Budget parity: host seconds GT spent that were given back to the
+            # agent's clock (miniswe_runtime.credit_agent_clock).
+            "gt_clock_credit_seconds": round(float(getattr(self, "clock_credit_seconds", 0.0) or 0.0), 1),
             "gt_bytes_delivered": (tools["gt_tool_bytes_delivered"] + augment["augment_bytes_delivered"]
                                    + actions["action_augment_bytes_delivered"] + self.plan_bytes_delivered),
             **self.uptake.as_dict(),

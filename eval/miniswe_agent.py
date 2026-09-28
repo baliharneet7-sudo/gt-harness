@@ -140,6 +140,10 @@ class MiniSweAgent(BaseInstalledAgent):
         CliFlag(kwarg="step_limit", cli="--step-limit", type="int"),
         CliFlag(kwarg="execution_budget_sec", cli="--execution-budget-sec",
                 type="int"),
+        # Budget parity: the agent's own wall clock pauses while GT works, up
+        # to this many seconds (see scripts/miniswe_gt_run.py).
+        CliFlag(kwarg="gt_clock_credit_cap_sec", cli="--gt-clock-credit-cap-sec",
+                type="int"),
         CliFlag(kwarg="integration_mode", cli="--integration-mode"),
         CliFlag(kwarg="gt_delivery_mode", cli="--gt-delivery-mode"),
         # Emitted after the command's default --temperature 1.0; argparse keeps

@@ -22,6 +22,7 @@ Seam responsibilities:
 from __future__ import annotations
 
 import hashlib
+import time
 import json
 import os
 import re
@@ -70,6 +71,31 @@ from .runtime_observation import (
 # The marker that makes the plan block idempotent in the durable task
 # message: appended once, never twice, even if the bootstrap were re-entered.
 PLAN_BLOCK_TAG = "[GT_PERSISTENT_PLAN]"
+
+
+def credit_agent_clock(agent: Any, attached: Any, seconds: float) -> float:
+    """Pause the agent's wall clock for ``seconds`` of GT host work.
+
+    Mini-SWE raises TimeExceeded when ``time.time() - agent._start_time``
+    passes its limit, so moving ``_start_time`` forward by the time GT spent
+    returns exactly that time to the agent. Bounded by
+    GT_CLOCK_CREDIT_CAP_SECONDS per task (0 = off); the total is recorded on
+    the attached delivery as ``gt_clock_credit_seconds``. Returns the grant."""
+    import os
+
+    try:
+        cap = float(os.environ.get("GT_CLOCK_CREDIT_CAP_SECONDS", "0") or 0)
+    except ValueError:
+        return 0.0
+    if cap <= 0 or seconds <= 0 or not hasattr(agent, "_start_time"):
+        return 0.0
+    used = float(getattr(attached, "clock_credit_seconds", 0.0) or 0.0)
+    grant = min(float(seconds), cap - used)
+    if grant <= 0:
+        return 0.0
+    agent._start_time = float(agent._start_time) + grant
+    attached.clock_credit_seconds = used + grant
+    return grant
 
 
 def _plan_block_pointer(adapter: Any) -> str:
@@ -2473,6 +2499,7 @@ def install_runtime_hooks(
         adapter.pending_directives = []
         attached = getattr(adapter, "attached_delivery", None)
         if attached is not None and not session.disabled:
+            gt_started = time.monotonic()
             try:
                 outputs = attached.observe_turn(
                     [None if is_typed_action(action) else _command(action) for action in actions],
@@ -2481,6 +2508,8 @@ def install_runtime_hooks(
                 )
             except Exception as exc:  # noqa: BLE001 - enrichment never costs the observation
                 adapter.store.append("gt_augment_fault", error=type(exc).__name__)
+            finally:
+                credit_agent_clock(agent, attached, time.monotonic() - gt_started)
         formatter = getattr(model, "format_observation_messages", None)
         if session.disabled and native_add_messages is not None:
             agent.add_messages = native_add_messages
