@@ -296,3 +296,28 @@ def test_a_passive_read_never_amends_inline_in_the_thin_arm():
     assert "amend" not in calls and "passive_refresh_deferred" in calls
     refresh_if_stale(session)  # an explicit gt-* call still pays for currency
     assert "amend" in calls
+
+
+def test_a_slow_index_build_never_delays_the_agent_s_start(tmp_path, monkeypatch):
+    """boa (run 36510165558): a 2,286 s synchronous build ran inside the agent's budget."""
+    from types import SimpleNamespace
+
+    import gt_engine.indexer as indexer
+    from gt_engine.thin_agent import build_attached_session
+
+    (tmp_path / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    def slow_build(*args, **kwargs):
+        time.sleep(3)
+        return SimpleNamespace(success=False, status=SimpleNamespace(value="build_failed"),
+                               error_type="slow", error_diagnostic="", graph_db=None)
+
+    monkeypatch.setattr(indexer, "ensure_index_with_receipt", slow_build)
+    started = time.perf_counter()
+    adapter, _session, delivery, _layout = build_attached_session(
+        task="fix f", cwd=str(tmp_path / "."), state_dir=str(tmp_path.parent / f"{tmp_path.name}-state"),
+        task_id="t1", wait_seconds=0.2)
+    assert time.perf_counter() - started < 2.5
+    events = (adapter.store.path).read_text(encoding="utf-8")
+    assert "gt_thin_index_background" in events and "gt_thin_index_ready" not in events
+    delivery.stop()

@@ -43,6 +43,9 @@ from typing import Any
 from minisweagent.agents.default import DefaultAgent
 
 AUGMENT_TIMEOUT_SECONDS = 5.0  # GitNexus AUGMENT_TIMEOUT_SECONDS
+# How long a run waits for its graph at start: a reused prebuild loads in
+# seconds; anything longer builds in the background while the agent works.
+START_WAIT_SECONDS = 60.0
 MAX_TRACKED_BYTES = 1_000_000
 MAX_WALK_ENTRIES = 50_000
 MAX_PRECACHE_BYTES = 20_000_000
@@ -452,10 +455,12 @@ class GTAttachedAgent(DefaultAgent):
 
 def build_attached_session(*, task: str, cwd: str, state_dir: str, task_id: str,
                            model: str = "", resolved_model: str = "",
-                           embedding_budget_seconds: float = 0.0):
-    """The GT engine for one task with its graph already built: adapter,
-    SHADOW session, attached delivery (tools + augmenters). Synchronous by
-    design - it runs before the agent loop, as GitNexus's ``env.start()``."""
+                           embedding_budget_seconds: float = 0.0,
+                           wait_seconds: float | None = START_WAIT_SECONDS):
+    """The GT engine for one task: adapter, SHADOW session, attached delivery
+    (tools + augmenters). Waits up to ``wait_seconds`` for the graph (``None``
+    = the whole build, as the install-time prebuild does); a graph not ready
+    by then keeps building in the background and is adopted when it lands."""
     from gt_engine.engine_state import RuntimeLayout
     from gt_engine.gt_session import GTMode, GTSession, GTSessionConfig
     from gt_engine.indexer import ensure_index_with_receipt
@@ -493,25 +498,45 @@ def build_attached_session(*, task: str, cwd: str, state_dir: str, task_id: str,
             source_revision=adapter.repository_revision,
             embedding_budget_seconds=embedding_budget_seconds)
 
-    class _Done:
+    class _Build:
+        """The index build on a daemon thread; the adapter adopts it when it lands."""
+
         def __init__(self, fn):
-            try:
-                self._value, self._exc = fn(), None
-            except BaseException as exc:  # noqa: BLE001 - carried to the adapter's poll
-                self._value, self._exc = None, exc
+            self._event = threading.Event()
+            self._value = self._exc = None
+
+            def run() -> None:
+                try:
+                    self._value = fn()
+                except BaseException as exc:  # noqa: BLE001 - carried to the adapter's poll
+                    self._exc = exc
+                finally:
+                    self._event.set()
+
+            threading.Thread(target=run, name="gt-thin-index", daemon=True).start()
+
+        def wait(self, seconds: float | None) -> bool:
+            return self._event.wait(seconds)
 
         def done(self) -> bool:
-            return True
+            return self._event.is_set()
 
         def result(self):
             if self._exc is not None:
                 raise self._exc
             return self._value
 
-    adapter._startup_index = _Done(build)
-    adapter._background_graph_builder = lambda: _Done(build)
+    future = _Build(build)
+    adapter._startup_index = future
+    adapter._background_graph_builder = lambda: _Build(build)
+    # A graph prebuilt at install is reused in seconds. One that is not ready
+    # keeps building in the background and the agent starts now: the index
+    # never takes the agent's clock (boa, run 36510165558: a 2,286 s build
+    # inside the agent's 5,400 s). GT's blocks begin when the graph lands.
+    ready = future.wait(wait_seconds)
     adapter._poll_startup_index()
-    adapter.store.append("gt_thin_index_ready", seconds=round(time.perf_counter() - started, 3),
+    adapter.store.append("gt_thin_index_ready" if ready else "gt_thin_index_background",
+                         seconds=round(time.perf_counter() - started, 3),
                          graph=str(getattr(adapter.engine_state, "graph_path", "") or ""))
     session = GTSession(
         GTSessionConfig(task_id=adapter.task_id, repo_root=cwd, state_dir=state_dir, graph_db="",
@@ -539,7 +564,8 @@ def prebuild(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-dir", required=True)
     args = parser.parse_args(argv)
     try:
-        build_attached_session(task="", cwd=args.cwd, state_dir=args.state_dir, task_id="prebuild")
+        build_attached_session(task="", cwd=args.cwd, state_dir=args.state_dir, task_id="prebuild",
+                               wait_seconds=None)  # setup time: wait for the whole build
     except Exception as exc:  # noqa: BLE001 - the run builds it itself if this fails
         print(f"gt prebuild failed: {type(exc).__name__}: {exc}")
         return 0
