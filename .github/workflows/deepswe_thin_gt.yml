@@ -11,8 +11,11 @@
 #     the runner builds GTAttachedAgent = DefaultAgent + GT observations);
 #   * setup builds the task's graph: --agent-setup-timeout-multiplier, and
 #     the outer `timeout` gets the same build allowance on top of the budget.
-# No GT-off arm: the baseline is frozen (D:\gt_baselines\space_bunny_alpha\deepswe).
+# arm=baseline runs MiniSweBaselineAgent (the same bundle with --gt-off, no graph build) through
+# this same job, so both arms share images, budget, timeouts and runner pool. Dispatch it only
+# on the user's explicit instruction (standing rule: no GT-off runs otherwise).
 name: DeepSWE thin GT (baseline harness)
+run-name: DeepSWE ${{ inputs.arm || 'gt' }} r${{ inputs.rep || '1' }}
 
 on:
   workflow_dispatch:
@@ -33,6 +36,20 @@ on:
         description: Concurrent task jobs
         required: true
         default: "20"
+      arm:
+        description: "gt (thin GT) or baseline (same agent, --gt-off; only on the user's explicit instruction)"
+        required: true
+        default: gt
+        type: choice
+        options: [gt, baseline]
+      image_owner:
+        description: GHCR owner of the public deepswe-v1-1 mirror
+        required: true
+        default: harneet2512
+      rep:
+        description: Replicate number (tags artifacts)
+        required: false
+        default: "1"
 
   workflow_call:
     inputs:
@@ -52,6 +69,18 @@ on:
         type: string
         required: false
         default: '20'
+      arm:
+        type: string
+        required: false
+        default: 'gt'
+      image_owner:
+        type: string
+        required: false
+        default: 'harneet2512'
+      rep:
+        type: string
+        required: false
+        default: '1'
 permissions:
   contents: read
   actions: read
@@ -104,6 +133,8 @@ jobs:
       MODEL: ${{ inputs.model }}
       TASK: ${{ matrix.task }}
       STEP_LIMIT: ${{ inputs.step_limit }}
+      ARM: ${{ inputs.arm || 'gt' }}
+      TAG: ${{ inputs.arm || 'gt' }}-r${{ inputs.rep || '1' }}
     steps:
       - uses: actions/checkout@v4
       - name: Checkout pinned DeepSWE task set
@@ -114,7 +145,7 @@ jobs:
           path: deepswe-bench
       - name: Serve the task image from the GHCR mirror
         env:
-          GHCR_PREFIX: ghcr.io/${{ github.repository_owner }}
+          GHCR_PREFIX: ghcr.io/${{ inputs.image_owner || 'harneet2512' }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: |
@@ -176,16 +207,25 @@ jobs:
           # when setup 908 s + agent 5,340 s filled budget + build allowance exactly).
           VERIFIER_MARGIN=600
           echo "OUTER_TIMEOUT_SEC=$((AGENT_TIMEOUT_SEC + BUILD_ALLOWANCE + VERIFIER_MARGIN))" >> "$GITHUB_ENV"
-          echo "SETUP_MULT=$(python -c 'from eval.miniswe_thin_agent import SETUP_TIMEOUT_MULTIPLIER as m; print(m)')" >> "$GITHUB_ENV"
-      - name: Run thin GT on DeepSWE task
+          case "$ARM" in
+            gt)
+              echo "AGENT_CLASS=eval.miniswe_thin_agent:MiniSweThinGtAgent" >> "$GITHUB_ENV"
+              echo "SETUP_MULT=$(python -c 'from eval.miniswe_thin_agent import SETUP_TIMEOUT_MULTIPLIER as m; print(m)')" >> "$GITHUB_ENV" ;;
+            baseline)
+              # The baseline builds no graph: Harbor's default setup timeout, as the frozen baseline.
+              echo "AGENT_CLASS=eval.miniswe_thin_agent:MiniSweBaselineAgent" >> "$GITHUB_ENV"
+              echo "SETUP_MULT=1.0" >> "$GITHUB_ENV" ;;
+            *) echo "::error::arm must be gt or baseline, got '$ARM'"; exit 1 ;;
+          esac
+      - name: Run the DeepSWE task (arm ${{ inputs.arm || 'gt' }})
         run: |
           set -uo pipefail
           mkdir -p results/deepswe
-          JOB_NAME="deepswe-thin-${GITHUB_RUN_ID}-${TASK}"
+          JOB_NAME="deepswe-thin-${GITHUB_RUN_ID}-${TAG}-${TASK}"
           run_task() {
             timeout --signal=TERM --kill-after=30s "${OUTER_TIMEOUT_SEC}s" harbor run \
               -p deepswe-bench/tasks \
-              --agent-import-path eval.miniswe_thin_agent:MiniSweThinGtAgent \
+              --agent-import-path "$AGENT_CLASS" \
               -m "$GT_LITELLM_MODEL" -o results/deepswe \
               --job-name "$JOB_NAME" \
               --agent-timeout-multiplier 1.0 \
@@ -218,7 +258,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: deepswe-thin-${{ github.run_id }}-${{ matrix.task }}
+          name: deepswe-thin-${{ github.run_id }}-${{ inputs.arm || 'gt' }}-r${{ inputs.rep || '1' }}-${{ matrix.task }}
           path: |
             results/deepswe/
             results/deepswe-infra-attempt-1/
@@ -238,7 +278,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
-          pattern: deepswe-thin-${{ github.run_id }}-*
+          pattern: deepswe-thin-${{ github.run_id }}-${{ inputs.arm || 'gt' }}-r${{ inputs.rep || '1' }}-*
           path: all
       - name: Summarize
         env:
@@ -247,5 +287,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: deepswe-thin-${{ github.run_id }}-SUMMARY
+          name: deepswe-thin-${{ github.run_id }}-${{ inputs.arm || 'gt' }}-r${{ inputs.rep || '1' }}-SUMMARY
           path: thin-summary/

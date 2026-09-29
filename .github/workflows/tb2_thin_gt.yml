@@ -9,8 +9,12 @@
 #     the runner builds GTAttachedAgent = DefaultAgent + GT observations);
 #   * --agent-setup-timeout-multiplier: setup also builds the task's graph
 #     (GitNexus builds its index before the agent starts, too).
-# No GT-off arm: the baseline is frozen (D:\gt_baselines\space_bunny_alpha\tb2).
+# arm=baseline runs MiniSweBaselineAgent (the same bundle with --gt-off, no graph build) through
+# this same job, so both arms share images, timeouts and runner pool. Dispatch it only on the
+# user's explicit instruction (standing rule: no GT-off runs otherwise). rep tags the artifacts so
+# several replicates can run inside one campaign run.
 name: TB2 thin GT (baseline harness)
+run-name: TB2 ${{ inputs.arm || 'gt' }} r${{ inputs.rep || '1' }}
 
 on:
   workflow_dispatch:
@@ -27,6 +31,20 @@ on:
         description: Concurrent task jobs
         required: true
         default: "20"
+      arm:
+        description: "gt (thin GT) or baseline (same agent, --gt-off; only on the user's explicit instruction)"
+        required: true
+        default: gt
+        type: choice
+        options: [gt, baseline]
+      rep:
+        description: Replicate number (tags artifacts)
+        required: false
+        default: "1"
+      image_owner:
+        description: GHCR owner of the public tb2.<task> mirror
+        required: true
+        default: harneet2512
 
   workflow_call:
     inputs:
@@ -42,6 +60,18 @@ on:
         type: string
         required: false
         default: '20'
+      arm:
+        type: string
+        required: false
+        default: 'gt'
+      rep:
+        type: string
+        required: false
+        default: '1'
+      image_owner:
+        type: string
+        required: false
+        default: 'harneet2512'
 permissions:
   contents: read
   actions: read
@@ -145,7 +175,7 @@ jobs:
         env:
           TASK: ${{ matrix.task }}
           IMAGE_TAG: "20251031"
-          GHCR_PREFIX: ghcr.io/${{ github.repository_owner }}
+          GHCR_PREFIX: ghcr.io/${{ inputs.image_owner || 'harneet2512' }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: |
@@ -168,20 +198,27 @@ jobs:
       - name: Load cached task image
         if: steps.ghcr.outputs.hit != '1' && steps.restore.outputs.cache-hit == 'true'
         run: docker load -i "${{ runner.temp }}/tb2-img.tar.gz"
-      - name: Run harbor - task ${{ matrix.task }} (thin GT)
+      - name: Run harbor - task ${{ matrix.task }} (arm ${{ inputs.arm || 'gt' }})
         env:
           MODEL: ${{ inputs.model }}
           DATASET: terminal-bench@2.0
           TASK: ${{ matrix.task }}
+          ARM: ${{ inputs.arm || 'gt' }}
+          TAG: ${{ inputs.arm || 'gt' }}-r${{ inputs.rep || '1' }}
         run: |
           set -euo pipefail
-          MULT=$(python -c "from eval.miniswe_thin_agent import SETUP_TIMEOUT_MULTIPLIER as m; print(m)")
+          case "$ARM" in
+            gt) AGENT_CLASS=eval.miniswe_thin_agent:MiniSweThinGtAgent
+                MULT=$(python -c "from eval.miniswe_thin_agent import SETUP_TIMEOUT_MULTIPLIER as m; print(m)") ;;
+            baseline) AGENT_CLASS=eval.miniswe_thin_agent:MiniSweBaselineAgent; MULT=1.0 ;;
+            *) echo "::error::arm must be gt or baseline, got '$ARM'"; exit 1 ;;
+          esac
           harbor run \
             -d "$DATASET" \
-            --agent-import-path eval.miniswe_thin_agent:MiniSweThinGtAgent \
+            --agent-import-path "$AGENT_CLASS" \
             -m "$MODEL" \
             -o results/terminal-bench \
-            --job-name "tb2-thin-${GITHUB_RUN_ID}-${TASK}" \
+            --job-name "tb2-thin-${GITHUB_RUN_ID}-${TAG}-${TASK}" \
             --agent-timeout-multiplier 1.0 \
             --agent-setup-timeout-multiplier "$MULT" \
             -n 1 \
@@ -194,7 +231,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tb2-thin-${{ github.run_id }}-task-${{ matrix.task }}
+          name: tb2-thin-${{ github.run_id }}-${{ inputs.arm || 'gt' }}-r${{ inputs.rep || '1' }}-task-${{ matrix.task }}
           path: results/terminal-bench/
           if-no-files-found: warn
 
@@ -210,7 +247,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
-          pattern: tb2-thin-${{ github.run_id }}-task-*
+          pattern: tb2-thin-${{ github.run_id }}-${{ inputs.arm || 'gt' }}-r${{ inputs.rep || '1' }}-task-*
           path: all
       - name: Summarize
         env:
@@ -219,5 +256,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: tb2-thin-${{ github.run_id }}-SUMMARY
+          name: tb2-thin-${{ github.run_id }}-${{ inputs.arm || 'gt' }}-r${{ inputs.rep || '1' }}-SUMMARY
           path: thin-summary/

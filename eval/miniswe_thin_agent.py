@@ -13,8 +13,13 @@ stock DefaultAgent with GT blocks appended to its own observations.
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import shlex
+import tarfile
+import tempfile
+import urllib.request
 from pathlib import Path
 
 from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
@@ -34,7 +39,8 @@ _UV_VERSION = "0.11.32"
 _PYTHON_VERSION = "3.12.13"
 # The version every space-bunny GT-off trajectory records (info.mini_version).
 MINISWE_AGENT_VERSION = "2.3.0"
-_UV_INSTALL = f"https://astral.sh/uv/{_UV_VERSION}/install.sh"
+_UV_RELEASE = f"https://github.com/astral-sh/uv/releases/download/{_UV_VERSION}/uv-x86_64-unknown-linux-musl.tar.gz"
+_REMOTE_UV = "/installed-agent/uv"
 _STATE_DIR = "/logs/agent/gt-state"
 _BASELINE_PROVIDER_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL")
 # Harbor 0.20.0 gives agent setup 360 s (harbor/trial/trial.py). The thin
@@ -51,13 +57,42 @@ _STAGED_SOURCE_CLEANUP = (
     f"chmod +x {_REMOTE_RUNNER} && "
     f"rm -rf -- {_REMOTE_DIR}"
 )
+# Best effort only: uv arrives from the host (_uv_binary_host), so an image whose
+# package mirror is gone (TB2 qemu-*: Debian 11 security pool 404s) still installs.
 _ENSURE_CURL = (
     "command -v curl >/dev/null 2>&1 || { "
     "command -v apt-get >/dev/null && apt-get update && apt-get install -y curl; } || { "
     "command -v apk >/dev/null && apk add --no-cache curl bash; } || { "
     "command -v dnf >/dev/null && dnf install -y curl; } || { "
-    "command -v yum >/dev/null && yum install -y curl; }"
+    "command -v yum >/dev/null && yum install -y curl; } || true"
 )
+
+
+def _uv_binary_host() -> Path:
+    """The pinned static uv binary, fetched once on the host and checked against its release sha256."""
+    cache = Path(tempfile.gettempdir()) / f"uv-{_UV_VERSION}-musl"
+    binary = cache / "uv"
+    if binary.is_file():
+        return binary
+    cache.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(_UV_RELEASE, timeout=120) as response:
+        archive = response.read()
+    with urllib.request.urlopen(_UV_RELEASE + ".sha256", timeout=60) as response:
+        expected = response.read().decode("ascii").split()[0].lower()
+    actual = hashlib.sha256(archive).hexdigest()
+    if actual != expected:
+        raise RuntimeError(f"uv {_UV_VERSION} archive sha256 {actual} != published {expected}")
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        member = next(m for m in tar.getmembers() if m.isfile() and m.name.endswith("/uv"))
+        handle = tar.extractfile(member)
+        if handle is None:
+            raise RuntimeError(f"uv {_UV_VERSION} archive has no readable uv binary")
+        data = handle.read()
+    partial = binary.with_suffix(".partial")
+    partial.write_bytes(data)
+    partial.chmod(0o755)
+    partial.replace(binary)
+    return binary
 
 
 class MiniSweBaselineAgent(BaseInstalledAgent):
@@ -83,12 +118,12 @@ class MiniSweBaselineAgent(BaseInstalledAgent):
         remote_wheel = f"{_REMOTE_DIR}/{wheel.name}"
         await environment.upload_file(wheel, remote_wheel)
         await environment.upload_file(binary, _REMOTE_GT_BINARY)
+        await environment.upload_file(_uv_binary_host(), _REMOTE_UV)
         await self.exec_as_root(environment, _ENSURE_CURL, env={"DEBIAN_FRONTEND": "noninteractive"})
-        await self.exec_as_root(environment, f"chmod 755 {_REMOTE_GT_BINARY}")
+        await self.exec_as_root(environment, f"chmod 755 {_REMOTE_GT_BINARY} {_REMOTE_UV}")
         install = (
             "set -eu; "
-            f"curl -LsSf {_UV_INSTALL} | sh && "
-            f'"$HOME/.local/bin/uv" tool install --python {_PYTHON_VERSION} '
+            f'"{_REMOTE_UV}" tool install --python {_PYTHON_VERSION} '
             f'--with "mini-swe-agent=={MINISWE_AGENT_VERSION}" '
             f"--with {shlex.quote(remote_wheel)} --with 'numpy==2.5.1' "
             f"{_REMOTE_DIR} && "

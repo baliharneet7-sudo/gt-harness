@@ -1,0 +1,815 @@
+{
+ "_doc": "Longest-first task order for replicate campaigns (LPT scheduling: the longest jobs start first so they do not form the tail). est_min = longest observed job minutes in GT runs 36510165558/36540668121 (DeepSWE) and 36510161851/36520988098/36532310082 (TB2).",
+ "deepswe": [
+  {
+   "task": "langchain-request-coalescing",
+   "est_min": 108
+  },
+  {
+   "task": "boa-hierarchical-evaluation-cancellation",
+   "est_min": 107
+  },
+  {
+   "task": "pebble-durability-wait-apis",
+   "est_min": 106
+  },
+  {
+   "task": "prometheus-transactional-reload-status",
+   "est_min": 106
+  },
+  {
+   "task": "prometheus-typed-label-sorting",
+   "est_min": 106
+  },
+  {
+   "task": "numba-stencil-boundary-modes",
+   "est_min": 106
+  },
+  {
+   "task": "opa-rego-rule-profiling",
+   "est_min": 106
+  },
+  {
+   "task": "scriggo-method-declarations",
+   "est_min": 100
+  },
+  {
+   "task": "dynamodb-toolbox-conditional-attribute-requirements",
+   "est_min": 96
+  },
+  {
+   "task": "opa-template-string-reconstruction",
+   "est_min": 96
+  },
+  {
+   "task": "tengo-destructuring-bindings",
+   "est_min": 94
+  },
+  {
+   "task": "skrub-duration-encoding",
+   "est_min": 87
+  },
+  {
+   "task": "dynamodb-toolbox-lazy-recursive-schemas",
+   "est_min": 87
+  },
+  {
+   "task": "kcp-go-multiplexed-kcp-streams",
+   "est_min": 85
+  },
+  {
+   "task": "pwntools-tube-multiplexing",
+   "est_min": 80
+  },
+  {
+   "task": "actionlint-action-pinning-lint",
+   "est_min": 79
+  },
+  {
+   "task": "vitest-duration-sharding",
+   "est_min": 76
+  },
+  {
+   "task": "optique-conditional-option-dependencies",
+   "est_min": 76
+  },
+  {
+   "task": "ink-grid-box-layout",
+   "est_min": 76
+  },
+  {
+   "task": "drizzle-orm-window-function-builders",
+   "est_min": 73
+  },
+  {
+   "task": "arktype-json-schema-refs-dependencies",
+   "est_min": 69
+  },
+  {
+   "task": "oxvg-structural-selector-preservation",
+   "est_min": 65
+  },
+  {
+   "task": "koota-composite-trait-aspects",
+   "est_min": 64
+  },
+  {
+   "task": "helm-array-merge-strategies",
+   "est_min": 64
+  },
+  {
+   "task": "valibot-recursive-schema-composition",
+   "est_min": 63
+  },
+  {
+   "task": "arcane-drift-detection-baselines",
+   "est_min": 61
+  },
+  {
+   "task": "tengo-callable-instance-isolation",
+   "est_min": 61
+  },
+  {
+   "task": "happy-dom-abort-pending-body-reads",
+   "est_min": 60
+  },
+  {
+   "task": "geo-shapeindex-serialization",
+   "est_min": 57
+  },
+  {
+   "task": "koota-pair-relation-tracking",
+   "est_min": 57
+  },
+  {
+   "task": "yaegi-go-embed-directives",
+   "est_min": 56
+  },
+  {
+   "task": "koota-query-predicates",
+   "est_min": 55
+  },
+  {
+   "task": "wasmi-trap-coredumps",
+   "est_min": 54
+  },
+  {
+   "task": "kombu-single-active-consumer-priority",
+   "est_min": 54
+  },
+  {
+   "task": "go-git-worktree-merge-conflicts",
+   "est_min": 54
+  },
+  {
+   "task": "query-persist-restored-query-state",
+   "est_min": 53
+  },
+  {
+   "task": "quill-shared-toolbar-focus",
+   "est_min": 53
+  },
+  {
+   "task": "fastapi-implicit-head-options",
+   "est_min": 51
+  },
+  {
+   "task": "textual-richlog-follow-state",
+   "est_min": 51
+  },
+  {
+   "task": "anko-default-function-arguments",
+   "est_min": 49
+  },
+  {
+   "task": "goreleaser-retry-publish-auditing",
+   "est_min": 49
+  },
+  {
+   "task": "kgateway-consistent-hash-policy",
+   "est_min": 48
+  },
+  {
+   "task": "cattrs-partial-structuring-recovery",
+   "est_min": 48
+  },
+  {
+   "task": "narwhals-rolling-window-suite",
+   "est_min": 47
+  },
+  {
+   "task": "python-statemachine-state-data-scoping",
+   "est_min": 46
+  },
+  {
+   "task": "happy-dom-deterministic-intersectionobserver",
+   "est_min": 46
+  },
+  {
+   "task": "testem-bail-on-test-failure",
+   "est_min": 46
+  },
+  {
+   "task": "eicrud-keyset-pagination-cursor",
+   "est_min": 46
+  },
+  {
+   "task": "mashumaro-flattened-dataclass-fields",
+   "est_min": 46
+  },
+  {
+   "task": "tomlkit-toml-table-converters",
+   "est_min": 45
+  },
+  {
+   "task": "textual-kitty-key-phases",
+   "est_min": 45
+  },
+  {
+   "task": "vulture-persistent-analysis-cache",
+   "est_min": 45
+  },
+  {
+   "task": "wazero-multi-module-snapshots",
+   "est_min": 45
+  },
+  {
+   "task": "koota-deferred-mutation-buffer",
+   "est_min": 43
+  },
+  {
+   "task": "scc-bounded-memory-spilling",
+   "est_min": 43
+  },
+  {
+   "task": "sqlfmt-create-table-ddl-formatting",
+   "est_min": 41
+  },
+  {
+   "task": "kea-atomic-signal-selectors",
+   "est_min": 41
+  },
+  {
+   "task": "helm-unified-manifest-stream",
+   "est_min": 39
+  },
+  {
+   "task": "sqlite-utils-safe-import-checkpoints",
+   "est_min": 39
+  },
+  {
+   "task": "mnamer-daemon-watch-lifecycle",
+   "est_min": 38
+  },
+  {
+   "task": "go-critic-doc-link-checker",
+   "est_min": 38
+  },
+  {
+   "task": "dateutil-rfc5545-timezone-interop",
+   "est_min": 38
+  },
+  {
+   "task": "aiomonitor-task-snapshots-diff",
+   "est_min": 35
+  },
+  {
+   "task": "kysely-window-grouping-helpers",
+   "est_min": 35
+  },
+  {
+   "task": "gql-incremental-graphql-delivery",
+   "est_min": 35
+  },
+  {
+   "task": "obsidian-linter-scoped-ignore-markers",
+   "est_min": 34
+  },
+  {
+   "task": "adaptix-name-mapping-aliases",
+   "est_min": 34
+  },
+  {
+   "task": "ipython-session-bundle-replay",
+   "est_min": 33
+  },
+  {
+   "task": "kombu-virtual-queue-dead-lettering",
+   "est_min": 32
+  },
+  {
+   "task": "cliffy-config-file-parsing",
+   "est_min": 32
+  },
+  {
+   "task": "yjs-map-conflict-detection",
+   "est_min": 32
+  },
+  {
+   "task": "etree-xml-diff-patch",
+   "est_min": 32
+  },
+  {
+   "task": "expr-try-catch-errors",
+   "est_min": 31
+  },
+  {
+   "task": "meriyah-explicit-resource-declarations",
+   "est_min": 31
+  },
+  {
+   "task": "pest-character-class-coalescing",
+   "est_min": 31
+  },
+  {
+   "task": "fd-deterministic-multi-key-sorting",
+   "est_min": 29
+  },
+  {
+   "task": "bandit-structured-nosec-directives",
+   "est_min": 29
+  },
+  {
+   "task": "updo-policy-alerting",
+   "est_min": 28
+  },
+  {
+   "task": "true-myth-iterable-collection-combinators",
+   "est_min": 28
+  },
+  {
+   "task": "httpx-streaming-json-iteration",
+   "est_min": 28
+  },
+  {
+   "task": "katex-multicolumn-array-spans",
+   "est_min": 28
+  },
+  {
+   "task": "httpx-deterministic-cookie-store",
+   "est_min": 28
+  },
+  {
+   "task": "httpx-multipart-response-parsing",
+   "est_min": 28
+  },
+  {
+   "task": "abs-module-cache-flags",
+   "est_min": 28
+  },
+  {
+   "task": "participle-grammar-conflict-analysis",
+   "est_min": 27
+  },
+  {
+   "task": "testem-per-launcher-reports",
+   "est_min": 26
+  },
+  {
+   "task": "obsidian-linter-auto-table-of-contents",
+   "est_min": 26
+  },
+  {
+   "task": "returns-validated-error-accumulation",
+   "est_min": 25
+  },
+  {
+   "task": "effect-sse-httpapi-streaming",
+   "est_min": 25
+  },
+  {
+   "task": "bandit-incremental-cache-control",
+   "est_min": 24
+  },
+  {
+   "task": "obsidian-linter-link-format-conversion",
+   "est_min": 24
+  },
+  {
+   "task": "fastapi-deprecation-response-headers",
+   "est_min": 23
+  },
+  {
+   "task": "sql-formatter-bigquery-pipe-formatting",
+   "est_min": 23
+  },
+  {
+   "task": "claude-code-by-agents-recursive-delegation",
+   "est_min": 23
+  },
+  {
+   "task": "ytt-jsonpath-query-api",
+   "est_min": 23
+  },
+  {
+   "task": "koota-entity-snapshot-rollback",
+   "est_min": 22
+  },
+  {
+   "task": "bandit-interprocedural-taint-checks",
+   "est_min": 22
+  },
+  {
+   "task": "superjson-error-stack-serialization",
+   "est_min": 22
+  },
+  {
+   "task": "csstree-shorthand-expansion-compression",
+   "est_min": 21
+  },
+  {
+   "task": "mobly-grouped-test-barriers",
+   "est_min": 21
+  },
+  {
+   "task": "awilix-async-container-initialization",
+   "est_min": 21
+  },
+  {
+   "task": "task-task-graph-export",
+   "est_min": 21
+  },
+  {
+   "task": "ts-pattern-match-each",
+   "est_min": 20
+  },
+  {
+   "task": "igel-persist-feature-schema",
+   "est_min": 20
+  },
+  {
+   "task": "anko-typed-variable-bindings",
+   "est_min": 20
+  },
+  {
+   "task": "psd-tools-blend-range-api",
+   "est_min": 20
+  },
+  {
+   "task": "clack-async-autocomplete-options",
+   "est_min": 20
+  },
+  {
+   "task": "onedump-dump-encryption-pipeline",
+   "est_min": 19
+  },
+  {
+   "task": "dasel-html-document-format",
+   "est_min": 18
+  },
+  {
+   "task": "go-genai-streamed-function-args",
+   "est_min": 17
+  },
+  {
+   "task": "termenv-preserve-ansi-resets",
+   "est_min": 16
+  },
+  {
+   "task": "ofetch-per-origin-circuit-breaker",
+   "est_min": 13
+  },
+  {
+   "task": "abs-stepped-slices",
+   "est_min": 13
+  }
+ ],
+ "tb2": [
+  {
+   "task": "fix-ocaml-gc",
+   "est_min": 63
+  },
+  {
+   "task": "train-fasttext",
+   "est_min": 60
+  },
+  {
+   "task": "sam-cell-seg",
+   "est_min": 53
+  },
+  {
+   "task": "circuit-fibsqrt",
+   "est_min": 52
+  },
+  {
+   "task": "regex-chess",
+   "est_min": 50
+  },
+  {
+   "task": "schemelike-metacircular-eval",
+   "est_min": 44
+  },
+  {
+   "task": "winning-avg-corewars",
+   "est_min": 43
+  },
+  {
+   "task": "video-processing",
+   "est_min": 41
+  },
+  {
+   "task": "reshard-c4-data",
+   "est_min": 38
+  },
+  {
+   "task": "install-windows-3.11",
+   "est_min": 35
+  },
+  {
+   "task": "filter-js-from-html",
+   "est_min": 35
+  },
+  {
+   "task": "llm-inference-batching-scheduler",
+   "est_min": 35
+  },
+  {
+   "task": "feal-differential-cryptanalysis",
+   "est_min": 34
+  },
+  {
+   "task": "rstan-to-pystan",
+   "est_min": 34
+  },
+  {
+   "task": "dna-assembly",
+   "est_min": 34
+  },
+  {
+   "task": "mcmc-sampling-stan",
+   "est_min": 34
+  },
+  {
+   "task": "path-tracing-reverse",
+   "est_min": 33
+  },
+  {
+   "task": "dna-insert",
+   "est_min": 33
+  },
+  {
+   "task": "feal-linear-cryptanalysis",
+   "est_min": 33
+  },
+  {
+   "task": "query-optimize",
+   "est_min": 32
+  },
+  {
+   "task": "make-mips-interpreter",
+   "est_min": 32
+  },
+  {
+   "task": "extract-moves-from-video",
+   "est_min": 32
+  },
+  {
+   "task": "compile-compcert",
+   "est_min": 31
+  },
+  {
+   "task": "mailman",
+   "est_min": 30
+  },
+  {
+   "task": "mteb-leaderboard",
+   "est_min": 27
+  },
+  {
+   "task": "mteb-retrieve",
+   "est_min": 27
+  },
+  {
+   "task": "model-extraction-relu-logits",
+   "est_min": 26
+  },
+  {
+   "task": "caffe-cifar-10",
+   "est_min": 25
+  },
+  {
+   "task": "financial-document-processor",
+   "est_min": 25
+  },
+  {
+   "task": "torch-pipeline-parallelism",
+   "est_min": 25
+  },
+  {
+   "task": "tune-mjcf",
+   "est_min": 24
+  },
+  {
+   "task": "large-scale-text-editing",
+   "est_min": 24
+  },
+  {
+   "task": "code-from-image",
+   "est_min": 24
+  },
+  {
+   "task": "protein-assembly",
+   "est_min": 23
+  },
+  {
+   "task": "crack-7z-hash",
+   "est_min": 23
+  },
+  {
+   "task": "pytorch-model-recovery",
+   "est_min": 23
+  },
+  {
+   "task": "path-tracing",
+   "est_min": 22
+  },
+  {
+   "task": "torch-tensor-parallelism",
+   "est_min": 20
+  },
+  {
+   "task": "gpt2-codegolf",
+   "est_min": 20
+  },
+  {
+   "task": "make-doom-for-mips",
+   "est_min": 20
+  },
+  {
+   "task": "chess-best-move",
+   "est_min": 20
+  },
+  {
+   "task": "portfolio-optimization",
+   "est_min": 20
+  },
+  {
+   "task": "gcode-to-text",
+   "est_min": 19
+  },
+  {
+   "task": "configure-git-webserver",
+   "est_min": 19
+  },
+  {
+   "task": "largest-eigenval",
+   "est_min": 19
+  },
+  {
+   "task": "write-compressor",
+   "est_min": 19
+  },
+  {
+   "task": "headless-terminal",
+   "est_min": 19
+  },
+  {
+   "task": "build-cython-ext",
+   "est_min": 19
+  },
+  {
+   "task": "polyglot-rust-c",
+   "est_min": 19
+  },
+  {
+   "task": "adaptive-rejection-sampler",
+   "est_min": 18
+  },
+  {
+   "task": "overfull-hbox",
+   "est_min": 18
+  },
+  {
+   "task": "raman-fitting",
+   "est_min": 18
+  },
+  {
+   "task": "sqlite-with-gcov",
+   "est_min": 18
+  },
+  {
+   "task": "password-recovery",
+   "est_min": 18
+  },
+  {
+   "task": "git-multibranch",
+   "est_min": 18
+  },
+  {
+   "task": "distribution-search",
+   "est_min": 17
+  },
+  {
+   "task": "cobol-modernization",
+   "est_min": 16
+  },
+  {
+   "task": "cancel-async-tasks",
+   "est_min": 16
+  },
+  {
+   "task": "regex-log",
+   "est_min": 16
+  },
+  {
+   "task": "sparql-university",
+   "est_min": 15
+  },
+  {
+   "task": "build-pov-ray",
+   "est_min": 15
+  },
+  {
+   "task": "build-pmars",
+   "est_min": 14
+  },
+  {
+   "task": "extract-elf",
+   "est_min": 14
+  },
+  {
+   "task": "bn-fit-modify",
+   "est_min": 14
+  },
+  {
+   "task": "db-wal-recovery",
+   "est_min": 14
+  },
+  {
+   "task": "break-filter-js-from-html",
+   "est_min": 14
+  },
+  {
+   "task": "pypi-server",
+   "est_min": 14
+  },
+  {
+   "task": "sqlite-db-truncate",
+   "est_min": 13
+  },
+  {
+   "task": "sanitize-git-repo",
+   "est_min": 13
+  },
+  {
+   "task": "merge-diff-arc-agi-task",
+   "est_min": 13
+  },
+  {
+   "task": "pytorch-model-cli",
+   "est_min": 12
+  },
+  {
+   "task": "hf-model-inference",
+   "est_min": 11
+  },
+  {
+   "task": "multi-source-data-merger",
+   "est_min": 11
+  },
+  {
+   "task": "custom-memory-heap-crash",
+   "est_min": 11
+  },
+  {
+   "task": "polyglot-c-py",
+   "est_min": 10
+  },
+  {
+   "task": "qemu-alpine-ssh",
+   "est_min": 10
+  },
+  {
+   "task": "nginx-request-logging",
+   "est_min": 8
+  },
+  {
+   "task": "modernize-scientific-stack",
+   "est_min": 8
+  },
+  {
+   "task": "prove-plus-comm",
+   "est_min": 8
+  },
+  {
+   "task": "count-dataset-tokens",
+   "est_min": 8
+  },
+  {
+   "task": "openssl-selfsigned-cert",
+   "est_min": 8
+  },
+  {
+   "task": "git-leak-recovery",
+   "est_min": 7
+  },
+  {
+   "task": "kv-store-grpc",
+   "est_min": 7
+  },
+  {
+   "task": "fix-git",
+   "est_min": 6
+  },
+  {
+   "task": "constraints-scheduling",
+   "est_min": 6
+  },
+  {
+   "task": "fix-code-vulnerability",
+   "est_min": 6
+  },
+  {
+   "task": "log-summary-date-ranges",
+   "est_min": 6
+  },
+  {
+   "task": "vulnerable-secret",
+   "est_min": 5
+  },
+  {
+   "task": "qemu-startup",
+   "est_min": 3
+  }
+ ]
+}
