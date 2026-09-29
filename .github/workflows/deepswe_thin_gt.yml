@@ -57,9 +57,6 @@ permissions:
   actions: read
   packages: read
 
-env:
-  DEEPSWE_REF: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9
-
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -70,7 +67,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: datacurve-ai/deep-swe
-          ref: ${{ env.DEEPSWE_REF }}
+          ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9  # pinned deep-swe task set
           path: deepswe-bench
       - id: plan
         env:
@@ -113,7 +110,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: datacurve-ai/deep-swe
-          ref: ${{ env.DEEPSWE_REF }}
+          ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9  # pinned deep-swe task set
           path: deepswe-bench
       - name: Serve the task image from the GHCR mirror
         env:
