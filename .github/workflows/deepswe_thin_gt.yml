@@ -123,10 +123,14 @@ jobs:
           [ -f "$TOML" ] || { echo "::notice::no task.toml for ${TASK}"; exit 0; }
           SRC_IMG=$(grep -oE 'docker_image[[:space:]]*=[[:space:]]*"[^"]+"' "$TOML" | head -1 | cut -d'"' -f2)
           [ -n "$SRC_IMG" ] || exit 0
-          MIRROR="${GHCR_PREFIX}/${SRC_IMG##*/}"
+          # deepswe_cache_images.yml mirrors every task image as deepswe-v1-1:<original tag>.
+          MIRROR="${GHCR_PREFIX}/deepswe-v1-1:${SRC_IMG##*:}"
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null 2>&1 || true
           if docker pull "$MIRROR" >/dev/null 2>&1; then
             docker tag "$MIRROR" "$SRC_IMG"
+            echo "task image served from the GHCR mirror: $MIRROR"
+          else
+            echo "::warning::no GHCR mirror for $SRC_IMG - falling back to public ECR (capped for shared runner IPs)"
           fi
       - uses: actions/setup-python@v5
         with:
