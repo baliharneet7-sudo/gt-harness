@@ -1,0 +1,209 @@
+# Terminal-Bench 2.0, GT attached the GitNexus way, on the baseline's harness.
+#
+# The per-task job is the space-bunny GT-off baseline's job (embed-bakeoff
+# tb2_miniswe_central.yml @ 8e94abf9, "Run harbor ... (gt_off baseline)"):
+# harbor 0.20.0, OpenRouter credential, task image from the GHCR mirror,
+# `harbor run -d terminal-bench@2.0 ... --agent-timeout-multiplier 1.0 -n 1 -y`.
+# Differences, and only these:
+#   * agent: eval.miniswe_thin_agent:MiniSweThinGtAgent (identical install;
+#     the runner builds GTAttachedAgent = DefaultAgent + GT observations);
+#   * --agent-setup-timeout-multiplier: setup also builds the task's graph
+#     (GitNexus builds its index before the agent starts, too).
+# No GT-off arm: the baseline is frozen (D:\gt_baselines\space_bunny_alpha\tb2).
+name: TB2 thin GT (baseline harness)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: 'JSON list of TB2 task names, or "all" for the 89'
+        required: true
+        default: '["hf-model-inference","nginx-request-logging","pypi-server","tune-mjcf","chess-best-move"]'
+      model:
+        description: Model id (OpenRouter)
+        required: true
+        default: stealth/space-bunny-alpha
+      parallel:
+        description: Concurrent task jobs
+        required: true
+        default: "20"
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tasks: ${{ steps.plan.outputs.tasks }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: plan
+        env:
+          TASKS: ${{ inputs.tasks }}
+        run: |
+          set -euo pipefail
+          if [ "$TASKS" = "all" ]; then
+            python -m pip install -q "harbor==0.20.0"
+            harbor dataset download terminal-bench@2.0 -o ds --export >/dev/null
+            TASKS=$(python -c 'import json,os; print(json.dumps(sorted(os.listdir("ds/terminal-bench"))))')
+          fi
+          python - <<'PY'
+          import json, os
+          tasks = json.loads(os.environ["TASKS"])
+          assert isinstance(tasks, list) and tasks and all(isinstance(t, str) and t for t in tasks)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("tasks=" + json.dumps(tasks) + "\n")
+          print(len(tasks), "tasks")
+          PY
+
+  run:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.parallel) }}
+      matrix:
+        task: ${{ fromJson(needs.plan.outputs.tasks) }}
+    env:
+      PYTHONUTF8: "1"
+      GH_TOKEN: ${{ github.token }}
+      MSWEA_SILENT_STARTUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bind OpenRouter credential (as the baseline)
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_NEW }}
+        run: |
+          echo "::add-mask::$OPENROUTER_KEY"
+          echo "OPENAI_API_KEY=$OPENROUTER_KEY" >> "$GITHUB_ENV"
+          echo "OPENAI_BASE_URL=https://openrouter.ai/api/v1" >> "$GITHUB_ENV"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af
+      - name: Ensure Docker daemon is available
+        run: |
+          set -euo pipefail
+          sudo systemctl start docker
+          docker info >/dev/null
+      - name: Authenticate to Docker Hub
+        uses: docker/login-action@v3
+        continue-on-error: true
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME_ROTATION }}
+          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKERHUB_TOKEN_ROTATION }}
+      - name: Install harness + harbor
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            python -m pip install -q --upgrade pip && \
+            python -m pip install -q -e . "harbor==0.20.0" vendor/groundtruth_mcp-*.whl && break
+            echo "install attempt $attempt failed; retrying"; sleep 20
+          done
+          python -c "import eval.miniswe_thin_agent, harbor"
+      - name: Sanitize API keys
+        run: |
+          python - <<'EOF'
+          import os, sys
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              for name in ("OPENAI_API_KEY",):
+                  clean = (os.environ.get(name) or "").replace("\ufeff", "").strip()
+                  if not clean:
+                      continue
+                  if not clean.isascii():
+                      sys.exit(f"{name} holds non-ASCII characters")
+                  print(f"::add-mask::{clean}")
+                  f.write(f"{name}={clean}\n")
+          EOF
+      - name: Pull task image from the GHCR mirror
+        id: ghcr
+        env:
+          TASK: ${{ matrix.task }}
+          IMAGE_TAG: "20251031"
+          GHCR_PREFIX: ghcr.io/${{ github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -uo pipefail
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null 2>&1 || true
+          SRC="${GHCR_PREFIX}/tb2.${TASK}:${IMAGE_TAG}"
+          if docker pull "$SRC" >/dev/null 2>&1; then
+            docker tag "$SRC" "alexgshaw/${TASK}:${IMAGE_TAG}"
+            echo "hit=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=0" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Restore task image from cache
+        id: restore
+        if: steps.ghcr.outputs.hit != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/tb2-img.tar.gz
+          key: tb2-img-${{ matrix.task }}-20251031
+      - name: Load cached task image
+        if: steps.ghcr.outputs.hit != '1' && steps.restore.outputs.cache-hit == 'true'
+        run: docker load -i "${{ runner.temp }}/tb2-img.tar.gz"
+      - name: Run harbor - task ${{ matrix.task }} (thin GT)
+        env:
+          MODEL: ${{ inputs.model }}
+          DATASET: terminal-bench@2.0
+          TASK: ${{ matrix.task }}
+        run: |
+          set -euo pipefail
+          MULT=$(python -c "from eval.miniswe_thin_agent import SETUP_TIMEOUT_MULTIPLIER as m; print(m)")
+          harbor run \
+            -d "$DATASET" \
+            --agent-import-path eval.miniswe_thin_agent:MiniSweThinGtAgent \
+            -m "$MODEL" \
+            -o results/terminal-bench \
+            --job-name "tb2-thin-${GITHUB_RUN_ID}-${TASK}" \
+            --agent-timeout-multiplier 1.0 \
+            --agent-setup-timeout-multiplier "$MULT" \
+            -n 1 \
+            -y \
+            -i "$TASK"
+      - name: Fix artifact permissions
+        if: always()
+        run: sudo chmod -R a+r results 2>/dev/null || true
+      - name: Upload task result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tb2-thin-${{ github.run_id }}-task-${{ matrix.task }}
+          path: results/terminal-bench/
+          if-no-files-found: warn
+
+  merge:
+    needs: [plan, run]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tb2-thin-${{ github.run_id }}-task-*
+          path: all
+      - name: Summarize
+        env:
+          TASKS: ${{ needs.plan.outputs.tasks }}
+        run: python scripts/summarize_thin_run.py --root all --tasks "$TASKS" --out thin-summary
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tb2-thin-${{ github.run_id }}-SUMMARY
+          path: thin-summary/

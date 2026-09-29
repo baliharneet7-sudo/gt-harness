@@ -176,6 +176,9 @@ class AttachedDelivery:
 
     plan_bytes_delivered: int = 0
     plan_features: tuple[str, ...] = ()
+    #: The thin (GitNexus-shaped) arm turns the task-start plan off; gt-plan
+    #: stays callable (gt_engine.thin_agent).
+    deliver_plan: bool = True
 
     #: Turns between delivery checkpoints into the metrics file (see
     #: scripts/miniswe_gt_run.py _checkpoint_report).
@@ -230,7 +233,7 @@ class AttachedDelivery:
         as soon as a current graph exists (see ``attached_plan``)."""
         from gt_engine.tool_server import EXIT_ANSWER, plan_holder
 
-        if getattr(self, "session", None) is None:
+        if getattr(self, "session", None) is None or not self.deliver_plan:
             return outputs
         holder = plan_holder(self.session)
         if holder.delivered or holder.failed:

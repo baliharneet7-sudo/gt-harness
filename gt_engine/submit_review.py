@@ -34,9 +34,22 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from gt_engine.gt_session import GTSession
 
-MAX_REVIEW_BYTES = 6000
+# Shown once per task, so it may be long; the rows a run misses are the
+# limiting ones (kysely, koota, fastapi in run 36450157395), and the old 6000-byte
+# cut dropped them from the tail.
+MAX_REVIEW_BYTES = 12000
 MAX_PROSE_ROWS = 12
 MAX_TESTS_SHOWN = 6
+
+# Sentences that exclude or bound something. A misread one passes the agent's
+# own tests. Kept to negations and limits: "must"/"default"/"order" appear in
+# most sentences of a spec and would tag every row (bandit: 14 of 17).
+_CONSTRAINT = re.compile(
+    r"\b(?:not|never|only|without|instead of|at least|at most|exactly|no longer|"
+    r"nearest|precedence|unless|except|rather than)\b|n't\b", re.I)
+# A call signature the task names: `tap(task, fn)`, `lag(column, offset=None)`.
+_SIGNATURE = re.compile(r"^([A-Za-z_][\w.]*)\s*\(([^()]*)\)$")
+_PARAM_NAME = re.compile(r"^\s*(?:\.\.\.|\*{1,2})?([A-Za-z_]\w*)")
 
 _BACKTICK = re.compile(r"`([^`\n]{2,80})`")
 _QUOTED = re.compile(r"""(?<![\w'"])(['"])([^'"\n]{2,60})\1(?![\w'"])""")
@@ -66,10 +79,26 @@ class ReviewRow:
     text: str
     literals: tuple[str, ...]
     missing: tuple[str, ...] = ()
+    # "task: tap(task, fn); yours: tap(fn, task)" for each named signature the
+    # change defines with a different parameter order.
+    shapes: tuple[str, ...] = ()
 
     @property
     def checkable(self) -> bool:
         return bool(self.literals)
+
+    @property
+    def constraint(self) -> bool:
+        return bool(_CONSTRAINT.search(self.text))
+
+    def line(self, index: int) -> str:
+        tag = "[constraint] " if self.constraint else ""
+        notes = ""
+        if self.missing:
+            notes += f"   [not in your changes: {', '.join(self.missing)}]"
+        for shape in self.shapes:
+            notes += f"   [{shape}]"
+        return f"{index}. {tag}{self.text}{notes}"
 
 
 @dataclass
@@ -93,20 +122,44 @@ class SubmitReview:
                 "confirm your change implements it and a test asserts it with the values the "
                 "task states (names, order, messages, precedence) - not values copied from your "
                 "own output. Fix what is missing, then submit again; this review appears once.")
-        lines = [head, ""]
-        for index, row in enumerate(self.rows, start=1):
-            note = f"   [not in your changes: {', '.join(row.missing)}]" if row.missing else ""
-            lines.append(f"{index}. {row.text}{note}")
+        tail = []
         if self.tests:
-            lines.append("")
-            lines.append("Existing tests that reach the files you changed (run them): "
-                         + ", ".join(self.tests[:MAX_TESTS_SHOWN]))
-        text = "\n".join(lines)
+            tail = ["", "Existing tests that reach the files you changed (run them): "
+                    + ", ".join(self.tests[:MAX_TESTS_SHOWN])]
+        rendered = {index: row.line(index) for index, row in enumerate(self.rows, start=1)}
+        # Over the cap, plain rows go first (last to first), never a flagged
+        # or limiting one, and the dropped numbers are named.
+        droppable = [index for index, row in enumerate(self.rows, start=1)
+                     if not (row.missing or row.shapes or row.constraint)]
+        dropped: list[int] = []
+
+        def compose() -> str:
+            notice = ([f"... requirements {_ranges(dropped)} not shown "
+                       "(plain descriptions; re-read them in the task)"] if dropped else [])
+            return "\n".join([head, "", *rendered.values(), *notice, *tail])
+
+        text = compose()
+        while droppable and len(text.encode("utf-8")) > MAX_REVIEW_BYTES:
+            index = droppable.pop()
+            dropped.append(index)
+            del rendered[index]
+            text = compose()
         encoded = text.encode("utf-8")
         if len(encoded) <= MAX_REVIEW_BYTES:
             return text
         return encoded[:MAX_REVIEW_BYTES].decode("utf-8", "ignore").rsplit("\n", 1)[0] + \
             "\n... (more requirements in the task text; re-read it)"
+
+
+def _ranges(numbers: list[int]) -> str:
+    """[3, 4, 5, 9] -> '3-5, 9'."""
+    spans: list[tuple[int, int]] = []
+    for number in sorted(numbers):
+        if spans and spans[-1][1] == number - 1:
+            spans[-1] = (spans[-1][0], number)
+        else:
+            spans.append((number, number))
+    return ", ".join(f"{a}-{b}" if a != b else str(a) for a, b in spans)
 
 
 def literals_of(text: str) -> tuple[str, ...]:
@@ -148,7 +201,11 @@ def requirement_lines(issue_text: str) -> list[str]:
             sentence = sentence.strip()
             if sentence.lower().startswith("please solve this issue:"):
                 sentence = sentence.split(":", 1)[1].strip()
-            if (_PLACEHOLDER_LINE.match(sentence) or len(sentence) < 12 or _CODE_LINE.search(sentence)
+            # Code quoted in backticks is part of a requirement ("a curried form
+            # `(task) => result`"), not a sign the line is code: true-myth's tap
+            # sentence was dropped whole for its `=>` (run 36450157395).
+            prose = _BACKTICK.sub("`x`", sentence)
+            if (_PLACEHOLDER_LINE.match(sentence) or len(sentence) < 12 or _CODE_LINE.search(prose)
                     or _PROCESS.search(sentence) or sentence in rows):
                 continue
             rows.append(sentence)
@@ -168,12 +225,68 @@ def _present(literal: str, haystack: str) -> bool:
     return bool(atoms) and all(atom in haystack for atom in atoms)
 
 
+def _param_names(params: str) -> tuple[str, ...]:
+    """Parameter names of a signature, types/defaults dropped. Brackets inside
+    types (``fn: (v: T) => void``) are skipped when splitting on commas."""
+    names: list[str] = []
+    depth, current = 0, ""
+    for char in params + ",":
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}>" and depth:
+            depth -= 1
+        if char == "," and depth == 0:
+            match = _PARAM_NAME.match(current)
+            if match and match.group(1) not in {"self", "cls", "this"}:
+                names.append(match.group(1))
+            current = ""
+        else:
+            current += char
+    return tuple(names)
+
+
+def _definitions(name: str, added_text: str) -> list[tuple[str, ...]]:
+    """Parameter lists of every definition of ``name`` in the added code
+    (def / function / fn / func / method / arrow assignment)."""
+    short = re.escape(name.rsplit(".", 1)[-1])
+    head = re.compile(
+        rf"(?:\b(?:def|function|fn|func)\s+{short}|(?:^|[\s;]){short}\s*[:=]\s*(?:async\s*)?(?:function\s*)?"
+        rf"|^\s*(?:(?:public|private|protected|static|async|export|override)\s+)*{short})\s*(?:<[^()]*?>)?\s*\(",
+        re.M)
+    found: list[tuple[str, ...]] = []
+    for match in head.finditer(added_text):
+        depth, end = 1, match.end()
+        while end < len(added_text) and depth:
+            depth += {"(": 1, ")": -1}.get(added_text[end], 0)
+            end += 1
+        found.append(_param_names(added_text[match.end():end - 1]))
+    return found
+
+
+def _shape_notes(literals: tuple[str, ...], added_text: str) -> tuple[str, ...]:
+    notes: list[str] = []
+    for literal in literals:
+        match = _SIGNATURE.match(literal)
+        if not match:
+            continue
+        wanted = _param_names(match.group(2))
+        defined = [params for params in _definitions(match.group(1), added_text) if params]
+        if len(wanted) < 2 or not defined or wanted in defined:
+            continue
+        short = match.group(1).rsplit(".", 1)[-1]
+        # Of several overloads, the one with the task's arity is the contrast that matters.
+        closest = next((params for params in defined if len(params) == len(wanted)), defined[0])
+        notes.append(f"task: {short}({', '.join(wanted)}); yours: {short}({', '.join(closest)})")
+    return tuple(notes)
+
+
 def build_review(issue_text: str, added_text: str, tests: list[str] | None = None) -> SubmitReview:
     review = SubmitReview(tests=list(tests or []))
     for text in requirement_lines(issue_text):
         literals = literals_of(text)
         missing = tuple(lit for lit in literals if not _present(lit, added_text))
-        review.rows.append(ReviewRow(text=text, literals=literals, missing=missing))
+        review.rows.append(ReviewRow(text=text, literals=literals, missing=missing,
+                                     shapes=_shape_notes(literals, added_text)))
     return review
 
 

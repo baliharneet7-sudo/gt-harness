@@ -1,0 +1,228 @@
+# DeepSWE v1.1, GT attached the GitNexus way, on the baseline's harness.
+#
+# The per-task job is the space-bunny GT-off baseline's job (embed-bakeoff
+# deepswe_miniswe_central.yml @ 086fb8e5, "Run bare mini-swe-agent on DeepSWE
+# task (gt_off baseline)"): pinned datacurve-ai/deep-swe 435ee89e, GHCR image
+# mirror, the task budget from the baseline's own resolver at multiplier 1.0,
+# `timeout <budget> harbor run -p deepswe-bench/tasks ... --allow-agent-host
+# openrouter.ai --ae OPENAI_* --ae GT_STEP_LIMIT -n 1 -y`, the same
+# infra-only retry. Differences, and only these:
+#   * agent: eval.miniswe_thin_agent:MiniSweThinGtAgent (identical install;
+#     the runner builds GTAttachedAgent = DefaultAgent + GT observations);
+#   * setup builds the task's graph: --agent-setup-timeout-multiplier, and
+#     the outer `timeout` gets the same build allowance on top of the budget.
+# No GT-off arm: the baseline is frozen (D:\gt_baselines\space_bunny_alpha\deepswe).
+name: DeepSWE thin GT (baseline harness)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: 'JSON list of DeepSWE task names, or "all" for the pinned set'
+        required: true
+        default: '["true-myth-iterable-collection-combinators","kysely-window-grouping-helpers","fastapi-deprecation-response-headers","testem-bail-on-test-failure","superjson-error-stack-serialization"]'
+      model:
+        description: Model id (OpenRouter)
+        required: true
+        default: stealth/space-bunny-alpha
+      step_limit:
+        description: Agent step limit (baseline run 5 used 300)
+        required: true
+        default: "300"
+      parallel:
+        description: Concurrent task jobs
+        required: true
+        default: "20"
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+env:
+  DEEPSWE_REF: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tasks: ${{ steps.plan.outputs.tasks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: datacurve-ai/deep-swe
+          ref: ${{ env.DEEPSWE_REF }}
+          path: deepswe-bench
+      - id: plan
+        env:
+          TASKS: ${{ inputs.tasks }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          raw = os.environ["TASKS"]
+          available = sorted(p.parent.name for p in Path("deepswe-bench/tasks").glob("*/task.toml"))
+          tasks = available if raw == "all" else json.loads(raw)
+          unknown = [t for t in tasks if t not in available]
+          if unknown:
+              raise SystemExit(f"unknown DeepSWE tasks: {unknown}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("tasks=" + json.dumps(tasks) + "\n")
+          print(len(tasks), "tasks")
+          PY
+
+  run:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.parallel) }}
+      matrix:
+        task: ${{ fromJson(needs.plan.outputs.tasks) }}
+    env:
+      PYTHONUTF8: "1"
+      MSWEA_SILENT_STARTUP: "1"
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
+      MODEL: ${{ inputs.model }}
+      TASK: ${{ matrix.task }}
+      STEP_LIMIT: ${{ inputs.step_limit }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout pinned DeepSWE task set
+        uses: actions/checkout@v4
+        with:
+          repository: datacurve-ai/deep-swe
+          ref: ${{ env.DEEPSWE_REF }}
+          path: deepswe-bench
+      - name: Serve the task image from the GHCR mirror
+        env:
+          GHCR_PREFIX: ghcr.io/${{ github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -uo pipefail
+          TOML="deepswe-bench/tasks/${TASK}/task.toml"
+          [ -f "$TOML" ] || { echo "::notice::no task.toml for ${TASK}"; exit 0; }
+          SRC_IMG=$(grep -oE 'docker_image[[:space:]]*=[[:space:]]*"[^"]+"' "$TOML" | head -1 | cut -d'"' -f2)
+          [ -n "$SRC_IMG" ] || exit 0
+          MIRROR="${GHCR_PREFIX}/${SRC_IMG##*/}"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null 2>&1 || true
+          if docker pull "$MIRROR" >/dev/null 2>&1; then
+            docker tag "$MIRROR" "$SRC_IMG"
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install harness + harbor
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            python -m pip install -q --upgrade pip && \
+            python -m pip install -q -e . "harbor==0.20.0" vendor/groundtruth_mcp-*.whl && break
+            echo "install attempt $attempt failed; retrying"; sleep 20
+          done
+          python -c "import eval.miniswe_thin_agent, harbor"
+      - name: Bind OpenRouter credential (as the baseline)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              raw = os.environ.get("OPENROUTER_API_KEY") or ""
+              clean = raw.replace("\ufeff", "").strip()
+              if not clean or not clean.isascii():
+                  raise SystemExit("OPENROUTER key missing or non-ASCII")
+              print(f"::add-mask::{clean}")
+              out.write(f"OPENAI_API_KEY={clean}\n")
+              out.write("OPENAI_BASE_URL=https://openrouter.ai/api/v1\n")
+          PY
+          case "$MODEL" in
+            openai/*) echo "GT_LITELLM_MODEL=$MODEL" >> "$GITHUB_ENV" ;;
+            *) echo "GT_LITELLM_MODEL=openai/$MODEL" >> "$GITHUB_ENV" ;;
+          esac
+      - name: Resolve exact DeepSWE task budget (the baseline's resolver)
+        run: |
+          set -euo pipefail
+          python scripts/resolve_harbor_budget_baseline.py \
+            --task-config "deepswe-bench/tasks/$TASK/task.toml" \
+            --multiplier 1.0 --output "deepswe-budget-$TASK.json"
+          AGENT_TIMEOUT_SEC=$(python -c 'import json,sys; print(int(json.load(open(sys.argv[1], encoding="utf-8"))["execution_budget_sec"]))' "deepswe-budget-$TASK.json")
+          BUILD_ALLOWANCE=$(python -c "from eval.miniswe_thin_agent import PREBUILD_TIMEOUT_SECONDS as s; print(int(s))")
+          echo "AGENT_TIMEOUT_SEC=$AGENT_TIMEOUT_SEC" >> "$GITHUB_ENV"
+          echo "OUTER_TIMEOUT_SEC=$((AGENT_TIMEOUT_SEC + BUILD_ALLOWANCE))" >> "$GITHUB_ENV"
+          echo "SETUP_MULT=$(python -c 'from eval.miniswe_thin_agent import SETUP_TIMEOUT_MULTIPLIER as m; print(m)')" >> "$GITHUB_ENV"
+      - name: Run thin GT on DeepSWE task
+        run: |
+          set -uo pipefail
+          mkdir -p results/deepswe
+          JOB_NAME="deepswe-thin-${GITHUB_RUN_ID}-${TASK}"
+          run_task() {
+            timeout --signal=TERM --kill-after=30s "${OUTER_TIMEOUT_SEC}s" harbor run \
+              -p deepswe-bench/tasks \
+              --agent-import-path eval.miniswe_thin_agent:MiniSweThinGtAgent \
+              -m "$GT_LITELLM_MODEL" -o results/deepswe \
+              --job-name "$JOB_NAME" \
+              --agent-timeout-multiplier 1.0 \
+              --agent-setup-timeout-multiplier "$SETUP_MULT" \
+              --allow-agent-host openrouter.ai \
+              --ae "OPENAI_API_KEY=${OPENAI_API_KEY}" \
+              --ae "OPENAI_BASE_URL=${OPENAI_BASE_URL}" \
+              --ae "GT_STEP_LIMIT=${STEP_LIMIT}" \
+              -n 1 -y -i "$TASK"
+          }
+          set +e
+          run_task 2>&1 | tee deepswe-task.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ] && ! find results/deepswe -name "*.json" -print -quit | grep -q .; then
+            echo "infra-only retry: no results produced"
+            sleep 120
+            mkdir -p results/deepswe-infra-attempt-1
+            find results/deepswe -mindepth 1 -maxdepth 1 -exec mv -t results/deepswe-infra-attempt-1 -- {} + 2>/dev/null || true
+            set +e
+            run_task 2>&1 | tee -a deepswe-task.log
+            status=${PIPESTATUS[0]}
+            set -e
+          fi
+          exit "$status"
+      - name: Fix artifact permissions
+        if: always()
+        run: sudo chmod -R a+r results 2>/dev/null || true
+      - name: Upload task evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepswe-thin-${{ github.run_id }}-${{ matrix.task }}
+          path: |
+            results/deepswe/
+            results/deepswe-infra-attempt-1/
+            deepswe-budget-${{ matrix.task }}.json
+            deepswe-task.log
+          if-no-files-found: warn
+
+  merge:
+    needs: [plan, run]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deepswe-thin-${{ github.run_id }}-*
+          path: all
+      - name: Summarize
+        env:
+          TASKS: ${{ needs.plan.outputs.tasks }}
+        run: python scripts/summarize_thin_run.py --root all --tasks "$TASKS" --out thin-summary
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deepswe-thin-${{ github.run_id }}-SUMMARY
+          path: thin-summary/

@@ -3986,7 +3986,8 @@ class MiniSweAdapter(GroundtruthController):
         never fatal.
         """
         if (
-            not self.engine_state.graph_current
+            not getattr(self, "lsp_promotion_enabled", True)
+            or not self.engine_state.graph_current
             or self._lsp_active is not None
             or self._latest_workspace_snapshot is None
             or self._lsp_churn_defer_until > time.monotonic()
