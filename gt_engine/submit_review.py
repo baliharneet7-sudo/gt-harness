@@ -114,7 +114,7 @@ class SubmitReview:
     def prose(self) -> list[ReviewRow]:
         return [row for row in self.rows if not row.checkable]
 
-    def render(self) -> str:
+    def render(self, lean: bool = False) -> str:
         """Every requirement sentence, numbered, once. Shown in full because
         the requirement a run misses is not predictable: all 7 misses in run
         36359464192 were ordinary sentences, 3 of them inside one paragraph."""
@@ -122,6 +122,9 @@ class SubmitReview:
                 "confirm your change implements it and a test asserts it with the values the "
                 "task states (names, order, messages, precedence) - not values copied from your "
                 "own output. Fix what is missing, then submit again; this review appears once.")
+        if lean:
+            head += (" Lines marked [not in your changes] or [task: ...; yours: ...] are the ones "
+                     "to check first; if every line is already implemented and tested, submit again now.")
         tail = []
         if self.tests:
             tail = ["", "Existing tests that reach the files you changed (run them): "
@@ -340,7 +343,29 @@ def session_review(session: "GTSession", baseline: str) -> str:
     except Exception:  # noqa: BLE001 - tests are advisory
         tests = []
     review = build_review(issue, added_text_since(root, baseline), tests)
-    return review.render() if review.rows else ""
+    if not review.rows:
+        return ""
+    if review_mode() == "flagged":
+        # Lean review: the post-review tail was 15.7% of GT's tokens on
+        # SWE-Live Lite (run 36512659501/36512661736) while the solve lift was
+        # the same whether or not the agent edited after it. Hold the submit
+        # only when the review found something concrete to fix.
+        if not any(row.missing or row.shapes for row in review.rows):
+            return ""
+        return review.render(lean=True)
+    return review.render()
+
+
+REVIEW_MODE_ENV = "GT_SUBMIT_REVIEW_MODE"
+
+
+def review_mode() -> str:
+    """``always`` (hold the first submit with the full review) or ``flagged``
+    (hold it only when a requirement literal or signature is missing)."""
+    import os
+
+    mode = os.environ.get(REVIEW_MODE_ENV, "always").strip().lower()
+    return mode if mode in ("always", "flagged") else "always"
 
 
 __all__ = ["SubmitReview", "build_review", "literals_of", "requirement_lines", "session_review"]

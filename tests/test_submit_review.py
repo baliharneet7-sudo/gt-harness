@@ -145,3 +145,25 @@ def test_issue_template_placeholders_are_not_requirements():
                              "### Additional information\n_No response_\nN/A\n")
     assert rows == ["Add a get_value function for FSMContext that takes value by key"]
 
+
+
+def test_flagged_mode_holds_only_when_something_concrete_is_missing(monkeypatch, tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+
+    from gt_engine.submit_review import session_review
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i"], check=True)
+    head = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    session = SimpleNamespace(_engine=SimpleNamespace(issue_text="Add `make_widget` that returns a widget.", repo_root=str(tmp_path)))
+    monkeypatch.setenv("GT_SUBMIT_REVIEW_MODE", "flagged")
+    (tmp_path / "a.py").write_text("x = 1\ndef other():\n    pass\n", encoding="utf-8")
+    held = session_review(session, head)
+    assert "make_widget" in held and "submit again now" in held  # the named function is missing: hold
+    (tmp_path / "a.py").write_text("x = 1\ndef make_widget():\n    return 1\n", encoding="utf-8")
+    assert session_review(session, head) == ""  # nothing concrete missing: no hold, no tail
+    monkeypatch.setenv("GT_SUBMIT_REVIEW_MODE", "always")
+    assert session_review(session, head).startswith("[GT] before you submit")
