@@ -4,7 +4,8 @@
 # same rep start together (max-parallel 2, parallel_per_arm jobs each), so both arms see
 # the same time window, runner pool and provider conditions. The next replicate starts
 # as soon as either arm of the current one finishes, which fills the tail of the other.
-# TB2 replicates start after the DeepSWE ones on the same account. Tasks run
+# DeepSWE and TB2 replicates are queued together: the account's runner pool (20
+# concurrent jobs) is the loop - each job starts the moment a slot frees. Tasks run
 # longest-first (config/replicate_task_order.json) so long jobs never form the tail.
 #
 # The baseline arm is GT-off: dispatch only on the user's explicit instruction
@@ -36,9 +37,9 @@ on:
         required: true
         default: stealth/space-bunny-alpha
       parallel_per_arm:
-        description: Concurrent task jobs per arm (two arms run together)
+        description: Concurrent task jobs per replicate; the account's runner queue (20 slots) starts queued jobs as slots free
         required: true
-        default: "10"
+        default: "20"
       deepswe_tasks_override:
         description: 'Canary only: JSON list of DeepSWE tasks instead of the full ordered set ("" = all)'
         required: false
@@ -135,8 +136,8 @@ jobs:
     secrets: inherit
 
   tb2:
-    needs: [order, deepswe]
-    if: always() && needs.order.result == 'success' && needs.order.outputs.tb2_matrix != '[]'
+    needs: order
+    if: needs.order.outputs.tb2_matrix != '[]'
     strategy:
       fail-fast: false
       max-parallel: 2
