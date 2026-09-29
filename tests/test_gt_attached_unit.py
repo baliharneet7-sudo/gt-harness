@@ -635,3 +635,38 @@ def test_task_message_workflow_and_example_make_gt_part_of_how_the_agent_works()
     assert "gt-query" in example and "ls -la" not in example
     assert jinja2.Template(text).render(task="T").startswith("Please solve this issue: T")
     assert attached_instance_template("no sections here") == "no sections here"
+
+
+def test_the_harness_s_own_submit_step_is_kept_verbatim():
+    """SWE-Live submits `echo ... && cat /tmp/patch.txt` - the cat IS the patch. GT's
+    workflow must never replace it with a bare echo "not combined with anything"."""
+    from gt_engine.attached_delivery import attached_instance_template
+
+    stock = ("<pr_description>{{task}}</pr_description>\n## Recommended Workflow\n\n"
+             "1. Read the task carefully.\n6. Run existing tests.\n7. Submit your patch.\n\n"
+             "## Command Execution Rules\nStep 3: Submit (EXACT command required)\n"
+             "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt\n")
+    text = attached_instance_template(stock)
+    workflow = text[text.index("## Recommended Workflow"):text.index("## Command Execution Rules")]
+    assert "7. Submit your patch." in workflow and "gt-query" in workflow
+    assert "Do not combine it with any other command" not in workflow
+    assert "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt" in text
+    mini = ("{{task}}\n## Recommended Workflow\n\n6. Submit your changes and finish your work by issuing "
+            "the following command: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.\n   Do not combine it "
+            "with any other command.\n\n## Command Execution Rules\nrules\n")
+    kept = attached_instance_template(mini)
+    assert "7. Submit your changes and finish your work by issuing the following command" in kept
+    assert "Your first submit is answered once by GT" in kept
+
+
+def test_a_template_with_its_own_workflow_gets_the_graph_guidance_but_no_second_submit():
+    """SWE-Live's task message has its own steps and a patch-file submit."""
+    from gt_engine.attached_delivery import attached_instance_template
+
+    stock = ("<pr_description>{{task}}</pr_description>\n<instructions>\n1. Read the task.\n"
+             "Step 3: Submit with the exact command.\n</instructions>\n")
+    text = attached_instance_template(stock)
+    guidance = text[text.index("## Code graph (GT)"):text.index("</instructions>")]
+    assert "`gt-query" in guidance and "## Debugging Patterns" in guidance and "## Risk Assessment" in guidance
+    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in text
+    assert attached_instance_template(text) == text  # idempotent

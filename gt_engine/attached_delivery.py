@@ -474,6 +474,35 @@ Before editing shared code, run `gt-impact <symbol>`:
 
 """
 
+_GT_SUBMIT_NOTE = ("   Your first submit is answered once by GT with every requirement set against your "
+                   "changes; close any gap, then submit again.\n")
+
+
+def _gt_workflow_keeping_submit(stock_section: str) -> str:
+    """GT's workflow with the harness's OWN submit step. A harness defines how a
+    submission is made (SWE-Live: `echo ... && cat /tmp/patch.txt`, where the
+    `cat` IS the patch); GT's fixed step 7 told the agent to submit the bare
+    echo and "not combine it", which on SWE-Live submits no patch at all."""
+    items = [item for item in re.split(r"(?m)^(?=\d+\.\s)", stock_section)
+             if re.match(r"\d+\.\s", item) and re.search(r"submit", item, re.I)]
+    if not items:
+        return GT_WORKFLOW
+    own = re.sub(r"^\d+\.\s*", "7. ", items[-1].strip(), count=1)
+    head = GT_WORKFLOW[:GT_WORKFLOW.index("7. **Submit**")]
+    tables = GT_WORKFLOW[GT_WORKFLOW.index("## Debugging Patterns"):]
+    return f"{head}{own}\n{_GT_SUBMIT_NOTE}\n{tables}"
+
+
+GT_TOOL_GUIDANCE = """
+## Code graph (GT)
+
+- Find the relevant code: run `gt-query "<words from the task>"` first; it ranks files and symbols from the code graph. Use grep for exact strings.
+- Understand a suspect: `gt-context <symbol>` shows every caller, callee and flow; then read the source.
+- Before editing a function others call: `gt-impact <symbol>`.
+- Test from the task: expected values, names, order, messages and precedence come from the task text, never from what your code prints; run the existing tests that cover your files (`gt-tests <file>`).
+
+""" + GT_WORKFLOW[GT_WORKFLOW.index("## Debugging Patterns"):]
+
 _FIRST_ACTION = (
     'The task concerns how configuration files are located. Let me ask the code graph where that '
     'behaviour lives before reading files.\n\n'
@@ -495,7 +524,14 @@ def attached_instance_template(stock: str) -> str:
     start = text.find("## Recommended Workflow")
     end = text.find("## Command Execution Rules")
     if start != -1 and end > start:
-        text = text[:start] + GT_WORKFLOW + text[end:]
+        text = text[:start] + _gt_workflow_keeping_submit(text[start:end]) + text[end:]
+    elif "gt-query" not in text and "{{task}}" in text:
+        # A harness with its own workflow and submit protocol (SWE-Live's
+        # patch-file submission): add the code-graph guidance only, never a
+        # second way to submit.
+        close = text.find("</instructions>")
+        text = (text[:close] + GT_TOOL_GUIDANCE + text[close:]) if close != -1 \
+            else f"{text.rstrip()}\n\n{GT_TOOL_GUIDANCE}"
     example_start = text.find("<example_response>")
     example_end = text.find("</example_response>")
     if example_start != -1 and example_end > example_start:
