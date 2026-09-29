@@ -31,6 +31,14 @@ on:
         description: Concurrent task jobs per arm (two arms run together)
         required: true
         default: "10"
+      deepswe_tasks_override:
+        description: 'Canary only: JSON list of DeepSWE tasks instead of the full ordered set ("" = all)'
+        required: false
+        default: ""
+      tb2_tasks_override:
+        description: 'Canary only: JSON list of TB2 tasks instead of the full ordered set ("" = all)'
+        required: false
+        default: ""
       confirm_baseline:
         description: 'Type "user-approved" - the user explicitly instructed GT-off baseline runs'
         required: true
@@ -57,6 +65,8 @@ jobs:
           DSW_REPS: ${{ inputs.deepswe_reps }}
           TB2_REPS: ${{ inputs.tb2_reps }}
           CONFIRM: ${{ inputs.confirm_baseline }}
+          DSW_OVERRIDE: ${{ inputs.deepswe_tasks_override }}
+          TB2_OVERRIDE: ${{ inputs.tb2_tasks_override }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -70,9 +80,19 @@ jobs:
                   raise SystemExit(f"{name} must be a JSON list of positive integers, got {value!r}")
               # rep-major, GT then baseline: the two arms of one rep start together.
               return [{"rep": str(r), "arm": arm} for r in value for arm in ("gt", "baseline")]
+          def tasks(bench, name):
+              full = [t["task"] for t in order[bench]]
+              raw = os.environ[name].strip()
+              if not raw:
+                  return full
+              chosen = json.loads(raw)
+              unknown = [t for t in chosen if t not in full]
+              if unknown:
+                  raise SystemExit(f"{name}: tasks not in the {bench} order: {unknown}")
+              return chosen
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write("deepswe_tasks=" + json.dumps([t["task"] for t in order["deepswe"]]) + "\n")
-              out.write("tb2_tasks=" + json.dumps([t["task"] for t in order["tb2"]]) + "\n")
+              out.write("deepswe_tasks=" + json.dumps(tasks("deepswe", "DSW_OVERRIDE")) + "\n")
+              out.write("tb2_tasks=" + json.dumps(tasks("tb2", "TB2_OVERRIDE")) + "\n")
               out.write("deepswe_matrix=" + json.dumps(reps("DSW_REPS")) + "\n")
               out.write("tb2_matrix=" + json.dumps(reps("TB2_REPS")) + "\n")
           print("deepswe", os.environ["DSW_REPS"], "tb2", os.environ["TB2_REPS"])
