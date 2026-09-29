@@ -28,6 +28,20 @@ on:
         required: true
         default: "20"
 
+  workflow_call:
+    inputs:
+      tasks:
+        type: string
+        required: false
+        default: '["hf-model-inference","nginx-request-logging","pypi-server","tune-mjcf","chess-best-move"]'
+      model:
+        type: string
+        required: false
+        default: 'stealth/space-bunny-alpha'
+      parallel:
+        type: string
+        required: false
+        default: '20'
 permissions:
   contents: read
   actions: read

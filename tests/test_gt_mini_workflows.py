@@ -40,7 +40,10 @@ def test_runs_gt_on_five_at_a_time_through_the_certified_pipeline(name: str) -> 
     text, workflow = _load(name)
     inputs = workflow[True]["workflow_dispatch"]["inputs"]
     assert inputs["stage"]["options"] == ["first5", "rest15"]
-    assert inputs["gt_delivery_mode"]["options"] == ["attached", "push"]
+    # "thin" = the baseline harness plus GT observations; SWE-Live's baseline
+    # is a different harness and has no thin arm yet.
+    thin = [] if name == "gt_mini_swelive.yml" else ["thin"]
+    assert inputs["gt_delivery_mode"]["options"] == ["attached", "push", *thin]
     assert inputs["model"]["required"] is True and "default" not in inputs["model"]
     job = workflow["jobs"]["gt_on"]
     assert job["uses"] == MINIS[name]

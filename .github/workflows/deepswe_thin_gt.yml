@@ -34,6 +34,24 @@ on:
         required: true
         default: "20"
 
+  workflow_call:
+    inputs:
+      tasks:
+        type: string
+        required: false
+        default: '["true-myth-iterable-collection-combinators","kysely-window-grouping-helpers","fastapi-deprecation-response-headers","testem-bail-on-test-failure","superjson-error-stack-serialization"]'
+      model:
+        type: string
+        required: false
+        default: 'stealth/space-bunny-alpha'
+      step_limit:
+        type: string
+        required: false
+        default: '300'
+      parallel:
+        type: string
+        required: false
+        default: '20'
 permissions:
   contents: read
   actions: read

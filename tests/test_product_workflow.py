@@ -133,6 +133,8 @@ def test_only_closed_supported_workflow_set_is_active() -> None:
         "deepswe_gt_harness_product.yml",
         "deepswe_gt_harness_product_p0731.yaml",
         "deepswe_miniswe_central.yml",
+        # The thin arm: the baseline harness plus GT observations (gt_engine.thin_agent).
+        "deepswe_thin_gt.yml",
         "gt_mini_deepswe.yml",
         "gt_mini_swelive.yml",
         "gt_mini_tb2.yml",
@@ -143,6 +145,7 @@ def test_only_closed_supported_workflow_set_is_active() -> None:
         "tb2_cache_images.yml",
         "tb2_miniswe_central.yml",
         "tb2_miniswe_engine.yml",
+        "tb2_thin_gt.yml",
     ]
 
 

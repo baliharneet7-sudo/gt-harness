@@ -31,8 +31,13 @@ on:
         description: "GT delivery (both are GT-on)"
         required: true
         type: choice
-        options: [attached, push]
+        options: [attached, push, thin]
         default: attached
+      thin_tasks:
+        description: 'thin only: JSON list of tasks, or "all" (thin = baseline harness + GT observations)'
+        required: false
+        type: string
+        default: '["true-myth-iterable-collection-combinators","kysely-window-grouping-helpers","fastapi-deprecation-response-headers","testem-bail-on-test-failure","superjson-error-stack-serialization"]'
       reasoning_effort:
         description: "minimal|low|medium|high|xhigh|max; empty = not sent"
         required: false
@@ -92,6 +97,7 @@ jobs:
 
   mirror_plan:
     needs: gate
+    if: ${{ inputs.gt_delivery_mode != 'thin' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -130,6 +136,7 @@ jobs:
     # up ("toomanyrequests: Data limit exceeded"). Already-mirrored digests
     # are skipped. A failure here warns - consumers still fall back to ECR.
     needs: mirror_plan
+    if: ${{ inputs.gt_delivery_mode != 'thin' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -174,7 +181,7 @@ jobs:
     needs: [gate, mirror]
     # A failed mirror leaves ECR as the (throttle-prone) fallback; say so in
     # the mirror job, but still run.
-    if: ${{ always() && needs.gate.result == 'success' }}
+    if: ${{ always() && needs.gate.result == 'success' && inputs.gt_delivery_mode != 'thin' }}
     uses: ./.github/workflows/deepswe_gt_delivery_ab.yml
     secrets: inherit
     with:
@@ -186,3 +193,16 @@ jobs:
       model: ${{ inputs.model }}
       reasoning_effort: ${{ inputs.reasoning_effort }}
       step_limit: ${{ inputs.step_limit }}
+
+  # Thin: the space-bunny baseline's own harness plus GT observations on the
+  # agent's actions (gt_engine.thin_agent; GitNexus shape). Steps are the
+  # baseline's, not a launch input.
+  thin:
+    needs: gate
+    if: ${{ needs.gate.result == 'success' && inputs.gt_delivery_mode == 'thin' }}
+    uses: ./.github/workflows/deepswe_thin_gt.yml
+    secrets: inherit
+    with:
+      tasks: ${{ inputs.thin_tasks }}
+      model: ${{ inputs.model }}
+      parallel: "5"
