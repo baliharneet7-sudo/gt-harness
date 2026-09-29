@@ -183,6 +183,13 @@ jobs:
     # the mirror job, but still run.
     if: ${{ always() && needs.gate.result == 'success' && inputs.gt_delivery_mode != 'thin' }}
     uses: ./.github/workflows/deepswe_gt_delivery_ab.yml
+    # Its nested image-mirror job writes this account's GHCR (5ac9188b); a
+    # called workflow can use no more than its caller job grants, and GitHub
+    # validates it at startup even when this job is skipped.
+    permissions:
+      contents: read
+      packages: write
+      actions: read
     secrets: inherit
     with:
       approve_paid_run: ${{ inputs.approve_paid_run }}
