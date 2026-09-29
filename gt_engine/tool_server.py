@@ -982,7 +982,11 @@ def refresh_if_stale(session: "GTSession", *, passive: bool = False) -> None:
                 schedule()
                 return
         predicted = _predicted_refresh_ms(adapter)
-        if passive and predicted > PASSIVE_REFRESH_BUDGET_MS:
+        # The thin arm amends after the turn, off the agent's path
+        # (gt_engine.thin_agent); a read it did not ask for never waits on
+        # one (DeepSWE smoke 36505349447: 9.7-13.2 s inline amends).
+        inline = getattr(adapter, "passive_refresh_inline", True)
+        if passive and (not inline or predicted > PASSIVE_REFRESH_BUDGET_MS):
             # The agent did not ask for this read; answer from the part
             # of the adopted graph that is verifiably unchanged instead
             # (grep_augment stale-verified path). An explicit gt-* call

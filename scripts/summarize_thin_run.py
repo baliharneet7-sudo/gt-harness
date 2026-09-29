@@ -41,7 +41,8 @@ def trial_row(result_path: Path) -> dict:
     usage = [((m.get("extra") or {}).get("response") or {}).get("usage") or {}
              for m in trajectory.get("messages") or () if m.get("role") == "assistant"]
     return {
-        "task": str(result.get("task_name") or trial.name.split("__")[0]),
+        # DeepSWE names tasks "datacurve/<task>"; the requested list is bare.
+        "task": str(result.get("task_name") or trial.name.split("__")[0]).rsplit("/", 1)[-1],
         "graded": reward is not None,
         "reward": reward,
         "exception": exception,

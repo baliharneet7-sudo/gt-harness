@@ -242,3 +242,57 @@ def test_actions_after_a_held_submit_in_the_same_turn_do_not_run(tmp_path):
     agent.run("task")
     assert agent.env.ran == [submit]
     assert any("not run: it followed the submit" in str(m.get("content")) for m in agent.messages)
+
+
+def test_the_observation_does_not_wait_for_the_post_turn_refresh(tmp_path, monkeypatch):
+    import gt_engine.thin_agent as thin
+
+    monkeypatch.setattr(thin, "AUGMENT_TIMEOUT_SECONDS", 0.5)
+    refreshed = []
+    adapter = _adapter(tmp_path)
+    adapter.graph_fresh = False
+    agent = _agent(GTAttachedAgent, tmp_path, [["grep -rn f ."], ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]],
+                   delivery=_Delivery(block="[GT] now"), adapter=adapter)
+
+    def slow_refresh():
+        time.sleep(1.0)
+        refreshed.append(True)
+
+    agent._refresh_after_turn = slow_refresh
+    agent.run("task")
+    assert any("[GT] now" in str(m.get("content")) for m in agent.messages)  # delivered, not timed out
+    assert agent.gt_stats["augment_timeouts"] == 0
+    agent.gt_refresher.join(2)
+    assert refreshed == [True]
+
+
+def test_a_turn_during_a_running_amend_still_gets_its_gt_block(tmp_path, monkeypatch):
+    import gt_engine.thin_agent as thin
+
+    monkeypatch.setattr(thin, "AUGMENT_TIMEOUT_SECONDS", 0.5)
+    adapter = _adapter(tmp_path)
+    adapter.graph_fresh = False
+    agent = _agent(GTAttachedAgent, tmp_path,
+                   [["grep -rn a ."], ["grep -rn b ."], ["grep -rn c ."], ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]],
+                   delivery=_Delivery(block="[GT] x"), adapter=adapter)
+    agent._refresh_after_turn = lambda: time.sleep(1.5)  # one long amend spans the next turns
+    agent.run("task")
+    blocks = [m for m in agent.messages if "[GT] x" in str(m.get("content"))]
+    assert len(blocks) == 3 and agent.gt_stats["augment_skipped_busy"] == 0
+
+
+def test_a_passive_read_never_amends_inline_in_the_thin_arm():
+    from types import SimpleNamespace
+
+    from gt_engine.tool_server import refresh_if_stale
+
+    calls = []
+    adapter = SimpleNamespace(graph_fresh=False, passive_refresh_inline=False, _edit_epoch=1,
+                              _last_graph_build_ms=10, engine_state=SimpleNamespace(graph_path="g"),
+                              store=SimpleNamespace(append=lambda *a, **k: calls.append(a[0])),
+                              refresh_graph=lambda **k: calls.append("amend"))
+    session = SimpleNamespace(_engine=adapter, capability_active=lambda name: True)
+    refresh_if_stale(session, passive=True)
+    assert "amend" not in calls and "passive_refresh_deferred" in calls
+    refresh_if_stale(session)  # an explicit gt-* call still pays for currency
+    assert "amend" in calls

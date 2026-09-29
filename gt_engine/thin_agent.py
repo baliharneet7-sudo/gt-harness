@@ -266,6 +266,7 @@ class GTAttachedAgent(DefaultAgent):
         self.gt_lock = threading.Lock()  # serializes GT's engine work (worker vs note_edit)
         self.gt_pending_lock = threading.Lock()  # guards gt_pending_edits only
         self.gt_worker: threading.Thread | None = None
+        self.gt_refresher: threading.Thread | None = None
         self.gt_pending_edits: list[str] = []
         self.gt_stats = {"augment_timeouts": 0, "augment_skipped_busy": 0, "augment_faults": 0,
                          "augment_seconds": 0.0, "probe_seconds": 0.0, "submit_review_held": 0}
@@ -372,6 +373,7 @@ class GTAttachedAgent(DefaultAgent):
             self.gt_stats["augment_skipped_busy"] += 1
             return outputs
         result: dict[str, list[dict]] = {}
+        ready = threading.Event()
 
         def work() -> None:
             with self.gt_lock:
@@ -383,17 +385,52 @@ class GTAttachedAgent(DefaultAgent):
                 except Exception as exc:  # noqa: BLE001 - enrichment never costs the observation
                     self.gt_stats["augment_faults"] += 1
                     self._journal("gt_augment_fault", error=type(exc).__name__)
+                ready.set()
 
         started = time.perf_counter()
         self.gt_worker = threading.Thread(target=work, name="gt-augment", daemon=True)
         self.gt_worker.start()
-        self.gt_worker.join(AUGMENT_TIMEOUT_SECONDS)
+        ready.wait(AUGMENT_TIMEOUT_SECONDS)
         self.gt_stats["augment_seconds"] += time.perf_counter() - started
-        if self.gt_worker.is_alive():
+        if not ready.is_set():
             self.gt_stats["augment_timeouts"] += 1
             self._journal("gt_augment_timeout", seconds=AUGMENT_TIMEOUT_SECONDS)
             return outputs
+        # The observation is out; bring the graph current while the model
+        # thinks - on its own thread, so the next turn's observation never
+        # waits for an amend (it answers from the verifiably unchanged graph).
+        self._start_refresh()
         return result.get("outputs", outputs)
+
+    def _start_refresh(self) -> None:
+        """One amend at a time, off every path the agent waits on. An edit
+        during an amend supersedes it (the engine refuses to publish a graph
+        of a tree that moved on) and the next turn amends again."""
+        if getattr(self.gt_adapter, "graph_fresh", True):
+            return
+        if self.gt_refresher is not None and self.gt_refresher.is_alive():
+            return
+        refresher = threading.Thread(target=self._refresh_after_turn, name="gt-refresh", daemon=True)
+        refresher.start()
+        self.gt_refresher = refresher
+
+    def _refresh_after_turn(self) -> None:
+        """Amend a stale graph after the observation was returned (refresher
+        thread). Reads during a turn never amend inline in the thin arm
+        (adapter.passive_refresh_inline = False)."""
+        adapter = self.gt_adapter
+        if getattr(adapter, "graph_fresh", True):
+            return
+        started = time.perf_counter()
+        try:
+            from gt_engine.tool_server import refresh_if_stale
+
+            refresh_if_stale(self.gt_delivery.session)
+        except Exception as exc:  # noqa: BLE001 - freshness never costs the run
+            self._journal("gt_thin_refresh_fault", error=type(exc).__name__)
+        finally:
+            self.gt_stats["refresh_seconds"] = self.gt_stats.get("refresh_seconds", 0.0) + (
+                time.perf_counter() - started)
 
     def _journal(self, event: str, **row: Any) -> None:
         store = getattr(self.gt_adapter, "store", None)
@@ -442,6 +479,9 @@ def build_attached_session(*, task: str, cwd: str, state_dir: str, task_id: str,
                              graph_db=None, issue_text=task, requested_model=model,
                              resolved_model=resolved_model)
     adapter.lsp_promotion_enabled = False
+    # Reads the agent did not ask for never wait on an amend; GTAttachedAgent
+    # amends after each turn instead (_refresh_after_turn).
+    adapter.passive_refresh_inline = False
     adapter.record_repository_snapshot(
         capture_workspace(layout.workspace, excluded_roots=layout.excluded_roots), boundary="task_start")
     started = time.perf_counter()
