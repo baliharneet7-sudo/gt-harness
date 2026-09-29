@@ -171,4 +171,5 @@ jobs:
     with:
       tasks: ${{ inputs.thin_tasks }}
       model: ${{ inputs.model }}
-      parallel: "5"
+      # The baselines ran 20 at a time; parallelism changes no task's budget.
+      parallel: "20"
