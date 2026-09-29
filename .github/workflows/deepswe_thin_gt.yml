@@ -167,7 +167,11 @@ jobs:
           AGENT_TIMEOUT_SEC=$(python -c 'import json,sys; print(int(json.load(open(sys.argv[1], encoding="utf-8"))["execution_budget_sec"]))' "deepswe-budget-$TASK.json")
           BUILD_ALLOWANCE=$(python -c "from eval.miniswe_thin_agent import PREBUILD_TIMEOUT_SECONDS as s; print(int(s))")
           echo "AGENT_TIMEOUT_SEC=$AGENT_TIMEOUT_SEC" >> "$GITHUB_ENV"
-          echo "OUTER_TIMEOUT_SEC=$((AGENT_TIMEOUT_SEC + BUILD_ALLOWANCE))" >> "$GITHUB_ENV"
+          # The outer kill must never land before grading: build allowance (setup) plus a
+          # verifier margin on top of the agent budget (run 36510165558: 6 tasks killed ungraded
+          # when setup 908 s + agent 5,340 s filled budget + build allowance exactly).
+          VERIFIER_MARGIN=600
+          echo "OUTER_TIMEOUT_SEC=$((AGENT_TIMEOUT_SEC + BUILD_ALLOWANCE + VERIFIER_MARGIN))" >> "$GITHUB_ENV"
           echo "SETUP_MULT=$(python -c 'from eval.miniswe_thin_agent import SETUP_TIMEOUT_MULTIPLIER as m; print(m)')" >> "$GITHUB_ENV"
       - name: Run thin GT on DeepSWE task
         run: |
