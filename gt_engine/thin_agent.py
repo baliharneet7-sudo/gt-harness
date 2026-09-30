@@ -344,15 +344,33 @@ class GTAttachedAgent(DefaultAgent):
                 try:
                     from gt_engine.tool_server import _tests_by_reachability
 
-                    reachable = [str(row.get("file_path") or "") for row in
+                    reachable = [f"{row.get('file_path') or ''}::{row.get('name') or ''}".rstrip(":") for row in
                                  _tests_by_reachability(self.gt_delivery.session, changed)]
-                except Exception:  # noqa: BLE001 - reachability is optional; names still work
+                except Exception:  # noqa: BLE001 - reachability is optional; discovery still works
                     reachable = []
 
+            def git(*args: str, timeout: int = 20) -> subprocess.CompletedProcess:
+                return subprocess.run(["git", "-c", "safe.directory=*", "-C", root, *args],
+                                      capture_output=True, text=True, timeout=timeout, errors="replace")
+
             def exists_at_start(path: str) -> bool:
-                done = subprocess.run(["git", "-c", "safe.directory=*", "-C", root, "cat-file", "-e",
-                                       f"{baseline}:{path}"], capture_output=True, timeout=15)
-                return done.returncode == 0
+                return git("cat-file", "-e", f"{baseline}:{path}", timeout=15).returncode == 0
+
+            def referencing(stems: list[str]) -> list[str]:
+                """Test files at the start commit that mention a changed module (git grep)."""
+                if not stems:
+                    return []
+                pattern = "|".join(re.escape(s) for s in stems)
+                done = git("grep", "-l", "-E", rf"\b({pattern})\b", baseline, "--",
+                           ":(glob)**/test_*.py", ":(glob)**/*_test.py", ":(glob)**/*_test.go",
+                           ":(glob)**/*.test.*", ":(glob)**/*.spec.*", timeout=30)
+                return [line.split(":", 1)[1] for line in done.stdout.splitlines() if ":" in line]
+
+            def go_has_tests(pkg: str) -> bool:
+                done = git("ls-tree", "--name-only", f"{baseline}:{pkg}" if pkg not in ("", ".") else baseline)
+                return any(name.endswith("_test.go") for name in done.stdout.splitlines())
+
+            package_json = git("show", f"{baseline}:package.json").stdout if baseline else ""
 
             def execute(cmd: str) -> tuple[str, int]:
                 try:
@@ -361,13 +379,16 @@ class GTAttachedAgent(DefaultAgent):
                     out = self.env.execute({"command": cmd})
                 return str(out.get("output", "")), int(out.get("returncode", 1) or 0)
 
-            result = regression_gate.check(root, baseline, changed, reachable, execute, exists_at_start)
+            result = regression_gate.check(root, baseline, changed, reachable, execute, exists_at_start,
+                                           referencing=referencing, package_json=package_json,
+                                           go_has_tests=go_has_tests)
         except Exception as exc:  # noqa: BLE001 - the gate never costs the submit
             self._journal("gt_regression_check", skipped=f"error:{type(exc).__name__}")
             return ""
         self.gt_stats["regression_seconds"] = result.seconds
         self._journal("gt_regression_check", candidates=len(result.candidates), failing_now=len(result.failing_now),
-                      regressions=result.regressions[:20], skipped=result.skipped, seconds=result.seconds)
+                      regressions=result.regressions[:20], skipped=result.skipped, seconds=result.seconds,
+                      runners=result.runners, changed=len(changed))
         return result.message()
 
     def _timed_probe(self, fn):

@@ -391,7 +391,7 @@ def _regression_agent(tmp_path, monkeypatch, found):
     submit = ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
     agent = _agent(GTAttachedAgent, tmp_path, [submit, submit], delivery=delivery, adapter=adapter)
 
-    def fake_check(root, baseline, changed, reachable, execute, exists_at_start):
+    def fake_check(root, baseline, changed, reachable, execute, exists_at_start, **_kw):
         return regression_gate.RegressionResult(regressions=list(found), failing_now=list(found),
                                                 candidates=["tests/test_config.py"], seconds=1.5)
 

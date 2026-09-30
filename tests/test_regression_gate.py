@@ -145,3 +145,199 @@ def test_any_internal_error_fails_open(tmp_path):
     (root / "pkg" / "config.py").write_text("x = 1\n", encoding="utf-8")
     result = check(root.as_posix(), base, ["pkg/config.py"], [], boom, _exists(root, base))
     assert result.regressions == [] and result.skipped.startswith("error:")
+
+
+# -- v2: discovery, runners, test ids, timeouts --------------------------------------------
+
+def _referencing(root: Path, baseline: str):
+    """What the thin agent passes: test files at the start commit that mention a stem."""
+    import re as _re
+
+    def find(stems):
+        if not stems:
+            return []
+        pattern = "|".join(_re.escape(s) for s in stems)
+        done = subprocess.run(["git", "-C", str(root), "grep", "-l", "-E", rf"\b({pattern})\b", baseline, "--",
+                               ":(glob)**/test_*.py", ":(glob)**/*_test.go", ":(glob)**/*.test.*"],
+                              capture_output=True, text=True)
+        return [line.split(":", 1)[1] for line in done.stdout.splitlines() if ":" in line]
+
+    return find
+
+
+def test_a_test_file_not_named_after_the_module_is_found_by_reference(tmp_path):
+    root, base = _repo(tmp_path)
+    (root / "tests" / "test_behaviour.py").write_text(
+        "from pkg import config\n\ndef test_limit_is_ten():\n    assert config.limit() == 10\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "more")
+    base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    (root / "tests" / "test_config.py").unlink()  # only the differently named file relates
+    _git(root, "rm", "-q", "--cached", "tests/test_config.py")
+    (root / "pkg" / "config.py").write_text("def limit():\n    return 20\n\ndef name():\n    return 'app'\n", encoding="utf-8")
+
+    result = check(root.as_posix(), base, ["pkg/config.py", "tests/test_config.py"], [], _execute(),
+                   _exists(root, base), referencing=_referencing(root, base))
+
+    assert "tests/test_behaviour.py" in result.candidates
+    assert result.regressions == ["tests/test_behaviour.py::test_limit_is_ten"]
+
+
+def test_reachable_test_ids_run_instead_of_whole_files(tmp_path):
+    root, base = _repo(tmp_path)
+    (root / "pkg" / "config.py").write_text("def limit():\n    return 20\n\ndef name():\n    return 'app'\n", encoding="utf-8")
+    seen = []
+    real = _execute()
+
+    def spy(cmd):
+        seen.append(cmd)
+        return real(cmd)
+
+    result = check(root.as_posix(), base, ["pkg/config.py"], ["tests/test_config.py::test_limit"], spy, _exists(root, base))
+    assert result.regressions == ["tests/test_config.py::test_limit"]
+    assert "tests/test_config.py::test_limit" in seen[0] and "test_already_broken" not in seen[0]
+
+
+def test_a_timed_out_suite_stops_the_gate_after_one_run(tmp_path):
+    root, base = _repo(tmp_path)
+    (root / "pkg" / "config.py").write_text("x = 1\n", encoding="utf-8")
+    calls = []
+
+    def slow(cmd):
+        calls.append(cmd)
+        return "....\nGT_RC=124\n", 0
+
+    result = check(root.as_posix(), base, ["pkg/config.py"], [], slow, _exists(root, base))
+    assert result.skipped == "timeout" and len(calls) == 1 and result.regressions == []
+
+
+def test_go_runs_per_package_and_compares_with_the_start(tmp_path):
+    root, base = _repo(tmp_path)
+    outputs = iter([
+        "--- FAIL: TestParse (0.00s)\n--- FAIL: TestOld (0.00s)\nFAIL\tex.com/p/parser\nGT_RC=1\n",   # now
+        "GT_BASE_READY\n",                                                                          # copy
+        "--- FAIL: TestOld (0.00s)\nFAIL\tex.com/p/parser\nGT_RC=1\n",                              # start
+    ])
+    cmds = []
+
+    def fake(cmd):
+        cmds.append(cmd)
+        return next(outputs), 0
+
+    result = check(root.as_posix(), base, ["parser/parse.go"], [], fake, lambda p: False,
+                   go_has_tests=lambda pkg: pkg == "parser")
+    assert result.regressions == ["TestParse"]
+    assert "go test" in cmds[0] and "./parser" in cmds[0] and "-run" in cmds[2]
+
+
+def test_js_runner_detection():
+    from gt_engine.regression_gate import js_runner
+
+    assert js_runner('{"scripts": {"test": "vitest run"}}') == "vitest"
+    assert js_runner('{"devDependencies": {"jest": "^29"}}') == "jest"
+    assert js_runner('{"scripts": {"test": "mocha"}}') == ""
+    assert js_runner("not json") == ""
+
+
+def test_js_file_level_regression_with_vitest(tmp_path):
+    root, base = _repo(tmp_path)
+    outputs = iter([
+        " FAIL  src/grid.test.ts > layout > wraps\n Test Files  1 failed (1)\nGT_RC=1\n",   # now
+        "GT_BASE_READY\n",
+        " Test Files  1 passed (1)\nGT_RC=0\n",                                          # start
+    ])
+    cmds = []
+
+    def fake(cmd):
+        cmds.append(cmd)
+        return next(outputs), 0
+
+    result = check(root.as_posix(), base, ["src/grid.ts"], [], fake, lambda p: p == "src/grid.test.ts",
+                   package_json='{"devDependencies": {"vitest": "^2"}}')
+    assert result.regressions == ["src/grid.test.ts"]
+    assert "vitest run" in cmds[0] and "node_modules" in cmds[1]
+
+
+def test_js_without_a_known_runner_fails_open(tmp_path):
+    root, base = _repo(tmp_path)
+    result = check(root.as_posix(), base, ["src/grid.ts"], [], lambda c: ("", 0), lambda p: p == "src/grid.test.ts",
+                   package_json='{"scripts": {"test": "mocha"}}')
+    assert result.skipped == "no_supported_runner" and result.regressions == []
+
+
+# -- the real chain: GTAttachedAgent -> git grep discovery -> real pytest -> start copy ------
+
+def test_the_thin_agent_holds_a_real_regression_end_to_end(tmp_path):
+    """Everything real except the model: the agent's first submit runs the repository's own
+    test (found by git grep, not by name), sees it fail, confirms it passed at the start
+    commit, and holds the submit naming it. The second submit goes through."""
+    from types import SimpleNamespace
+
+    from minisweagent.agents.default import AgentConfig
+    from minisweagent.exceptions import Submitted
+
+    from gt_engine.thin_agent import GTAttachedAgent
+
+    root, base = _repo(tmp_path)
+    (root / "tests" / "test_behaviour.py").write_text(
+        "from pkg import config\n\ndef test_limit_is_ten():\n    assert config.limit() == 10\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "more")
+    base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    (root / "pkg" / "config.py").write_text("def limit():\n    return 20\n\ndef name():\n    return 'app'\n", encoding="utf-8")
+    run = _execute()
+
+    class Env:
+        def __init__(self):
+            self.config = SimpleNamespace(cwd=str(root), env={})
+
+        def execute(self, action, cwd="", *, timeout=None):
+            command = action["command"]
+            if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in command:
+                raise Submitted({"role": "exit", "content": "", "extra": {"exit_status": "Submitted", "submission": ""}})
+            output, rc = run(command)
+            return {"output": output, "returncode": rc, "exception_info": ""}
+
+        def get_template_vars(self, **kwargs):
+            return {}
+
+        def serialize(self):
+            return {}
+
+    class Model:
+        def __init__(self):
+            self.turns = [["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"], ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]]
+
+        def query(self, messages):
+            return {"role": "assistant", "content": "t",
+                    "extra": {"actions": [{"command": c} for c in self.turns.pop(0)], "cost": 0.0}}
+
+        def format_message(self, **kwargs):
+            return dict(kwargs)
+
+        def format_observation_messages(self, message, outputs, template_vars=None):
+            return [{"role": "user", "content": o["output"]} for o in outputs]
+
+        def get_template_vars(self, **kwargs):
+            return {}
+
+        def serialize(self):
+            return {}
+
+    events = []
+    adapter = SimpleNamespace(repo_root=str(root), engine_state=SimpleNamespace(graph_path=""),
+                              store=SimpleNamespace(append=lambda event, **row: events.append((event, row))),
+                              note_edit=lambda paths: None, phase="", begin_implement=lambda: None)
+    delivery = SimpleNamespace(session=SimpleNamespace(), review_baseline=base,
+                               observe_turn=lambda commands, outputs, facts: outputs,
+                               submit_review_once=lambda: "")
+    agent = GTAttachedAgent(Model(), Env(), delivery=delivery, adapter=adapter, config_class=AgentConfig,
+                            system_template="sys", instance_template="{{task}}", step_limit=10)
+    agent.run("task")
+
+    held = [m for m in agent.messages if "[GT] regression check" in str(m.get("content"))]
+    assert len(held) == 1, [str(m.get("content"))[:200] for m in agent.messages]
+    assert "tests/test_behaviour.py::test_limit_is_ten" in str(held[0]["content"])
+    check_rows = [row for event, row in events if event == "gt_regression_check"]
+    assert check_rows and check_rows[0]["regressions"] and check_rows[0]["runners"] == ["pytest"]
+    assert agent.messages[-1]["role"] == "exit"  # the second submit went through
