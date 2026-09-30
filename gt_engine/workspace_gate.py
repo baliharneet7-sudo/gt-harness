@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 MIN_SOURCE_FILES = 20
 _GIT_TIMEOUT_SECONDS = 15
@@ -61,13 +61,23 @@ def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str] | None:
 def repository_state(cwd: str) -> str:
     """``git``, ``none`` (git itself says there is no repository) or ``unknown``."""
     result = _git(cwd, "rev-parse", "--is-inside-work-tree")
-    if result is None:
-        return UNKNOWN
-    if result.returncode == 0 and result.stdout.strip() == "true":
+    if result is not None and result.returncode == 0 and result.stdout.strip() == "true":
         return REPOSITORY
-    if _NOT_A_REPOSITORY in result.stderr:
+    if result is not None and _NOT_A_REPOSITORY in result.stderr:
         return NO_REPOSITORY
-    return UNKNOWN
+    # git could not answer (no git binary - most TB2 images - a timeout, or a
+    # refusal): with no .git anywhere from cwd up there is no repository either
+    # way; with one, stay UNKNOWN and fail open.
+    return UNKNOWN if _has_git_entry(cwd) else NO_REPOSITORY
+
+
+def _has_git_entry(cwd: str) -> bool:
+    """A `.git` directory or file (worktrees, submodules) in cwd or any parent."""
+    try:
+        here = Path(cwd).resolve()
+    except OSError:
+        return True  # cannot tell: fail open
+    return any((parent / ".git").exists() for parent in (here, *here.parents))
 
 
 def lacks_repository(cwd: str) -> bool:

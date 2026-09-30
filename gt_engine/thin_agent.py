@@ -46,6 +46,8 @@ AUGMENT_TIMEOUT_SECONDS = 5.0  # GitNexus AUGMENT_TIMEOUT_SECONDS
 # How long a run waits for its graph at start: a reused prebuild loads in
 # seconds; anything longer builds in the background while the agent works.
 START_WAIT_SECONDS = 60.0
+# A post-turn refresh shorter than this did no indexing work; it gets no receipt.
+REFRESH_RECEIPT_MIN_SECONDS = 0.1
 MAX_TRACKED_BYTES = 1_000_000
 MAX_WALK_ENTRIES = 50_000
 MAX_PRECACHE_BYTES = 20_000_000
@@ -436,12 +438,14 @@ class GTAttachedAgent(DefaultAgent):
             self.gt_stats["refresh_seconds"] = self.gt_stats.get("refresh_seconds", 0.0) + elapsed
             self.gt_stats["refresh_max_seconds"] = max(self.gt_stats.get("refresh_max_seconds", 0.0), elapsed)
             # gt-index runs at nice 19 beside the agent's builds: a starved amend
-            # shows here as a long refresh that left the graph stale.
-            from gt_engine.indexer import low_priority_active
+            # shows here as a long refresh that left the graph stale. No-op
+            # refreshes (nothing to index: an ISO, one FASTA) are not recorded.
+            if elapsed >= REFRESH_RECEIPT_MIN_SECONDS:
+                from gt_engine.indexer import low_priority_active
 
-            self._journal("gt_thin_refresh", seconds=round(elapsed, 3),
-                          graph_fresh=bool(getattr(adapter, "graph_fresh", False)),
-                          low_priority=low_priority_active())
+                self._journal("gt_thin_refresh", seconds=round(elapsed, 3),
+                              graph_fresh=bool(getattr(adapter, "graph_fresh", False)),
+                              low_priority=low_priority_active())
 
     def _journal(self, event: str, **row: Any) -> None:
         store = getattr(self.gt_adapter, "store", None)

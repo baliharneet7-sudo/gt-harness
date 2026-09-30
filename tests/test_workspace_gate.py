@@ -70,6 +70,7 @@ def test_a_git_error_other_than_no_repository_keeps_gt_on(monkeypatch, tmp_path)
         return subprocess.CompletedProcess(
             ["git"], 128, "", "fatal: detected dubious ownership in repository at '/app'")
 
+    (tmp_path / ".git").mkdir()  # a repository git refuses to read: stay unknown, fail open
     monkeypatch.setattr(workspace_gate, "_git", dubious)
 
     assert workspace_gate.is_code_workspace(str(tmp_path))
@@ -98,9 +99,33 @@ def test_git_runs_in_the_c_locale(monkeypatch, tmp_path):
 def test_a_git_timeout_keeps_gt_on(monkeypatch, tmp_path):
     from gt_engine import workspace_gate
 
+    (tmp_path / ".git").mkdir()  # git timed out on a real repository: fail open
     monkeypatch.setattr(workspace_gate, "_git", lambda _cwd, *_args: None)
 
     assert workspace_gate.is_code_workspace(str(tmp_path))
+
+
+def test_no_git_binary_and_no_git_entry_is_no_repository(monkeypatch, tmp_path):
+    """Most TB2 images ship without git (validation run 36665598281: 7 of 8 tasks
+    read 'unknown', e.g. dna-assembly = one sequences.fasta). No .git anywhere
+    up the tree means no repository whatever git would say."""
+    from gt_engine import workspace_gate
+
+    (tmp_path / "sequences.fasta").write_text(">s\nACGT\n", encoding="utf-8")
+    monkeypatch.setattr(workspace_gate, "_git", lambda _cwd, *_args: None)
+
+    assert workspace_gate.repository_state(str(tmp_path)) == workspace_gate.NO_REPOSITORY
+    assert not workspace_gate.is_code_workspace(str(tmp_path))
+
+
+def test_a_git_file_counts_as_a_git_entry(monkeypatch, tmp_path):
+    """Worktrees and submodules have a .git FILE, not a directory."""
+    from gt_engine import workspace_gate
+
+    (tmp_path / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n", encoding="utf-8")
+    monkeypatch.setattr(workspace_gate, "_git", lambda _cwd, *_args: None)
+
+    assert workspace_gate.repository_state(str(tmp_path)) == workspace_gate.UNKNOWN
 
 
 def test_the_gate_decision_is_reported(tmp_path):
