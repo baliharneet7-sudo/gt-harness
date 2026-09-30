@@ -370,7 +370,10 @@ class GTAttachedAgent(DefaultAgent):
                 done = git("ls-tree", "--name-only", f"{baseline}:{pkg}" if pkg not in ("", ".") else baseline)
                 return any(name.endswith("_test.go") for name in done.stdout.splitlines())
 
-            package_json = git("show", f"{baseline}:package.json").stdout if baseline else ""
+            def package_json(path: str) -> str:
+                """Any package.json at the start commit (monorepos keep the runner per package)."""
+                done = git("show", f"{baseline}:{path}", timeout=15)
+                return done.stdout if done.returncode == 0 else ""
 
             def execute(cmd: str) -> tuple[str, int]:
                 try:

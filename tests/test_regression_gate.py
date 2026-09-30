@@ -341,3 +341,58 @@ def test_the_thin_agent_holds_a_real_regression_end_to_end(tmp_path):
     check_rows = [row for event, row in events if event == "gt_regression_check"]
     assert check_rows and check_rows[0]["regressions"] and check_rows[0]["runners"] == ["pytest"]
     assert agent.messages[-1]["role"] == "exit"  # the second submit went through
+
+
+# -- v3: /bin/sh exit codes, per-package JS runners --------------------------------------
+
+def test_timeout_is_detected_under_posix_sh(tmp_path):
+    """The agent's executor runs /bin/sh (no PIPESTATUS): v2 read a 90 s timeout as
+    'tests did not run' (skrub, kcp-go in run 36683688726)."""
+    import shutil as _shutil
+
+    sh = _shutil.which("sh") or _bash()
+    root, base = _repo(tmp_path)
+    (root / "pkg" / "config.py").write_text("x = 1\n", encoding="utf-8")
+    calls = []
+
+    def run_sh(cmd):
+        calls.append(cmd)
+        py = Path(sys.executable).as_posix()
+        cmd = cmd.replace("timeout 90 python -m pytest", f"timeout 1 {py} -c 'import time; time.sleep(5)'")
+        done = subprocess.run([sh, "-c", cmd], capture_output=True, text=True, timeout=60)
+        return done.stdout + done.stderr, done.returncode
+
+    result = check(root.as_posix(), base, ["pkg/config.py"], [], run_sh, _exists(root, base))
+    assert "PIPESTATUS" not in calls[0]
+    assert result.skipped == "timeout", result
+
+
+def test_js_runner_comes_from_the_nearest_package_json():
+    from gt_engine.regression_gate import js_packages
+
+    files = {"package.json": '{"private": true, "workspaces": ["packages/*"]}',
+             "drizzle-orm/package.json": '{"devDependencies": {"vitest": "^1"}}',
+             "packages/core/package.json": '{"scripts": {"test": "deno test"}}'}
+    groups = js_packages(["drizzle-orm/tests/sql.test.ts", "packages/core/src/a.test.ts"], lambda p: files.get(p, ""))
+    assert groups == {"drizzle-orm": ("vitest", ["tests/sql.test.ts"])}  # deno package: no runner, left out
+
+
+def test_a_monorepo_js_regression_runs_in_its_package(tmp_path):
+    root, base = _repo(tmp_path)
+    outputs = iter([
+        "GT_RC=1\n FAIL  tests/sql.test.ts > window > rank\n Test Files  1 failed (1)\n",   # now
+        "GT_BASE_READY\n",
+        "GT_RC=0\n Test Files  1 passed (1)\n",                                              # start
+    ])
+    cmds = []
+
+    def fake(cmd):
+        cmds.append(cmd)
+        return next(outputs), 0
+
+    files = {"drizzle-orm/package.json": '{"devDependencies": {"vitest": "^1"}}'}
+    result = check(root.as_posix(), base, ["drizzle-orm/src/sql.ts"], ["drizzle-orm/tests/sql.test.ts"], fake,
+                   lambda p: p == "drizzle-orm/tests/sql.test.ts", package_json=lambda p: files.get(p, ""))
+    assert result.regressions == ["drizzle-orm/tests/sql.test.ts"]
+    assert f"{root.as_posix()}/drizzle-orm" in cmds[0] and "vitest run" in cmds[0]
+    assert "drizzle-orm/node_modules" in cmds[1]
