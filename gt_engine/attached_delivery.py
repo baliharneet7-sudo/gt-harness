@@ -540,6 +540,15 @@ def attached_instance_template(stock: str) -> str:
     return text
 
 
+def instance_template_for(stock: str, cwd: str) -> str:
+    """GT's task workflow for a code repository, the stock template otherwise
+    (gt_engine.workspace_gate): an ISO, a CSV or one C file gets no
+    "gt-query first" workflow; the gt-* tools stay in the system section."""
+    from gt_engine.workspace_gate import is_code_workspace
+
+    return attached_instance_template(stock) if is_code_workspace(cwd) else stock
+
+
 def push_metrics(adapter: Any) -> dict[str, Any]:
     return {
         "gt_delivery_mode": PUSH,
@@ -573,6 +582,7 @@ __all__ = [
     "UptakeTracker",
     "attached_instance_template",
     "attached_system_section",
+    "instance_template_for",
     "delivery_mode",
     "delivery_report",
     "distinct_tokens",

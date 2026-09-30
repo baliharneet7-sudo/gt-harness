@@ -171,6 +171,21 @@ class MiniSweBaselineAgent(BaseInstalledAgent):
         )
 
 
+def prebuild_command(python: str = f'"{_REMOTE_PY}"', state_dir: str = _STATE_DIR) -> str:
+    """The install-time graph build, only inside a git work tree: TB2 workspaces
+    without a repository (an ISO, a CSV, one C file) spent setup building a
+    graph no step used (gt_engine.workspace_gate). Skips only when git itself
+    says there is no repository; any other git failure still builds. Never
+    fails the install."""
+    return (
+        "if git -c safe.directory='*' rev-parse --is-inside-work-tree 2>&1 "
+        "| grep -q 'not a git repository'; then "
+        'echo "gt prebuild skipped: no git work tree"; '
+        f'else timeout {PREBUILD_TIMEOUT_SECONDS} {python} -m gt_engine.thin_agent prebuild '
+        f'--cwd "$PWD" --state-dir {state_dir} </dev/null 2>&1 || true; fi'
+    )
+
+
 class MiniSweThinGtAgent(MiniSweBaselineAgent):
     """The baseline agent with GT attached (gt_engine.thin_agent)."""
 
@@ -186,12 +201,7 @@ class MiniSweThinGtAgent(MiniSweBaselineAgent):
         # GitNexus env.start(): the graph is built before the agent runs. The
         # run reuses it (the cache is keyed by workspace path and source
         # manifest); if this fails or times out, the run builds it itself.
-        await self.exec_as_agent(
-            environment,
-            f'timeout {PREBUILD_TIMEOUT_SECONDS} "{_REMOTE_PY}" -m gt_engine.thin_agent prebuild '
-            f'--cwd "$PWD" --state-dir {_STATE_DIR} </dev/null 2>&1 || true',
-            env={**UTF8_ENV, **self._gt_env()},
-        )
+        await self.exec_as_agent(environment, prebuild_command(), env={**UTF8_ENV, **self._gt_env()})
 
     @with_prompt_template
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:

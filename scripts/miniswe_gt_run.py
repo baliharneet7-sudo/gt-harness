@@ -893,8 +893,8 @@ def build_agent(
     attached = False
     if not gt_disabled:
         from gt_engine.attached_delivery import (
-            attached_instance_template,
             attached_system_section,
+            instance_template_for,
             is_attached,
         )
 
@@ -905,7 +905,7 @@ def build_agent(
         # replaced so GT is part of how the agent works (GitNexus's levers).
         # The typed function tool stays unadvertised.
         system_template = f"{system_template}\n\n{attached_system_section()}"
-        instance_template = attached_instance_template(instance_template)
+        instance_template = instance_template_for(instance_template, cwd)
         disabled_capabilities = tuple(
             dict.fromkeys((*disabled_capabilities, "typed_actions"))
         )

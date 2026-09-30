@@ -333,6 +333,12 @@ def session_review(session: "GTSession", baseline: str) -> str:
     root = str(getattr(engine, "repo_root", "") or "")
     if not issue.strip() or not root:
         return ""
+    from gt_engine.workspace_gate import lacks_repository
+
+    # The review diffs against git; without a repository every task literal
+    # would read "[not in your changes]" (qemu-startup, campaign 2026-09-29).
+    if lacks_repository(root):
+        return ""
     tests: list[str] = []
     try:
         from gt_engine.tool_server import _tests_by_reachability
