@@ -377,3 +377,49 @@ def test_a_no_op_refresh_leaves_no_receipt(tmp_path, monkeypatch):
     agent._refresh_after_turn()
 
     assert "gt_thin_refresh" not in events
+
+
+def _regression_agent(tmp_path, monkeypatch, found):
+    from gt_engine import regression_gate
+
+    events = []
+    adapter = _adapter(tmp_path)
+    adapter.store = SimpleNamespace(append=lambda event, **row: events.append((event, row)))
+    delivery = _Delivery()
+    delivery.session = SimpleNamespace()
+    delivery.review_baseline = "abc123"
+    submit = ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    agent = _agent(GTAttachedAgent, tmp_path, [submit, submit], delivery=delivery, adapter=adapter)
+
+    def fake_check(root, baseline, changed, reachable, execute, exists_at_start):
+        return regression_gate.RegressionResult(regressions=list(found), failing_now=list(found),
+                                                candidates=["tests/test_config.py"], seconds=1.5)
+
+    monkeypatch.setattr(regression_gate, "check", fake_check)
+    monkeypatch.setattr("gt_engine.submit_review.changed_files_since", lambda root, baseline: ["pkg/config.py"])
+    return agent, events
+
+
+def test_a_regression_holds_the_first_submit_once(tmp_path, monkeypatch):
+    agent, events = _regression_agent(tmp_path, monkeypatch, ["tests/test_config.py::test_limit"])
+    agent.run("task")
+    held = [m for m in agent.messages if "[GT] regression check" in str(m.get("content"))]
+    assert len(held) == 1 and "tests/test_config.py::test_limit" in str(held[0]["content"])
+    assert agent.gt_stats["regression_held"] == 1
+    checks = [row for event, row in events if event == "gt_regression_check"]
+    assert len(checks) == 1 and checks[0]["regressions"] == ["tests/test_config.py::test_limit"]
+
+
+def test_no_regression_means_no_hold(tmp_path, monkeypatch):
+    agent, events = _regression_agent(tmp_path, monkeypatch, [])
+    agent.run("task")
+    assert not any("[GT] regression check" in str(m.get("content")) for m in agent.messages)
+    assert agent.gt_stats.get("regression_held", 0) == 0
+
+
+def test_the_regression_gate_can_be_switched_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_REGRESSION_GATE", "0")
+    agent, events = _regression_agent(tmp_path, monkeypatch, ["tests/test_config.py::test_limit"])
+    agent.run("task")
+    assert not any("[GT] regression check" in str(m.get("content")) for m in agent.messages)
+    assert not any(event == "gt_regression_check" for event, _ in events)

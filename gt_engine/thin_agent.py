@@ -317,10 +317,58 @@ class GTAttachedAgent(DefaultAgent):
         try:
             review = self.gt_delivery.submit_review_once()
         except Exception:  # noqa: BLE001 - a review never costs the submit
-            return ""
+            review = ""
+        regression = self._regression_check_once()
+        text = "\n\n".join(part for part in (regression, review) if part)
         if review:
             self.gt_stats["submit_review_held"] += 1
-        return review
+        if regression:
+            self.gt_stats["regression_held"] = self.gt_stats.get("regression_held", 0) + 1
+        return text
+
+    def _regression_check_once(self) -> str:
+        """The repository's own tests, at the first submit only (gt_engine.regression_gate).
+        GT_REGRESSION_GATE=0 turns it off; any failure fails open."""
+        if getattr(self, "_gt_regression_done", False) or os.environ.get("GT_REGRESSION_GATE", "1") == "0":
+            return ""
+        self._gt_regression_done = True
+        try:
+            from gt_engine import regression_gate
+            from gt_engine.submit_review import changed_files_since
+
+            root = str(getattr(self.gt_adapter, "repo_root", "") or self.env.config.cwd or ".")
+            baseline = str(getattr(self.gt_delivery, "review_baseline", "") or "")
+            changed = changed_files_since(root, baseline) if baseline else []
+            reachable: list[str] = []
+            if changed:
+                try:
+                    from gt_engine.tool_server import _tests_by_reachability
+
+                    reachable = [str(row.get("file_path") or "") for row in
+                                 _tests_by_reachability(self.gt_delivery.session, changed)]
+                except Exception:  # noqa: BLE001 - reachability is optional; names still work
+                    reachable = []
+
+            def exists_at_start(path: str) -> bool:
+                done = subprocess.run(["git", "-c", "safe.directory=*", "-C", root, "cat-file", "-e",
+                                       f"{baseline}:{path}"], capture_output=True, timeout=15)
+                return done.returncode == 0
+
+            def execute(cmd: str) -> tuple[str, int]:
+                try:
+                    out = self.env.execute({"command": cmd}, timeout=regression_gate.RUN_TIMEOUT_SECONDS + 30)
+                except TypeError:  # an environment without the timeout keyword
+                    out = self.env.execute({"command": cmd})
+                return str(out.get("output", "")), int(out.get("returncode", 1) or 0)
+
+            result = regression_gate.check(root, baseline, changed, reachable, execute, exists_at_start)
+        except Exception as exc:  # noqa: BLE001 - the gate never costs the submit
+            self._journal("gt_regression_check", skipped=f"error:{type(exc).__name__}")
+            return ""
+        self.gt_stats["regression_seconds"] = result.seconds
+        self._journal("gt_regression_check", candidates=len(result.candidates), failing_now=len(result.failing_now),
+                      regressions=result.regressions[:20], skipped=result.skipped, seconds=result.seconds)
+        return result.message()
 
     def _timed_probe(self, fn):
         started = time.perf_counter()
