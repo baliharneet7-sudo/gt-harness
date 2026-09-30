@@ -9,7 +9,7 @@ runs (per-trial `result.json`, fetched without `gt-state`), and the same-model G
 
 | Benchmark | GT (per run) | Same-model GT-off (per run) | Net per-task effect |
 |---|---|---|---|
-| Terminal-Bench 2.0 (89) | 59, 55 (mean 57.0) | 56, 61, 53, 55, 59 (mean 56.8) | +0.23 tasks: at parity |
+| Terminal-Bench 2.0 (89) | 58, 60, 53, 59, 55 (mean 57.0; 285/444 = 64.2%) | 56, 61, 53, 55, 59 (mean 56.8; 284/438 = 64.8%) | at parity (pass@1 65.7 vs 65.8, pass@3 79.5 vs 77.5, 87 common tasks) |
 | DeepSWE (113), partial | 26/56 scored GT trials so far | campaign reps 2, 4 + run5 | +2.0 tasks over the 34 tasks GT has finished |
 
 GT does not lose TB2. The earlier "-7 to -11 vs 66/89" came from comparing against a different
@@ -59,7 +59,8 @@ no single row is statistically significant.
 
 Mechanisms found in the code (`D:\gt-attached`) and, where marked, in a trajectory:
 
-1. Submit review diffs against `git diff`; with no git repo (every TB2 task) every task literal is
+1. Submit review diffs against `git diff`; with no git repo (TB2 tasks without a repository; how many
+   is measured by the gated run's `gt_workspace_gate` journal events) every task literal is
    reported "[not in your changes]" and the agent is told to fix it. Seen in
    `qemu-startup` rep4: `[not in your changes: telnet 127.0.0.1 6665, alpine.iso]`.
 2. The stock "Recommended Workflow" is replaced by a code-repo workflow (`gt-query` first,
@@ -78,3 +79,14 @@ Mechanisms found in the code (`D:\gt-attached`) and, where marked, in a trajecto
 4. Index in the background; tools report "index building" until ready.
 
 Target: keep the hard-task wins above while bringing TB2 timeouts back to the baseline rate.
+
+Delivered in PR #50 (fix/gt-task-gating): the workflow part of item 1 (a code workspace = git
+repository with >= 20 source files, tracked or untracked); the submit review runs only when the
+task's starting commit exists (no repository, no git, a refused repository or an empty `git init`
+all mean no review, since the diff would be empty); gt-index at nice 19 against the CPU
+contention, with a `gt_thin_refresh` receipt per post-turn amend (seconds, graph_fresh,
+low_priority) to catch starvation. Not done by design: auto-injection stays on everywhere, and so
+does the setup-time prebuild: skipping it on no-repo workspaces only moved the build onto the
+agent's clock (the run's own build and 60 s wait), because the `[GT]` blocks still need the graph.
+Items 3 and 4 are not started.
+Validation: gated TB2 GT replicate r6, run 36663466222 (hbali-stack, commit 3cb94aa1).

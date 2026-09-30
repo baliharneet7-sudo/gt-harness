@@ -955,6 +955,7 @@ def _index_command(binary: str, root: str, output: str) -> list[str]:
 
 
 INDEX_NICE_ENV = "GT_INDEX_NICE"
+INDEX_NICE_LEVEL = 19
 
 
 def _low_priority(argv: list[str]) -> list[str]:
@@ -963,10 +964,20 @@ def _low_priority(argv: list[str]) -> list[str]:
     both arms) the agent's commands took p90 22.6 s per step with GT against
     8.6 s without. ``nice`` execs the binary, so the pid, process group and
     /proc readings are unchanged. GT_INDEX_NICE=0 turns it off."""
+    nice = _nice_binary()
+    return [nice, "-n", str(INDEX_NICE_LEVEL), *argv] if nice else argv
+
+
+def _nice_binary() -> str | None:
     if os.name == "nt" or os.environ.get(INDEX_NICE_ENV, "1").strip() == "0":
-        return argv
-    nice = shutil.which("nice")
-    return [nice, "-n", "19", *argv] if nice else argv
+        return None
+    return shutil.which("nice")
+
+
+def low_priority_active() -> bool:
+    """Whether gt-index launches are actually lowered (a container without
+    `nice` silently runs them at normal priority): recorded in receipts."""
+    return _nice_binary() is not None
 
 
 def _incremental_index_command(binary: str, root: str, output: str, relpath: str) -> list[str]:

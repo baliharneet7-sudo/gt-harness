@@ -432,8 +432,16 @@ class GTAttachedAgent(DefaultAgent):
         except Exception as exc:  # noqa: BLE001 - freshness never costs the run
             self._journal("gt_thin_refresh_fault", error=type(exc).__name__)
         finally:
-            self.gt_stats["refresh_seconds"] = self.gt_stats.get("refresh_seconds", 0.0) + (
-                time.perf_counter() - started)
+            elapsed = time.perf_counter() - started
+            self.gt_stats["refresh_seconds"] = self.gt_stats.get("refresh_seconds", 0.0) + elapsed
+            self.gt_stats["refresh_max_seconds"] = max(self.gt_stats.get("refresh_max_seconds", 0.0), elapsed)
+            # gt-index runs at nice 19 beside the agent's builds: a starved amend
+            # shows here as a long refresh that left the graph stale.
+            from gt_engine.indexer import low_priority_active
+
+            self._journal("gt_thin_refresh", seconds=round(elapsed, 3),
+                          graph_fresh=bool(getattr(adapter, "graph_fresh", False)),
+                          low_priority=low_priority_active())
 
     def _journal(self, event: str, **row: Any) -> None:
         store = getattr(self.gt_adapter, "store", None)

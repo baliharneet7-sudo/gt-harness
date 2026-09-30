@@ -321,3 +321,39 @@ def test_a_slow_index_build_never_delays_the_agent_s_start(tmp_path, monkeypatch
     events = (adapter.store.path).read_text(encoding="utf-8")
     assert "gt_thin_index_background" in events and "gt_thin_index_ready" not in events
     delivery.stop()
+
+
+
+def test_each_post_turn_refresh_leaves_a_receipt(tmp_path, monkeypatch):
+    """gt-index runs at nice 19 beside the agent's builds (PR #50): a starved
+    amend must show in receipts as a long refresh, with whether nice applied."""
+    import gt_engine.tool_server as tool_server
+
+    events = []
+    adapter = _adapter(tmp_path)
+    adapter.graph_fresh = False
+    adapter.store = SimpleNamespace(append=lambda event, **row: events.append((event, row)))
+    delivery = _Delivery()
+    delivery.session = SimpleNamespace()
+    agent = _agent(GTAttachedAgent, tmp_path, [["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]],
+                   delivery=delivery, adapter=adapter)
+
+    def amend(_session, **_kw):
+        time.sleep(0.05)
+        adapter.graph_fresh = True
+
+    monkeypatch.setattr(tool_server, "refresh_if_stale", amend)
+    agent._refresh_after_turn()
+
+    receipts = [row for event, row in events if event == "gt_thin_refresh"]
+    assert len(receipts) == 1
+    assert receipts[0]["seconds"] >= 0.05 and receipts[0]["graph_fresh"] is True
+    assert isinstance(receipts[0]["low_priority"], bool)
+    assert agent.gt_stats["refresh_max_seconds"] >= 0.05
+
+
+def test_low_priority_active_reports_the_env_switch(monkeypatch):
+    from gt_engine import indexer
+
+    monkeypatch.setenv(indexer.INDEX_NICE_ENV, "0")
+    assert indexer.low_priority_active() is False
