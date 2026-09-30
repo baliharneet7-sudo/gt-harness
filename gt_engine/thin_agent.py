@@ -391,7 +391,7 @@ class GTAttachedAgent(DefaultAgent):
         self.gt_stats["regression_seconds"] = result.seconds
         self._journal("gt_regression_check", candidates=len(result.candidates), failing_now=len(result.failing_now),
                       regressions=result.regressions[:20], skipped=result.skipped, seconds=result.seconds,
-                      runners=result.runners, changed=len(changed))
+                      runners=result.runners, changed=len(changed), note=result.note)
         return result.message()
 
     def _timed_probe(self, fn):

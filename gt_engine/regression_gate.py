@@ -46,9 +46,15 @@ _PY_TEST = re.compile(r"(^|/)(test_[^/]+|[^/]+_test)\.py$")
 _GO_TEST = re.compile(r"_test\.go$")
 _JS_TEST = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$")
 _PY_FAILED = re.compile(r"^(?:FAILED|ERROR) (\S+?::\S+?)(?: - |$)", re.M)
-_PY_SUMMARY = re.compile(r"=+ .*?\b(\d+ (?:passed|failed)|no tests ran)\b.*=+|^\d+ (?:passed|failed)", re.M)
+# A test file that no longer imports or collects: "ERROR tests/test_x.py - ImportError ..."
+_PY_FILE_ERROR = re.compile(r"^ERROR (\S+?\.py)(?: - |$)", re.M)
+_PY_SUMMARY = re.compile(r"=+ .*?\b(\d+ (?:passed|failed|errors?)|no tests ran)\b.*=+|^\d+ (?:passed|failed|errors?)", re.M)
 _GO_FAILED = re.compile(r"^\s*--- FAIL: (\S+)", re.M)
+_GO_BUILD_FAILED = re.compile(r"^FAIL\s+(\S+)\s+\[(?:build|setup) failed\]", re.M)
 _GO_RAN = re.compile(r"^(?:ok|FAIL|---)\s", re.M)
+_GO_TIMED_OUT = re.compile(r"panic: test timed out after")
+GO_TEST_TIMEOUT = "80s"  # go's own timeout, inside the outer one: failures found so far are still printed
+NOTE_CHARS = 600
 _JS_FAILED_FILE = re.compile(r"^\s*(?:FAIL|❯|×)\s+(\S+\.(?:test|spec)\.\w+)", re.M)
 _JS_RAN = re.compile(r"(Test Files|Tests:|Test Suites:)\s", re.M)
 
@@ -65,6 +71,7 @@ class RegressionResult:
     runners: list[str] = field(default_factory=list)
     skipped: str = ""
     seconds: float = 0.0
+    note: str = ""  # tail of the test output when no verdict was reached (journaled for diagnosis)
 
     def message(self) -> str:
         if not self.regressions:
@@ -169,16 +176,19 @@ def _pytest(execute: Execute, cwd: str, targets: list[str], pythonpath: str = ""
     output, _ = execute(cmd)
     timed_out = f"GT_RC={TIMED_OUT}" in output
     ran = bool(_PY_SUMMARY.search(output)) and "No module named pytest" not in output and not timed_out
-    return set(_PY_FAILED.findall(output)), ran, timed_out
+    failed = set(_PY_FAILED.findall(output)) | {f"{f} (does not import)" for f in _PY_FILE_ERROR.findall(output)}
+    return failed, ran, timed_out, output
 
 
 def _gotest(execute: Execute, cwd: str, packages: list[str], run: str = "") -> tuple[set[str], bool, bool]:
     flt = f" -run {_q(run)}" if run else ""
-    cmd = _bounded(cwd, f"timeout {RUN_TIMEOUT_SECONDS} go test -count=1{flt} "
+    cmd = _bounded(cwd, f"timeout {RUN_TIMEOUT_SECONDS} go test -count=1 -short -timeout {GO_TEST_TIMEOUT}{flt} "
                         f"{' '.join(_q('./' + p) for p in packages)}")
     output, _ = execute(cmd)
-    timed_out = f"GT_RC={TIMED_OUT}" in output
-    return set(_GO_FAILED.findall(output)), bool(_GO_RAN.search(output)) and not timed_out, timed_out
+    failed = set(_GO_FAILED.findall(output)) | {f"{p} (does not build)" for p in _GO_BUILD_FAILED.findall(output)}
+    # A timed-out run with failures found before the timeout still has something to check.
+    timed_out = (f"GT_RC={TIMED_OUT}" in output or bool(_GO_TIMED_OUT.search(output))) and not failed
+    return failed, bool(_GO_RAN.search(output)) and not timed_out, timed_out, output
 
 
 def js_runner(package_json: str) -> str:
@@ -205,7 +215,7 @@ def _jstest(execute: Execute, cwd: str, runner: str, files: list[str]) -> tuple[
     timed_out = f"GT_RC={TIMED_OUT}" in output
     failed = {m.lstrip("./") for m in _JS_FAILED_FILE.findall(output)}
     return {f for f in files if any(f.endswith(x) or x.endswith(f) for x in failed)}, \
-        bool(_JS_RAN.search(output)) and not timed_out, timed_out
+        bool(_JS_RAN.search(output)) and not timed_out, timed_out, output
 
 
 def js_packages(js_files: list[str], package_json_at: Callable[[str], str]) -> dict[str, tuple[str, list[str]]]:
@@ -252,16 +262,18 @@ def check(root: str, baseline: str, changed: list[str], reachable: list[str], ex
         py_targets = [f"{f}::{t}" for f in py for t in ids.get(f, [])][:MAX_TEST_IDS] or py
         now: dict[str, set[str]] = {}
         ran_any = False
+        last_output = ""
         def js_now():
-            failed_all, ran_all, timed = set(), False, False
+            failed_all, ran_all, timed, outputs = set(), False, False, []
             for pkg, (runner, rel) in js_groups.items():
-                failed, ran, timed_out = _jstest(execute, f"{root}/{pkg}" if pkg else root, runner, rel)
+                failed, ran, timed_out, output = _jstest(execute, f"{root}/{pkg}" if pkg else root, runner, rel)
                 failed_all |= {f"{pkg}/{x}" if pkg else x for x in failed}
                 ran_all |= ran
                 timed |= timed_out
+                outputs.append(output)
                 if timed_out:
                     break
-            return failed_all, ran_all, timed
+            return failed_all, ran_all, timed, "\n".join(outputs)
 
         for kind, run in (("pytest", lambda: _pytest(execute, root, py_targets) if py else None),
                           ("go", lambda: _gotest(execute, root, pkgs) if pkgs else None),
@@ -269,10 +281,12 @@ def check(root: str, baseline: str, changed: list[str], reachable: list[str], ex
             got = run()
             if got is None:
                 continue
-            failed, ran, timed_out = got
+            failed, ran, timed_out, output = got
+            last_output = output
             result.runners.append(kind + (":timeout" if timed_out else ""))
             if timed_out:
                 result.skipped = "timeout"
+                result.note = output[-NOTE_CHARS:]
                 return result  # a slow suite costs the agent once, never twice
             ran_any |= ran
             if failed:
@@ -280,6 +294,8 @@ def check(root: str, baseline: str, changed: list[str], reachable: list[str], ex
         result.failing_now = sorted(n for s in now.values() for n in s)
         if not result.failing_now:
             result.skipped = "all_pass" if ran_any else "tests_did_not_run"
+            if not ran_any:
+                result.note = last_output[-NOTE_CHARS:]
             return result
         # Same tests on a clean copy of the start commit; the agent's tree is not touched.
         link_modules = "".join(
@@ -293,13 +309,15 @@ def check(root: str, baseline: str, changed: list[str], reachable: list[str], ex
             return result
         regressions: list[str] = []
         if "pytest" in now:
-            base_failed, base_ran, _t = _pytest(execute, BASE_COPY, sorted(now["pytest"]),
-                                                pythonpath=f"{BASE_COPY}:{BASE_COPY}/src")
+            targets = sorted({n.split(" (")[0] for n in now["pytest"]})
+            base_failed, base_ran, _t, _o = _pytest(execute, BASE_COPY, targets,
+                                                    pythonpath=f"{BASE_COPY}:{BASE_COPY}/src")
             if base_ran:
                 regressions += sorted(now["pytest"] - base_failed)
         if "go" in now:
-            names = "|".join(re.escape(n.split("/")[0]) for n in sorted(now["go"]))
-            base_failed, base_ran, _t = _gotest(execute, BASE_COPY, pkgs, run=f"^({names})$")
+            tests = sorted(n for n in now["go"] if not n.endswith("(does not build)"))
+            run_filter = "^(" + "|".join(re.escape(n.split("/")[0]) for n in tests) + ")$" if tests else "^$"
+            base_failed, base_ran, _t, _o = _gotest(execute, BASE_COPY, pkgs, run=run_filter)
             if base_ran:
                 regressions += sorted(now["go"] - base_failed)
         if "js" in now:
@@ -309,7 +327,7 @@ def check(root: str, baseline: str, changed: list[str], reachable: list[str], ex
                     continue
                 rel = [f[len(pkg) + 1:] if pkg else f for f in mine]
                 base_dir = f"{BASE_COPY}/{pkg}" if pkg else BASE_COPY
-                base_failed, base_ran, _t = _jstest(execute, base_dir, runner, rel)
+                base_failed, base_ran, _t, _o = _jstest(execute, base_dir, runner, rel)
                 if base_ran:
                     regressions += sorted(f for f, r in zip(mine, rel) if r not in base_failed)
         result.regressions = regressions

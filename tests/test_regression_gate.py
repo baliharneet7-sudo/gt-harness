@@ -396,3 +396,58 @@ def test_a_monorepo_js_regression_runs_in_its_package(tmp_path):
     assert result.regressions == ["drizzle-orm/tests/sql.test.ts"]
     assert f"{root.as_posix()}/drizzle-orm" in cmds[0] and "vitest run" in cmds[0]
     assert "drizzle-orm/node_modules" in cmds[1]
+
+
+# -- v4: import/build failures are regressions; go -short/-timeout; output tails ---------
+
+def test_a_change_that_breaks_an_import_is_a_regression(tmp_path):
+    """numba/skrub in run 36690124216 read 'tests_did_not_run' in seconds: pytest collection
+    errors ("1 error") were not recognised. A file that imported at the start and does not
+    now is exactly a regression."""
+    root, base = _repo(tmp_path)
+    (root / "pkg" / "config.py").write_text("def limit(:\n    return 10\n", encoding="utf-8")  # syntax error
+
+    result = check(root.as_posix(), base, ["pkg/config.py"], [], _execute(), _exists(root, base))
+
+    assert result.regressions == ["tests/test_config.py (does not import)"], result
+    assert "does not import" in result.message()
+
+
+def test_a_go_package_that_stops_building_is_a_regression(tmp_path):
+    root, base = _repo(tmp_path)
+    outputs = iter([
+        "GT_RC=1\n# ex.com/p/parser\nparser/parse.go:3:1: syntax error\nFAIL\tex.com/p/parser [build failed]\n",
+        "GT_BASE_READY\n",
+        "GT_RC=0\nok  \tex.com/p/parser\t0.01s [no tests to run]\n",
+    ])
+    cmds = []
+
+    def fake(cmd):
+        cmds.append(cmd)
+        return next(outputs), 0
+
+    result = check(root.as_posix(), base, ["parser/parse.go"], [], fake, lambda p: False,
+                   go_has_tests=lambda pkg: pkg == "parser")
+    assert result.regressions == ["ex.com/p/parser (does not build)"]
+    assert "-short" in cmds[0] and "-timeout 80s" in cmds[0]
+
+
+def test_go_failures_found_before_a_timeout_are_still_checked(tmp_path):
+    root, base = _repo(tmp_path)
+    outputs = iter([
+        "GT_RC=1\n--- FAIL: TestParse (0.01s)\npanic: test timed out after 80s\nFAIL\tex.com/p/parser\t80.0s\n",
+        "GT_BASE_READY\n",
+        "GT_RC=0\nok  \tex.com/p/parser\t0.02s\n",
+    ])
+    result = check(root.as_posix(), base, ["parser/parse.go"], [], lambda c: (next(outputs), 0), lambda p: False,
+                   go_has_tests=lambda pkg: pkg == "parser")
+    assert result.regressions == ["TestParse"]
+
+
+def test_no_verdict_keeps_an_output_tail(tmp_path):
+    root, base = _repo(tmp_path)
+    (root / "pkg" / "config.py").write_text("x = 1\n", encoding="utf-8")
+    result = check(root.as_posix(), base, ["pkg/config.py"], [],
+                   lambda c: ("GT_RC=4\nERROR: usage: pytest [options] -- unrecognized arguments: --no-header\n", 0),
+                   _exists(root, base))
+    assert result.skipped == "tests_did_not_run" and "unrecognized arguments" in result.note
